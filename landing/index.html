@@ -173,6 +173,60 @@ footer{position:relative;z-index:2;margin-top:120px;border-top:1px solid var(--l
 .reveal{opacity:0;transform:translateY(26px);transition:.7s cubic-bezier(.2,.7,.2,1)}
 .reveal.in{opacity:1;transform:none}
 
+/* ── token ticker (live strip) ── */
+.ticker{position:relative;z-index:2;overflow:hidden;border-block:1px solid var(--line);
+  -webkit-mask:linear-gradient(90deg,transparent,#000 7%,#000 93%,transparent);
+  mask:linear-gradient(90deg,transparent,#000 7%,#000 93%,transparent)}
+.tk-track{display:flex;width:max-content;animation:scroll 40s linear infinite}
+.ticker:hover .tk-track{animation-play-state:paused}
+.tk{display:flex;align-items:center;gap:9px;padding:14px 24px;border-right:1px solid var(--line);font-size:13.5px;white-space:nowrap}
+.tk .av{width:22px;height:22px;border-radius:6px;display:grid;place-items:center;font-size:10px;font-weight:700;color:#fff}
+.tk b{font-weight:600}.tk .pr{color:var(--muted)}
+@keyframes scroll{to{transform:translateX(-50%)}}
+
+/* ── auth buttons ── */
+.authbtn{display:flex;align-items:center;gap:13px;width:100%;padding:14px 16px;border-radius:14px;border:1px solid var(--line2);
+  background:rgba(0,0,0,.18);cursor:pointer;transition:.2s;color:var(--text);font-family:inherit;font-size:14.5px;font-weight:600;text-align:left}
+.authbtn:hover{border-color:var(--violet2);background:var(--glass);transform:translateY(-1px)}
+.authbtn .gi{width:24px;height:24px;display:grid;place-items:center;flex-shrink:0}
+.authbtn small{display:block;color:var(--muted);font-weight:400;font-size:12px;margin-top:1px}
+.divider{display:flex;align-items:center;gap:12px;color:var(--dim);font-size:12px;margin:16px 0}
+.divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--line)}
+
+/* ── terminal ── */
+.term{position:fixed;inset:0;z-index:90;background:var(--bg);display:none;flex-direction:column;opacity:0;transition:.35s}
+.term.on{display:flex;opacity:1}
+.term .bg-loc{position:absolute;inset:0;z-index:0;overflow:hidden;pointer-events:none}
+.term-bar{position:relative;z-index:2;display:flex;align-items:center;gap:14px;padding:13px 22px;border-bottom:1px solid var(--line);background:rgba(12,10,22,.55);backdrop-filter:blur(20px)}
+.term-bar .search{flex:1;max-width:360px;display:flex;align-items:center;gap:9px;background:rgba(0,0,0,.25);border:1px solid var(--line2);border-radius:11px;padding:9px 13px;color:var(--muted)}
+.term-bar .search input{flex:1;background:none;border:none;color:var(--text);font-family:inherit;font-size:13.5px;outline:none}
+.chip{display:flex;align-items:center;gap:8px;padding:9px 13px;border-radius:11px;border:1px solid var(--line2);font-size:13px;font-weight:600;background:var(--glass)}
+.chip .g{color:#5be0a0;font-size:9px}
+.term-body{position:relative;z-index:2;flex:1;display:grid;grid-template-columns:60px 1fr;overflow:hidden}
+.term-rail{border-right:1px solid var(--line);padding:16px 0;display:flex;flex-direction:column;align-items:center;gap:12px}
+.term-rail .ri{width:40px;height:40px;border-radius:12px;display:grid;place-items:center;color:var(--dim);cursor:pointer;transition:.2s}
+.term-rail .ri:hover{color:var(--text);background:var(--glass)}
+.term-rail .ri.on{background:linear-gradient(140deg,var(--violet),var(--violet2));color:#fff}
+.term-main{overflow:auto;padding:26px 30px}
+.term-main h2{text-align:left;font-size:24px;margin:0 0 4px}
+.tt{width:100%;border-collapse:collapse;margin-top:18px;border:1px solid var(--line);border-radius:16px;overflow:hidden}
+.tt th{text-align:left;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:600;padding:13px 16px;border-bottom:1px solid var(--line)}
+.tt td{padding:13px 16px;border-bottom:1px solid var(--line);font-size:14px}
+.tt tr:last-child td{border-bottom:none}
+.tt tbody tr:hover td{background:var(--glass)}
+.tt .tok{display:flex;align-items:center;gap:11px;font-weight:600}
+.tt .av{width:32px;height:32px;border-radius:9px;display:grid;place-items:center;font-size:11px;font-weight:700;color:#fff}
+.bbtn{background:linear-gradient(135deg,var(--violet),var(--violet2));border:none;color:#fff;font-family:inherit;font-weight:600;font-size:13px;padding:9px 20px;border-radius:99px;cursor:pointer;transition:.2s}
+.bbtn:hover{transform:translateY(-1px);box-shadow:0 10px 24px -6px rgba(123,92,255,.7)}
+.buyrow{display:flex;align-items:center;justify-content:space-between;padding:11px 0;border-bottom:1px solid var(--line);font-size:14px}
+.buyrow:last-of-type{border-bottom:none}.buyrow .muted{color:var(--muted)}
+.amt{display:flex;align-items:center;gap:10px;background:rgba(0,0,0,.25);border:1px solid var(--line2);border-radius:12px;padding:6px 6px 6px 15px;margin-top:8px}
+.amt input{flex:1;min-width:0;background:none;border:none;color:var(--text);font-family:inherit;font-size:20px;font-weight:700;outline:none}
+.amt .max{font-size:12px;font-weight:600;color:var(--violet2);background:var(--glass);border:1px solid var(--line2);padding:7px 12px;border-radius:9px;cursor:pointer}
+.seg{display:flex;gap:7px;margin-top:10px}
+.seg button{flex:1;background:var(--glass);border:1px solid var(--line2);color:var(--muted);font-family:inherit;font-size:13px;font-weight:600;padding:9px;border-radius:10px;cursor:pointer;transition:.2s}
+.seg button.on{background:linear-gradient(135deg,var(--violet),var(--violet2));color:#fff;border:none}
+
 /* ── onboarding modal ── */
 .scrim{position:fixed;inset:0;z-index:100;background:rgba(6,5,12,.6);backdrop-filter:blur(8px);
   display:none;align-items:center;justify-content:center;padding:24px;opacity:0;transition:.3s}
@@ -288,27 +342,30 @@ footer{position:relative;z-index:2;margin-top:120px;border-top:1px solid var(--l
       </div>
       <div class="rows glass">
         <div class="row">
-          <span class="tok"><span class="av" style="background:linear-gradient(140deg,#7b5cff,#9a82ff)">CC</span> CLEANCAT</span>
-          <span class="muted col-hide">$0.0021</span>
-          <span class="up">+184%</span>
+          <span class="tok"><span class="av" style="background:linear-gradient(140deg,#f7a531,#9a82ff)">BO</span> BONK</span>
+          <span class="muted col-hide">$0.00002341</span>
+          <span class="up">+12.4%</span>
           <span class="pill buy">Tap to ape</span>
         </div>
         <div class="row">
-          <span class="tok"><span class="av" style="background:linear-gradient(140deg,#5be0a0,#3aa)">GD</span> GOODDOG</span>
-          <span class="muted col-hide">$0.0008</span>
-          <span class="up">+62%</span>
+          <span class="tok"><span class="av" style="background:linear-gradient(140deg,#9a82ff,#7b5cff)">WI</span> WIF</span>
+          <span class="muted col-hide">$2.41</span>
+          <span class="up">+5.2%</span>
           <span class="pill buy">Tap to ape</span>
         </div>
         <div class="row">
-          <span class="tok"><span class="av" style="background:linear-gradient(140deg,#ff7b9c,#c34)">RG</span> RUGPULL</span>
-          <span class="muted col-hide">$0.0009</span>
-          <span class="down">honeypot</span>
-          <span class="pill">Filtered</span>
+          <span class="tok"><span class="av" style="background:linear-gradient(140deg,#5be0a0,#2e9e7a)">PO</span> POPCAT</span>
+          <span class="muted col-hide">$1.18</span>
+          <span class="down">−3.1%</span>
+          <span class="pill buy">Tap to ape</span>
         </div>
       </div>
     </div>
   </div>
 </div></div>
+
+<!-- LIVE TICKER -->
+<div class="ticker" style="margin-top:200px"><div class="tk-track" id="tkTrack"></div></div>
 
 <!-- FEATURES -->
 <section class="block" id="features"><div class="wrap">
@@ -361,6 +418,44 @@ footer{position:relative;z-index:2;margin-top:120px;border-top:1px solid var(--l
   <div class="fl"><a href="#features">Product</a><a href="#how">How it works</a><a href="#stats">Stats</a><a href="#">Docs</a><a href="#">X</a></div>
   <span class="muted">© 2026 abc. Trade at your own risk.</span>
 </div></footer>
+
+<!-- ── TERMINAL ── -->
+<div class="term" id="term">
+  <div class="bg-loc"><div class="aurora b" style="bottom:-72%"></div><div class="horizon" style="bottom:0"></div></div>
+  <div class="term-bar">
+    <span class="brand" style="font-size:16px"><span class="mark" style="width:26px;height:26px;border-radius:7px" id="logoT"></span><b>abc<span style="color:var(--lilac)">.</span></b></span>
+    <div class="search"><span id="si"></span><input placeholder="Search tokens or paste a mint…" oninput="filterTok(this.value)"></div>
+    <span style="flex:1"></span>
+    <span class="chip" id="walletChip">Demo wallet</span>
+    <span class="chip"><span class="g">●</span> <span id="balChip">12.00 SOL</span></span>
+    <span class="idot" id="closeT" onclick="closeTerm()" style="cursor:pointer"></span>
+  </div>
+  <div class="term-body">
+    <div class="term-rail">
+      <span class="ri on" id="tr1"></span><span class="ri" id="tr2"></span><span class="ri" id="tr3"></span><span class="ri" id="tr4"></span>
+    </div>
+    <div class="term-main">
+      <h2>Top memecoins</h2>
+      <p class="muted" style="text-align:left;margin:0;font-size:14px">Screened live · rugs already filtered · tap Buy to ape. Position size &amp; stop are pre-set from your risk profile.</p>
+      <table class="tt"><thead><tr><th>Token</th><th>Price</th><th>24h</th><th>Liquidity</th><th></th></tr></thead><tbody id="ttbody"></tbody></table>
+    </div>
+  </div>
+</div>
+
+<!-- buy modal -->
+<div class="scrim" id="buyscrim"><div class="modal glass" style="width:430px">
+  <div class="mhead"><span class="brand" style="font-size:16px"><span class="mark" style="width:24px;height:24px;border-radius:7px" id="logoB"></span><b>Buy <span id="buySym" style="color:var(--lilac)"></span></b></span><span class="x" id="xb" onclick="closeBuy()"></span></div>
+  <div class="mbody" style="min-height:auto;padding-top:18px;padding-bottom:8px">
+    <div class="buyrow"><span class="muted">Price</span><span id="buyPrice"></span></div>
+    <div class="buyrow"><span class="muted">24h change</span><span id="buyChg"></span></div>
+    <label style="font-size:12.5px;color:var(--muted);display:block;margin-top:16px;font-weight:500">You pay</label>
+    <div class="amt"><input id="buyAmt" type="number" value="0.5" step="0.1" min="0" oninput="estOut()"><span style="color:var(--muted);font-weight:600">SOL</span><span class="max" onclick="maxOut()">MAX</span></div>
+    <div class="seg"><button onclick="setAmt(0.25)">0.25</button><button class="on" onclick="setAmt(0.5)">0.5</button><button onclick="setAmt(1)">1</button><button onclick="setAmt(2)">2</button></div>
+    <div class="buyrow" style="margin-top:16px"><span class="muted">Est. receive</span><span id="estR">—</span></div>
+    <div class="buyrow"><span class="muted">Max slippage</span><span>1%</span></div>
+  </div>
+  <div class="mfoot"><span class="grow"></span><button class="btn btn-white btn-lg" id="confirmBuy" onclick="doBuy()">Confirm buy</button></div>
+</div></div>
 
 <!-- ── ONBOARDING ── -->
 <div class="scrim" id="scrim">
@@ -415,40 +510,128 @@ addEventListener('scroll',()=>document.getElementById('nav').classList.toggle('s
 const io=new IntersectionObserver((es)=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}}),{threshold:.12});
 document.querySelectorAll('.reveal').forEach((el,i)=>{el.style.transitionDelay=(i%4*60)+'ms';io.observe(el)});
 
-/* ── onboarding flow (A · B · C) ── */
-let step=0;
-const state={mode:'demo',risk:1.0,stop:35};
-const steps=[
-  ()=>`<div class="step-letter">A</div><h3>Connect</h3><p>Run the demo with mock data, or paste your GMGN key to trade live. Keys go to your machine only — never to us.</p>
-    <div class="opts">
-      <div class="opt ${state.mode==='demo'?'sel':''}" onclick="pick('demo')"><span class="oi">${ic.play}</span><div><h4>Try the demo</h4><small>Mock data · no key · zero risk</small></div><span class="check">${ic.check}</span></div>
-      <div class="opt ${state.mode==='live'?'sel':''}" onclick="pick('live')"><span class="oi">${ic.key}</span><div><h4>Connect a key</h4><small>Live market data · your keys stay local</small></div><span class="check">${ic.check}</span></div>
-    </div>
-    ${state.mode==='live'?`<div class="field"><label>GMGN API key</label><input type="password" placeholder="paste your key…" id="keyin" value="${state._key||''}" oninput="state._key=this.value"></div>`:''}`,
-  ()=>`<div class="step-letter">B</div><h3>Set your risk</h3><p>abc sizes every trade for you. Tell it how hard to go and where to bail — you can change this anytime.</p>
-    <div class="slider"><label style="font-size:12.5px;color:var(--muted)">Max per trade</label><div class="v">${state.risk.toFixed(2)} SOL</div>
-      <input type="range" min="0.05" max="5" step="0.05" value="${state.risk}" oninput="state.risk=+this.value;document.querySelectorAll('.slider .v')[0].textContent=state.risk.toFixed(2)+' SOL'"></div>
-    <div class="slider" style="margin-top:22px"><label style="font-size:12.5px;color:var(--muted)">Hard stop-loss</label><div class="v">−${state.stop}%</div>
-      <input type="range" min="10" max="60" step="1" value="${state.stop}" oninput="state.stop=+this.value;document.querySelectorAll('.slider .v')[1].textContent='−'+state.stop+'%'"></div>`,
-  ()=>`<div class="done"><div class="ring"><div class="c">${ic.checkbig}</div></div>
-    <div class="step-letter" style="font-size:40px">C</div><h3 style="margin-top:6px">You're set</h3>
-    <p>Mode: <b style="color:var(--text)">${state.mode==='demo'?'Demo':'Live'}</b> · ${state.risk.toFixed(2)} SOL max · −${state.stop}% stop.<br>The board is scanning. Survivors are waiting.</p></div>`,
+/* ── extra icons (auth + terminal) ── */
+Object.assign(ic,{
+ google:'<svg viewBox="0 0 24 24" width="20"><path fill="#4285F4" d="M22 12.2c0-.7-.1-1.4-.2-2H12v3.9h5.6a4.8 4.8 0 0 1-2.1 3.1v2.6h3.4C20.8 18 22 15.4 22 12.2z"/><path fill="#34A853" d="M12 23c2.7 0 5-.9 6.6-2.4l-3.4-2.6c-.9.6-2.1 1-3.2 1-2.5 0-4.6-1.7-5.4-4H3.1v2.6A10 10 0 0 0 12 23z"/><path fill="#FBBC05" d="M6.6 14.9a6 6 0 0 1 0-3.8V8.5H3.1a10 10 0 0 0 0 9z"/><path fill="#EA4335" d="M12 5.4c1.5 0 2.8.5 3.8 1.5l2.9-2.9A10 10 0 0 0 3.1 8.5l3.5 2.6c.8-2.3 2.9-4 5.4-4z"/></svg>',
+ phantom:'<svg viewBox="0 0 24 24" width="22"><rect width="24" height="24" rx="6" fill="#AB9FF2"/><path fill="#fff" d="M18.6 12.1c0 3-2.7 5.4-5.8 5.4C9 17.5 6.1 14.4 6.1 14.4s1 1.3 2.7 1.3c1.5 0 2.2-1 2.2-2 0-1.3-1-1.7-1-2.7 0-.7.5-1.3 1.2-1.3s1.3.6 1.3 1.5c0 .5.3.9.8.9.6 0 1-.6 1-1.5 0-2.1-1.8-3.8-4.2-3.8-2.7 0-4.9 2.1-4.9 5H6.2c0-3.5 2.8-6.2 6.4-6.2 3.4 0 6 2.8 6 6.3z"/></svg>',
+ twitter:'<svg viewBox="0 0 24 24" width="17" fill="#fff"><path d="M17.5 3h3l-6.6 7.5L22 21h-6l-4.3-5.6L6.7 21H3.6l7.1-8L2.5 3h6.2l3.8 5.1zm-1 16h1.7L8 4.8H6.2z"/></svg>',
+ mail:'<svg viewBox="0 0 24 24" width="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m4 7 8 6 8-6"/></svg>',
+ search:'<svg viewBox="0 0 24 24" width="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg>',
+ close:'<svg viewBox="0 0 24 24" width="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+ fire:'<svg viewBox="0 0 24 24" width="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3s4.5 3.4 4.5 7.5a4.5 4.5 0 0 1-9 0c0-1 .3-1.8.9-2.6C8.7 9.4 9 7.2 8 6c3 .4 4-1.2 4-3z"/></svg>',
+});
+
+/* ── token universe: real top memecoins (static demo prices; SOL mints) ── */
+const SOL_USD=180;
+const TOK=[
+ {s:'BONK',n:'Bonk',p:0.00002341,c:+12.4,liq:'$48.2M',av:'#f7a531',addr:'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263'},
+ {s:'WIF',n:'dogwifhat',p:2.41,c:+5.2,liq:'$112M',av:'#9a82ff',addr:'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm'},
+ {s:'POPCAT',n:'Popcat',p:1.18,c:-3.1,liq:'$74.5M',av:'#5be0a0',addr:'7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr'},
+ {s:'PNUT',n:'Peanut the Squirrel',p:0.92,c:+18.7,liq:'$61.0M',av:'#ff9f43',addr:'2qEHjDLDLbuBgRYvsxhc5D6uDWAivNFZGan56P1tpump'},
+ {s:'GIGA',n:'Gigachad',p:0.041,c:+7.9,liq:'$33.8M',av:'#7b5cff',addr:'63LfDmNb3MQ8mw9MtZ2To9bEA2M71kZUUGq5tiJxcqj9'},
+ {s:'MEW',n:'cat in a dogs world',p:0.0081,c:-2.4,liq:'$28.1M',av:'#ff7b9c',addr:'MEW1gQWJ3nEXg2qgERiKu7FAFj79PHvQVREQUzScPP5'},
+ {s:'FARTCOIN',n:'Fartcoin',p:1.32,c:+24.1,liq:'$98.7M',av:'#b9a7ff',addr:'9BB6NFEcjBCtnNLFko2FqVQBq8HHM13kCyYcdQbgpump'},
+ {s:'MOODENG',n:'Moo Deng',p:0.214,c:+9.3,liq:'$41.2M',av:'#ffd166',addr:'ED5nyyWEzpPPiWimP8vYm7sD7TD3LAt3Q3gRTWHzPJBY'},
 ];
-const labels=['Continue','Continue','Launch terminal →'];
+const fmt=(p)=> p<0.001 ? '$'+p.toFixed(8) : '$'+p.toLocaleString(undefined,{maximumFractionDigits:p<1?4:2});
+const avT=(t,sz)=>`<span class="av" style="background:linear-gradient(140deg,${t.av},#9a82ff);width:${sz||22}px;height:${sz||22}px;border-radius:${sz?9:6}px;font-size:${sz?11:10}px">${t.s.slice(0,2)}</span>`;
+const chgT=(c)=>`<span class="${c>=0?'up':'down'}">${c>=0?'+':'−'}${Math.abs(c)}%</span>`;
+
+/* ── live ticker ── */
+(function(){const el=document.getElementById('tkTrack');if(!el)return;
+ el.innerHTML=[...TOK,...TOK].map(t=>`<div class="tk">${avT(t)}<b>${t.s}</b> <span class="pr">${fmt(t.p)}</span> ${chgT(t.c)}</div>`).join('');})();
+
+/* ── onboarding flow (A=get in · B=risk · C=launch) ── */
+let step=0;
+const state={auth:null,risk:1.0,stop:35,wallet:null};
+const steps=[
+ ()=>`<div class="step-letter">A</div><h3>Get in</h3><p>No API keys, no seed phrases shared with us. Pick how you sign in — abc is non-custodial, your funds stay yours.</p>
+   <div class="opts" style="margin-top:18px">
+     <button class="authbtn" onclick="auth('google')"><span class="gi">${ic.google}</span><span>Continue with Google</span></button>
+     <button class="authbtn" onclick="auth('phantom')"><span class="gi">${ic.phantom}</span><span>Connect Phantom<small id="phs">Solana wallet — connects on-device</small></span></button>
+     <button class="authbtn" onclick="auth('twitter')"><span class="gi">${ic.twitter}</span><span>Continue with X</span></button>
+     <button class="authbtn" onclick="auth('email')"><span class="gi">${ic.mail}</span><span>Sign up with email</span></button>
+   </div>
+   <div class="divider">or</div>
+   <button class="authbtn" style="justify-content:center" onclick="auth('demo')"><span class="gi">${ic.play}</span><span>Just explore the demo</span></button>`,
+ ()=>`<div class="step-letter">B</div><h3>Set your risk</h3><p>abc sizes every trade for you. Tell it how hard to go and where to bail — change it anytime in the terminal.</p>
+   <div class="slider"><label style="font-size:12.5px;color:var(--muted)">Max per trade</label><div class="v">${state.risk.toFixed(2)} SOL</div>
+     <input type="range" min="0.05" max="5" step="0.05" value="${state.risk}" oninput="state.risk=+this.value;document.querySelectorAll('.slider .v')[0].textContent=state.risk.toFixed(2)+' SOL'"></div>
+   <div class="slider" style="margin-top:22px"><label style="font-size:12.5px;color:var(--muted)">Hard stop-loss</label><div class="v">−${state.stop}%</div>
+     <input type="range" min="10" max="60" step="1" value="${state.stop}" oninput="state.stop=+this.value;document.querySelectorAll('.slider .v')[1].textContent='−'+state.stop+'%'"></div>`,
+ ()=>`<div class="done"><div class="ring"><div class="c">${ic.checkbig}</div></div>
+   <div class="step-letter" style="font-size:40px">C</div><h3 style="margin-top:6px">You're in</h3>
+   <p>Signed in via <b style="color:var(--text)">${({google:'Google',phantom:'Phantom',twitter:'X',email:'Email',demo:'Demo'})[state.auth]||'Demo'}</b>${state.wallet?` · ${state.wallet.slice(0,4)}…${state.wallet.slice(-4)}`:''}<br>${state.risk.toFixed(2)} SOL max · −${state.stop}% stop. The board is scanning — survivors are waiting.</p></div>`,
+];
+const labels=['','Continue','Enter terminal →'];
 function render(){
   document.getElementById('mbody').innerHTML=steps[step]();
   document.querySelectorAll('.prog i').forEach((e,i)=>e.classList.toggle('on',i<=step));
   document.getElementById('back').style.visibility=step?'visible':'hidden';
+  document.getElementById('next').style.display=step===0?'none':'inline-block';
   document.getElementById('next').textContent=labels[step];
 }
-function pick(m){state.mode=m;render()}
-function next(){ if(step<2){step++;render()} else {closeOb();flash()} }
+async function auth(p){
+  state.auth=p;
+  if(p==='phantom'){
+    try{ const r=await window.solana.connect(); state.wallet=r.publicKey.toString(); }
+    catch(e){ const ph=document.getElementById('phs'); if(ph){ph.textContent='Phantom not found — install it at phantom.app';ph.style.color='var(--violet2)';} return; }
+  }
+  step=1; render();
+}
+function next(){ if(step<2){step++;render()} else {closeOb();openTerm()} }
 function prev(){ if(step>0){step--;render()} }
 function openOb(){step=0;render();document.getElementById('scrim').classList.add('on')}
 function closeOb(){document.getElementById('scrim').classList.remove('on')}
 document.getElementById('scrim').addEventListener('click',e=>{if(e.target.id==='scrim')closeOb()});
-addEventListener('keydown',e=>{if(e.key==='Escape')closeOb()});
+addEventListener('keydown',e=>{if(e.key==='Escape'){closeOb();closeBuy()}});
 set('playbtn','<span style="display:inline-flex;align-items:center;gap:8px">'+ic.play+' See how it works</span>');
+
+/* ── terminal ── */
+let curTok=null, maxBal=12.0;
+function openTerm(){
+  renderTok(TOK);
+  const w=document.getElementById('walletChip');
+  w.textContent = state.wallet ? (state.wallet.slice(0,4)+'…'+state.wallet.slice(-4))
+                : ({google:'Google account',twitter:'X account',email:'Email account',demo:'Demo wallet'})[state.auth]||'Account';
+  document.getElementById('term').classList.add('on');
+  document.body.style.overflow='hidden';
+}
+function closeTerm(){document.getElementById('term').classList.remove('on');document.body.style.overflow=''}
+function renderTok(list){
+  document.getElementById('ttbody').innerHTML=list.map(t=>`<tr>
+    <td><span class="tok">${avT(t,32)}<span>${t.s}<br><small class="muted" style="font-weight:400">${t.n}</small></span></span></td>
+    <td>${fmt(t.p)}</td><td>${chgT(t.c)}</td><td class="muted">${t.liq}</td>
+    <td style="text-align:right"><button class="bbtn" onclick="openBuy('${t.s}')">Buy</button></td></tr>`).join('');
+}
+function filterTok(q){q=q.toLowerCase().trim();renderTok(TOK.filter(t=>!q||t.s.toLowerCase().includes(q)||t.n.toLowerCase().includes(q)||t.addr.toLowerCase().includes(q)))}
+function openBuy(sym){curTok=TOK.find(t=>t.s===sym);document.getElementById('buySym').textContent=curTok.s;
+  document.getElementById('buyPrice').textContent=fmt(curTok.p);document.getElementById('buyChg').innerHTML=chgT(curTok.c);
+  setAmt(0.5);document.getElementById('buyscrim').classList.add('on')}
+function closeBuy(){document.getElementById('buyscrim').classList.remove('on')}
+function setAmt(v){document.getElementById('buyAmt').value=v;document.querySelectorAll('.seg button').forEach(b=>b.classList.toggle('on',parseFloat(b.textContent)===v));estOut()}
+function maxOut(){setAmt(maxBal)}
+function estOut(){const a=parseFloat(document.getElementById('buyAmt').value)||0;const r=curTok&&curTok.p>0?(a*SOL_USD/curTok.p):0;
+  document.getElementById('estR').textContent=r?Math.round(r).toLocaleString()+' '+curTok.s:'—'}
+async function doBuy(){
+  const btn=document.getElementById('confirmBuy');const amt=parseFloat(document.getElementById('buyAmt').value)||0;
+  if(amt<=0)return; btn.textContent='Confirming…';btn.disabled=true;
+  let msg='';
+  try{
+    const r=await fetch('http://127.0.0.1:8000/api/buy',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({address:curTok.addr,size_sol:amt,chain:'sol'})});
+    const j=await r.json(); if(!r.ok)throw new Error(j.detail||'error'); msg=j.status||'order placed';
+  }catch(e){ msg='simulated (demo — terminal backend offline)'; }
+  await new Promise(r=>setTimeout(r,450));
+  btn.disabled=false;btn.textContent='Confirm buy';closeBuy();
+  toastT(`✓ Bought ${amt} SOL of ${curTok.s} · ${msg}`); flash();
+}
+function toastT(m){const t=document.createElement('div');t.textContent=m;
+  t.style.cssText='position:fixed;left:50%;bottom:34px;transform:translateX(-50%);z-index:130;background:rgba(20,16,34,.92);border:1px solid var(--line2);backdrop-filter:blur(16px);color:#fff;padding:13px 20px;border-radius:13px;font-size:14px;font-weight:600;box-shadow:0 18px 44px -10px rgba(0,0,0,.7)';
+  document.body.appendChild(t);setTimeout(()=>{t.style.transition='.4s';t.style.opacity='0';setTimeout(()=>t.remove(),400)},2800)}
+document.getElementById('buyscrim').addEventListener('click',e=>{if(e.target.id==='buyscrim')closeBuy()});
+set('logoT',ic.logo);set('logoB',ic.logo);set('si',ic.search);set('xb',ic.x);set('closeT',ic.close);
+set('tr1',ic.fire);set('tr2',ic.radar);set('tr3',ic.wallet);set('tr4',ic.chart);
 
 /* tiny launch flourish */
 function flash(){

@@ -1241,6 +1241,14 @@ async def _lifespan(_app: FastAPI):
 
 app = FastAPI(title="GMGN AI Trader (local)", lifespan=_lifespan)
 
+# 允许 abc. 前端(本地 file:// 或别处托管的 landing)跨源调用本机引擎。
+# 仍只绑 127.0.0.1（见 __main__），CORS 只是放开浏览器同源限制，不扩大监听面。
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_credentials=False,
+    allow_methods=["*"], allow_headers=["*"],
+)
+
 class ConfigIn(BaseModel):
     api_key: str = ""        # 留空则沿用环境里已有的 key（不覆盖）
     signing_key: str = ""
