@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>abc — memecoin trading, as easy as ABC</title>
+<meta name="description" content="abc scans thousands of tokens, cuts the rugs, and lays the survivors in front of you. One tap to trade. The machine screens, you press.">
+<style>
+/* ──────────────────────────────────────────────────────────────
+   abc — liquid-glass landing. Palette pulled from the reference:
+   near-black violet bg, indigo→lilac→white aurora at the horizon.
+   ────────────────────────────────────────────────────────────── */
+:root{
+  --bg:#09070f; --bg2:#0c0a16; --ink:#0e0b1a;
+  --violet:#7b5cff; --violet2:#9a82ff; --lilac:#b9a7ff; --halo:#cdbcff;
+  --text:#f5f3fc; --muted:#a6a1bd; --dim:#6f6a86;
+  --glass:rgba(255,255,255,.045); --glass2:rgba(255,255,255,.07);
+  --line:rgba(255,255,255,.09); --line2:rgba(255,255,255,.14);
+  --r:18px; --rl:26px;
+  --sans:-apple-system,BlinkMacSystemFont,"SF Pro Display","Segoe UI",Inter,system-ui,sans-serif;
+  --shadow:0 30px 80px -20px rgba(0,0,0,.7);
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  font-family:var(--sans);background:var(--bg);color:var(--text);
+  -webkit-font-smoothing:antialiased;overflow-x:hidden;line-height:1.5;
+  letter-spacing:-.01em;
+}
+::selection{background:rgba(123,92,255,.35)}
+a{color:inherit;text-decoration:none}
+.wrap{max-width:1160px;margin:0 auto;padding:0 24px}
+
+/* ── ambient aurora background ── */
+.bg{position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none}
+.bg::before{ /* deep vignette */
+  content:"";position:absolute;inset:0;
+  background:radial-gradient(120% 80% at 50% -10%, #18122e 0%, var(--bg2) 38%, var(--bg) 70%);
+}
+.aurora{
+  position:absolute;left:50%;bottom:-46%;width:160vw;height:120vh;transform:translateX(-50%);
+  background:
+    radial-gradient(closest-side, rgba(205,188,255,.95), rgba(154,130,255,.55) 22%, rgba(123,92,255,.28) 42%, transparent 66%);
+  filter:blur(10px);opacity:.9;
+  animation:drift 16s ease-in-out infinite alternate;
+}
+.aurora.b{bottom:-58%;width:120vw;background:radial-gradient(closest-side,rgba(123,92,255,.55),rgba(80,52,200,.18) 45%,transparent 70%);animation-duration:22s}
+.horizon{ /* the bright thin planet-edge line */
+  position:absolute;left:50%;bottom:7%;width:120vw;height:2px;transform:translateX(-50%);
+  background:linear-gradient(90deg,transparent,rgba(205,188,255,.9) 35%,#fff 50%,rgba(205,188,255,.9) 65%,transparent);
+  box-shadow:0 0 60px 8px rgba(154,130,255,.55);opacity:.7;
+}
+.grain{position:fixed;inset:0;z-index:1;pointer-events:none;opacity:.05;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
+@keyframes drift{from{transform:translateX(-52%) scale(1)}to{transform:translateX(-48%) scale(1.08)}}
+
+/* ── glass primitive ── */
+.glass{background:var(--glass);border:1px solid var(--line);
+  backdrop-filter:blur(22px) saturate(140%);-webkit-backdrop-filter:blur(22px) saturate(140%);
+  border-radius:var(--r);box-shadow:inset 0 1px 0 rgba(255,255,255,.07);}
+
+/* ── nav ── */
+nav{position:fixed;top:0;left:0;right:0;z-index:50;transition:.4s}
+nav.scrolled .navbar{background:rgba(12,10,22,.6);border-color:var(--line2)}
+.navbar{display:flex;align-items:center;justify-content:space-between;margin:14px auto;max-width:1160px;
+  padding:11px 11px 11px 20px;border-radius:99px;border:1px solid transparent;transition:.4s;
+  width:calc(100% - 48px)}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:19px;letter-spacing:-.04em}
+.brand .mark{width:30px;height:30px;display:grid;place-items:center;border-radius:9px;
+  background:linear-gradient(140deg,var(--violet),var(--violet2));box-shadow:0 6px 22px -4px rgba(123,92,255,.7)}
+.brand b{font-weight:800}.brand b span{color:var(--lilac)}
+.navlinks{display:flex;gap:8px}
+.navlinks a{color:var(--muted);font-size:14px;font-weight:500;padding:8px 14px;border-radius:99px;transition:.2s}
+.navlinks a:hover{color:var(--text);background:var(--glass)}
+.btn{font-family:inherit;font-size:14px;font-weight:600;border:none;cursor:pointer;border-radius:99px;
+  padding:11px 20px;transition:.2s;letter-spacing:-.01em}
+.btn-white{background:#fff;color:#0a0812}
+.btn-white:hover{transform:translateY(-1px);box-shadow:0 12px 30px -8px rgba(255,255,255,.4)}
+.btn-ghost{background:var(--glass);color:var(--text);border:1px solid var(--line2)}
+.btn-ghost:hover{background:var(--glass2);transform:translateY(-1px)}
+.btn-lg{padding:15px 30px;font-size:15.5px}
+.navbtns{display:flex;align-items:center;gap:10px}
+
+/* ── hero ── */
+.hero{position:relative;z-index:2;text-align:center;padding:170px 0 0}
+.badge{display:inline-flex;align-items:center;gap:9px;padding:7px 8px 7px 16px;border-radius:99px;
+  font-size:13px;color:var(--muted);font-weight:500;margin-bottom:30px}
+.badge .dot{width:7px;height:7px;border-radius:50%;background:var(--violet2);box-shadow:0 0 12px var(--violet2);
+  animation:pulse 2s infinite}
+.badge .tag{background:linear-gradient(135deg,var(--violet),var(--violet2));color:#fff;font-weight:600;
+  padding:3px 10px;border-radius:99px;font-size:12px}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+h1{font-size:clamp(40px,6.4vw,74px);line-height:1.02;font-weight:800;letter-spacing:-.045em;
+  margin:0 auto;max-width:14ch}
+h1 .grad{background:linear-gradient(180deg,#fff 30%,var(--lilac));-webkit-background-clip:text;background-clip:text;color:transparent}
+.sub{color:var(--muted);font-size:clamp(16px,1.7vw,19px);max-width:54ch;margin:24px auto 0;line-height:1.6}
+.cta{display:flex;gap:14px;justify-content:center;margin-top:38px;flex-wrap:wrap}
+.trust{display:flex;gap:26px;justify-content:center;margin-top:30px;color:var(--dim);font-size:13px;flex-wrap:wrap}
+.trust span{display:flex;align-items:center;gap:7px}
+
+/* ── floating dashboard ── */
+.dash-wrap{position:relative;z-index:2;margin:64px auto -120px;max-width:1000px;padding:0 24px;
+  perspective:1600px}
+.dash{border-radius:var(--rl);overflow:hidden;transform:rotateX(8deg);transform-origin:center top;
+  box-shadow:var(--shadow),0 0 120px -30px rgba(123,92,255,.5);opacity:0;animation:rise 1s .2s forwards}
+@keyframes rise{to{opacity:1;transform:rotateX(2deg) translateY(0)}}
+.dash-top{display:flex;align-items:center;gap:14px;padding:18px 22px;border-bottom:1px solid var(--line)}
+.dash-top h3{font-size:17px;font-weight:700}
+.dash-top .spacer{flex:1}
+.idot{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;border:1px solid var(--line);color:var(--muted)}
+.dash-body{display:grid;grid-template-columns:64px 1fr;min-height:300px}
+.rail{border-right:1px solid var(--line);padding:18px 0;display:flex;flex-direction:column;align-items:center;gap:14px}
+.rail .ri{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;color:var(--dim);transition:.2s}
+.rail .ri.on{background:linear-gradient(140deg,var(--violet),var(--violet2));color:#fff;box-shadow:0 8px 22px -6px rgba(123,92,255,.7)}
+.panel{padding:22px}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.kpi{padding:16px;border-radius:14px}
+.kpi .lbl{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12.5px;margin-bottom:10px}
+.kpi .val{font-size:26px;font-weight:700;letter-spacing:-.03em}
+.kpi .chg{font-size:12.5px;font-weight:600;margin-top:4px}
+.up{color:#5be0a0}.down{color:#ff7b9c}
+.rows{margin-top:16px;border-radius:14px;overflow:hidden;border:1px solid var(--line)}
+.row{display:grid;grid-template-columns:1.4fr 1fr 1fr auto;align-items:center;gap:10px;padding:13px 16px;font-size:13.5px}
+.row+.row{border-top:1px solid var(--line)}
+.row .tok{display:flex;align-items:center;gap:10px;font-weight:600}
+.tok .av{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;font-size:12px;font-weight:700;color:#fff}
+.muted{color:var(--muted)}
+.pill{font-size:11px;font-weight:600;padding:4px 10px;border-radius:99px;border:1px solid var(--line2)}
+.pill.buy{background:linear-gradient(135deg,var(--violet),var(--violet2));border:none;color:#fff}
+
+/* ── sections ── */
+section.block{position:relative;z-index:2;padding:160px 0 0}
+.eyebrow{color:var(--violet2);font-weight:600;font-size:13px;letter-spacing:.04em;text-transform:uppercase;text-align:center}
+h2{font-size:clamp(30px,4.2vw,46px);font-weight:800;letter-spacing:-.04em;text-align:center;margin:14px auto 0;max-width:18ch}
+.lead{color:var(--muted);text-align:center;max-width:50ch;margin:18px auto 0;font-size:17px}
+
+/* feature grid */
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px;margin-top:56px}
+.feat{padding:28px;border-radius:var(--rl);position:relative;overflow:hidden;transition:.3s}
+.feat:hover{transform:translateY(-4px);border-color:var(--line2)}
+.feat::after{content:"";position:absolute;inset:0;background:radial-gradient(120% 80% at 100% 0,rgba(123,92,255,.14),transparent 60%);opacity:0;transition:.3s}
+.feat:hover::after{opacity:1}
+.feat .ic{width:50px;height:50px;border-radius:14px;display:grid;place-items:center;margin-bottom:18px;
+  background:linear-gradient(150deg,rgba(123,92,255,.25),rgba(154,130,255,.08));border:1px solid var(--line2);color:var(--lilac)}
+.feat h3{font-size:20px;font-weight:700;letter-spacing:-.02em}
+.feat p{color:var(--muted);margin-top:9px;font-size:15px;line-height:1.6}
+
+/* how it works — A B C */
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:56px}
+.step{padding:30px 26px;border-radius:var(--rl);text-align:left;position:relative}
+.step .letter{font-size:60px;font-weight:800;line-height:.8;letter-spacing:-.06em;
+  background:linear-gradient(180deg,var(--lilac),var(--violet));-webkit-background-clip:text;background-clip:text;color:transparent;
+  margin-bottom:18px}
+.step h3{font-size:19px;font-weight:700}
+.step p{color:var(--muted);margin-top:9px;font-size:14.5px;line-height:1.6}
+.step .num{position:absolute;top:24px;right:26px;color:var(--dim);font-size:13px;font-weight:600}
+
+/* cta band */
+.band{position:relative;z-index:2;margin:160px auto 0;max-width:1000px;padding:0 24px}
+.band-inner{border-radius:32px;padding:70px 40px;text-align:center;position:relative;overflow:hidden}
+.band-inner::before{content:"";position:absolute;left:50%;bottom:-60%;width:120%;height:160%;transform:translateX(-50%);
+  background:radial-gradient(closest-side,rgba(154,130,255,.45),transparent 70%);filter:blur(20px)}
+.band-inner h2{position:relative}
+.band-inner .cta{margin-top:34px}
+
+/* footer */
+footer{position:relative;z-index:2;margin-top:120px;border-top:1px solid var(--line);padding:46px 0 60px}
+.foot{display:flex;justify-content:space-between;align-items:center;gap:20px;flex-wrap:wrap}
+.foot .muted{font-size:13px}
+.foot .fl{display:flex;gap:22px}.foot .fl a{color:var(--muted);font-size:13.5px}.foot .fl a:hover{color:var(--text)}
+
+/* reveal */
+.reveal{opacity:0;transform:translateY(26px);transition:.7s cubic-bezier(.2,.7,.2,1)}
+.reveal.in{opacity:1;transform:none}
+
+/* ── onboarding modal ── */
+.scrim{position:fixed;inset:0;z-index:100;background:rgba(6,5,12,.6);backdrop-filter:blur(8px);
+  display:none;align-items:center;justify-content:center;padding:24px;opacity:0;transition:.3s}
+.scrim.on{display:flex;opacity:1}
+.modal{width:480px;max-width:100%;border-radius:28px;padding:0;overflow:hidden;transform:scale(.96);transition:.3s}
+.scrim.on .modal{transform:scale(1)}
+.mhead{padding:22px 24px 0;display:flex;align-items:center;gap:12px}
+.mhead .brand{font-size:16px}
+.mhead .x{margin-left:auto;cursor:pointer;color:var(--dim);width:30px;height:30px;display:grid;place-items:center;border-radius:8px}
+.mhead .x:hover{background:var(--glass);color:var(--text)}
+.prog{display:flex;gap:7px;padding:18px 24px 4px}
+.prog i{height:4px;flex:1;border-radius:4px;background:var(--line2);transition:.4s}
+.prog i.on{background:linear-gradient(90deg,var(--violet),var(--lilac))}
+.mbody{padding:8px 28px 4px;min-height:230px}
+.step-letter{font-size:46px;font-weight:800;line-height:1;
+  background:linear-gradient(180deg,var(--lilac),var(--violet));-webkit-background-clip:text;background-clip:text;color:transparent}
+.mbody h3{font-size:23px;font-weight:800;letter-spacing:-.03em;margin:10px 0 8px}
+.mbody p{color:var(--muted);font-size:14.5px;line-height:1.6}
+.field{margin-top:18px}
+.field label{font-size:12.5px;color:var(--muted);display:block;margin-bottom:7px;font-weight:500}
+.field input[type=text],.field input[type=password]{width:100%;background:rgba(0,0,0,.25);border:1px solid var(--line2);
+  border-radius:12px;padding:13px 15px;color:var(--text);font-family:inherit;font-size:14px;transition:.2s}
+.field input:focus{outline:none;border-color:var(--violet2);box-shadow:0 0 0 3px rgba(123,92,255,.18)}
+.opts{display:grid;gap:10px;margin-top:16px}
+.opt{display:flex;align-items:center;gap:13px;padding:14px;border-radius:14px;border:1px solid var(--line2);cursor:pointer;transition:.2s;background:rgba(0,0,0,.15)}
+.opt:hover{border-color:var(--violet2);background:var(--glass)}
+.opt.sel{border-color:var(--violet2);background:linear-gradient(135deg,rgba(123,92,255,.18),transparent)}
+.opt .oi{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;background:var(--glass);color:var(--lilac);flex-shrink:0}
+.opt h4{font-size:14.5px;font-weight:600}.opt small{color:var(--muted);font-size:12.5px}
+.opt .check{margin-left:auto;color:var(--violet2);opacity:0;transition:.2s}
+.opt.sel .check{opacity:1}
+.slider{margin-top:6px}
+.slider .v{font-size:24px;font-weight:700;letter-spacing:-.02em}
+.slider input[type=range]{width:100%;-webkit-appearance:none;height:5px;border-radius:5px;margin-top:12px;
+  background:linear-gradient(90deg,var(--violet),var(--lilac));}
+.slider input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:22px;height:22px;border-radius:50%;
+  background:#fff;box-shadow:0 4px 14px rgba(123,92,255,.6);cursor:pointer;border:3px solid var(--violet2)}
+.done{text-align:center;padding:14px 0}
+.done .ring{width:84px;height:84px;border-radius:50%;margin:6px auto 18px;display:grid;place-items:center;
+  background:radial-gradient(closest-side,rgba(123,92,255,.4),transparent);}
+.done .ring .c{width:64px;height:64px;border-radius:50%;display:grid;place-items:center;
+  background:linear-gradient(140deg,var(--violet),var(--violet2));box-shadow:0 12px 36px -8px rgba(123,92,255,.8)}
+.mfoot{padding:18px 24px 24px;display:flex;gap:12px;align-items:center}
+.mfoot .back{color:var(--muted);font-size:14px;cursor:pointer;padding:11px 4px;font-weight:500}
+.mfoot .back:hover{color:var(--text)}
+.mfoot .grow{flex:1}
+
+@media(max-width:820px){
+  .navlinks{display:none}
+  .cards,.steps,.grid{grid-template-columns:1fr}
+  .dash-body{grid-template-columns:1fr}.rail{display:none}
+  .row{grid-template-columns:1.4fr 1fr auto}.row .col-hide{display:none}
+  .dash{transform:none}
+}
+</style>
+</head>
+<body>
+
+<div class="bg"><div class="aurora"></div><div class="aurora b"></div><div class="horizon"></div></div>
+<div class="grain"></div>
+
+<!-- NAV -->
+<nav id="nav"><div class="navbar glass">
+  <a class="brand" href="#"><span class="mark" id="logo"></span><b>abc<span>.</span></b></a>
+  <div class="navlinks">
+    <a href="#features">Product</a>
+    <a href="#how">How it works</a>
+    <a href="#stats">Stats</a>
+    <a href="#">Docs</a>
+  </div>
+  <div class="navbtns">
+    <button class="btn btn-ghost" onclick="openOb()">Launch app</button>
+  </div>
+</div></nav>
+
+<!-- HERO -->
+<header class="hero"><div class="wrap">
+  <div class="badge glass"><span class="dot"></span> <span class="tag">New</span> Trade. Easy as ABC.</div>
+  <h1>Memecoin trading,<br><span class="grad">as easy as ABC.</span></h1>
+  <p class="sub">abc scans thousands of tokens, cuts the rugs, and lays the survivors in front of you — pre-sized, pre-stopped, one tap to ape. The machine screens. You press.</p>
+  <div class="cta">
+    <button class="btn btn-white btn-lg" onclick="openOb()">Get started</button>
+    <a href="#how"><button class="btn btn-ghost btn-lg" id="playbtn">See how it works</button></a>
+  </div>
+  <div class="trust">
+    <span><i id="t1"></i> Non-custodial — your keys, your coins</span>
+    <span><i id="t2"></i> ~120ms full-board scan</span>
+    <span><i id="t3"></i> SOL · BSC · Base · ETH</span>
+  </div>
+</div></header>
+
+<!-- DASHBOARD MOCK -->
+<div class="dash-wrap"><div class="dash glass">
+  <div class="dash-top">
+    <span class="mark" style="width:26px;height:26px;border-radius:7px" id="logo2"></span>
+    <h3>Welcome back, degen</h3>
+    <span class="spacer"></span>
+    <span class="idot" id="ic-bell"></span>
+    <span class="idot" id="ic-sun"></span>
+  </div>
+  <div class="dash-body">
+    <div class="rail">
+      <span class="ri on" id="r1"></span>
+      <span class="ri" id="r2"></span>
+      <span class="ri" id="r3"></span>
+      <span class="ri" id="r4"></span>
+    </div>
+    <div class="panel">
+      <div class="cards">
+        <div class="kpi glass"><div class="lbl"><span id="ki1"></span> Total balance</div><div class="val">$142,090.20</div><div class="chg up">▲ 12.4% today</div></div>
+        <div class="kpi glass"><div class="lbl"><span id="ki2"></span> 24h PnL</div><div class="val up">+$18,430</div><div class="chg up">▲ 14.9%</div></div>
+        <div class="kpi glass"><div class="lbl"><span id="ki3"></span> Open positions</div><div class="val">7</div><div class="chg muted">2 flagged ⚑</div></div>
+      </div>
+      <div class="rows glass">
+        <div class="row">
+          <span class="tok"><span class="av" style="background:linear-gradient(140deg,#7b5cff,#9a82ff)">CC</span> CLEANCAT</span>
+          <span class="muted col-hide">$0.0021</span>
+          <span class="up">+184%</span>
+          <span class="pill buy">Tap to ape</span>
+        </div>
+        <div class="row">
+          <span class="tok"><span class="av" style="background:linear-gradient(140deg,#5be0a0,#3aa)">GD</span> GOODDOG</span>
+          <span class="muted col-hide">$0.0008</span>
+          <span class="up">+62%</span>
+          <span class="pill buy">Tap to ape</span>
+        </div>
+        <div class="row">
+          <span class="tok"><span class="av" style="background:linear-gradient(140deg,#ff7b9c,#c34)">RG</span> RUGPULL</span>
+          <span class="muted col-hide">$0.0009</span>
+          <span class="down">honeypot</span>
+          <span class="pill">Filtered</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</div></div>
+
+<!-- FEATURES -->
+<section class="block" id="features"><div class="wrap">
+  <p class="eyebrow reveal">Why abc</p>
+  <h2 class="reveal">Built to keep you on the<br>right side of the trade</h2>
+  <p class="lead reveal">Deterministic where it matters, intelligent where it helps. Risk control is pure code — it never hallucinates and it never lets the LLM near your money.</p>
+  <div class="grid">
+    <div class="feat glass reveal"><div class="ic" id="f1"></div><h3>Deterministic filters</h3><p>Rules cast a wide net, scoring cuts hard. Honeypots, rug ratios, bundlers, freeze authority, wash-trading — gated out before you ever see them. No vibes, just gates.</p></div>
+    <div class="feat glass reveal"><div class="ic" id="f2"></div><h3>One-tap trade</h3><p>Survivors arrive with a code-computed position size and a stop already set. One tap to ape, safely — execution only happens when you press the button.</p></div>
+    <div class="feat glass reveal"><div class="ic" id="f3"></div><h3>Escape monitor</h3><p>We watch your bags in real time for rug signals — mint re-authorized, liquidity pulled, top-holder spikes — and scream <em>get out</em> before it dumps.</p></div>
+    <div class="feat glass reveal"><div class="ic" id="f4"></div><h3>AI that only explains</h3><p>Claude judges the handful that survive the gates and writes the thesis — but it never touches risk control, never sizes a trade, never sees your raw token names.</p></div>
+  </div>
+</div></section>
+
+<!-- HOW IT WORKS -->
+<section class="block" id="how"><div class="wrap">
+  <p class="eyebrow reveal">How it works</p>
+  <h2 class="reveal">Three letters. Three steps.</h2>
+  <p class="lead reveal">That's the whole product. Scan, pick, trade — the rest is automated.</p>
+  <div class="steps">
+    <div class="step glass reveal"><div class="letter">A</div><span class="num">01</span><h3>Scan</h3><p>abc pulls the trending board across four chains and runs every token through hard gates — most get cut in milliseconds.</p></div>
+    <div class="step glass reveal"><div class="letter">B</div><span class="num">02</span><h3>Pick</h3><p>Survivors get scored and momentum-ranked. The best few surface with a confidence score and a one-line thesis.</p></div>
+    <div class="step glass reveal"><div class="letter">C</div><span class="num">03</span><h3>Trade</h3><p>One tap. Position size is pre-computed, the stop-loss is set, the escape monitor starts watching. You're in.</p></div>
+  </div>
+</div></section>
+
+<!-- STATS -->
+<section class="block" id="stats"><div class="wrap">
+  <p class="eyebrow reveal">By the numbers</p>
+  <h2 class="reveal">Fast, safe, yours</h2>
+  <div class="grid" style="grid-template-columns:repeat(4,1fr);margin-top:48px">
+    <div class="feat glass reveal" style="text-align:center;padding:34px 18px"><div class="step-letter">120ms</div><p style="margin-top:6px">full-board scan</p></div>
+    <div class="feat glass reveal" style="text-align:center;padding:34px 18px"><div class="step-letter">0</div><p style="margin-top:6px">custody — your keys</p></div>
+    <div class="feat glass reveal" style="text-align:center;padding:34px 18px"><div class="step-letter">4</div><p style="margin-top:6px">chains supported</p></div>
+    <div class="feat glass reveal" style="text-align:center;padding:34px 18px"><div class="step-letter">9</div><p style="margin-top:6px">rug gates per token</p></div>
+  </div>
+</div></section>
+
+<!-- CTA BAND -->
+<div class="band"><div class="band-inner glass reveal">
+  <p class="eyebrow">Ready when you are</p>
+  <h2>Start trading the easy way</h2>
+  <p class="lead">Connect a key or run the demo. No card, no custody, no nonsense.</p>
+  <div class="cta"><button class="btn btn-white btn-lg" onclick="openOb()">Get started</button></div>
+</div></div>
+
+<!-- FOOTER -->
+<footer><div class="wrap foot">
+  <a class="brand" href="#"><span class="mark" style="width:26px;height:26px;border-radius:7px" id="logo3"></span><b>abc<span style="color:var(--lilac)">.</span></b></a>
+  <div class="fl"><a href="#features">Product</a><a href="#how">How it works</a><a href="#stats">Stats</a><a href="#">Docs</a><a href="#">X</a></div>
+  <span class="muted">© 2026 abc. Trade at your own risk.</span>
+</div></footer>
+
+<!-- ── ONBOARDING ── -->
+<div class="scrim" id="scrim">
+  <div class="modal glass">
+    <div class="mhead"><span class="brand"><span class="mark" style="width:24px;height:24px;border-radius:7px" id="logo4"></span><b>abc<span style="color:var(--lilac)">.</span></b></span><span class="x" onclick="closeOb()" id="x"></span></div>
+    <div class="prog"><i class="on"></i><i></i><i></i></div>
+    <div class="mbody" id="mbody"></div>
+    <div class="mfoot">
+      <span class="back" id="back" onclick="prev()" style="visibility:hidden">← Back</span>
+      <span class="grow"></span>
+      <button class="btn btn-white btn-lg" id="next" onclick="next()">Continue</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ── custom inline icon set (no libs) ── */
+const ic = {
+  logo:'<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19V7l7-4 7 4v12"/><path d="M9 19v-5h6v5"/></svg>',
+  funnel:'<svg viewBox="0 0 24 24" width="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 5h18l-7 8v6l-4 2v-8z"/></svg>',
+  bolt:'<svg viewBox="0 0 24 24" width="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg>',
+  shield:'<svg viewBox="0 0 24 24" width="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.4 7.7 8 9 4.6-1.3 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg>',
+  spark:'<svg viewBox="0 0 24 24" width="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2 2M16 16l2 2M18 6l-2 2M8 16l-2 2"/><circle cx="12" cy="12" r="2.5"/></svg>',
+  bell:'<svg viewBox="0 0 24 24" width="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 1 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></svg>',
+  sun:'<svg viewBox="0 0 24 24" width="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M19 5l-1.5 1.5M6.5 17.5 5 19"/></svg>',
+  grid:'<svg viewBox="0 0 24 24" width="18" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg>',
+  radar:'<svg viewBox="0 0 24 24" width="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><path d="M12 12 20 7"/></svg>',
+  wallet:'<svg viewBox="0 0 24 24" width="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="13" rx="3"/><path d="M16 12h2"/><path d="M3 9h13a2 2 0 0 1 0 0"/></svg>',
+  chart:'<svg viewBox="0 0 24 24" width="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5M4 19h16M8 16v-4M12 16V8M16 16v-7"/></svg>',
+  coin:'<svg viewBox="0 0 24 24" width="15" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v10M9.5 9.5h4a1.5 1.5 0 0 1 0 3h-3a1.5 1.5 0 0 0 0 3h4"/></svg>',
+  pnl:'<svg viewBox="0 0 24 24" width="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M21 7h-5M21 7v5"/></svg>',
+  layers:'<svg viewBox="0 0 24 24" width="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/></svg>',
+  check:'<svg viewBox="0 0 24 24" width="18" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"/></svg>',
+  checkbig:'<svg viewBox="0 0 24 24" width="30" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12 5 5L20 7"/></svg>',
+  x:'<svg viewBox="0 0 24 24" width="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>',
+  key:'<svg viewBox="0 0 24 24" width="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8" cy="8" r="4"/><path d="m11 11 8 8M16 16l2-2M19 19l2-2"/></svg>',
+  play:'<svg viewBox="0 0 24 24" width="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M10 9l5 3-5 3z" fill="currentColor"/></svg>',
+  dot:'<svg viewBox="0 0 24 24" width="14" fill="none" stroke="var(--violet2)" stroke-width="2"><circle cx="12" cy="12" r="6"/></svg>',
+};
+const set=(id,svg)=>{const e=document.getElementById(id);if(e)e.innerHTML=svg};
+['logo','logo2','logo3','logo4'].forEach(i=>set(i,ic.logo));
+set('f1',ic.funnel);set('f2',ic.bolt);set('f3',ic.shield);set('f4',ic.spark);
+set('ic-bell',ic.bell);set('ic-sun',ic.sun);
+set('r1',ic.grid);set('r2',ic.radar);set('r3',ic.wallet);set('r4',ic.chart);
+set('ki1',ic.coin);set('ki2',ic.pnl);set('ki3',ic.layers);set('x',ic.x);
+['t1','t2','t3'].forEach(i=>set(i,ic.dot));
+
+/* ── nav scroll ── */
+addEventListener('scroll',()=>document.getElementById('nav').classList.toggle('scrolled',scrollY>20));
+
+/* ── reveal on scroll ── */
+const io=new IntersectionObserver((es)=>es.forEach(e=>{if(e.isIntersecting){e.target.classList.add('in');io.unobserve(e.target)}}),{threshold:.12});
+document.querySelectorAll('.reveal').forEach((el,i)=>{el.style.transitionDelay=(i%4*60)+'ms';io.observe(el)});
+
+/* ── onboarding flow (A · B · C) ── */
+let step=0;
+const state={mode:'demo',risk:1.0,stop:35};
+const steps=[
+  ()=>`<div class="step-letter">A</div><h3>Connect</h3><p>Run the demo with mock data, or paste your GMGN key to trade live. Keys go to your machine only — never to us.</p>
+    <div class="opts">
+      <div class="opt ${state.mode==='demo'?'sel':''}" onclick="pick('demo')"><span class="oi">${ic.play}</span><div><h4>Try the demo</h4><small>Mock data · no key · zero risk</small></div><span class="check">${ic.check}</span></div>
+      <div class="opt ${state.mode==='live'?'sel':''}" onclick="pick('live')"><span class="oi">${ic.key}</span><div><h4>Connect a key</h4><small>Live market data · your keys stay local</small></div><span class="check">${ic.check}</span></div>
+    </div>
+    ${state.mode==='live'?`<div class="field"><label>GMGN API key</label><input type="password" placeholder="paste your key…" id="keyin" value="${state._key||''}" oninput="state._key=this.value"></div>`:''}`,
+  ()=>`<div class="step-letter">B</div><h3>Set your risk</h3><p>abc sizes every trade for you. Tell it how hard to go and where to bail — you can change this anytime.</p>
+    <div class="slider"><label style="font-size:12.5px;color:var(--muted)">Max per trade</label><div class="v">${state.risk.toFixed(2)} SOL</div>
+      <input type="range" min="0.05" max="5" step="0.05" value="${state.risk}" oninput="state.risk=+this.value;document.querySelectorAll('.slider .v')[0].textContent=state.risk.toFixed(2)+' SOL'"></div>
+    <div class="slider" style="margin-top:22px"><label style="font-size:12.5px;color:var(--muted)">Hard stop-loss</label><div class="v">−${state.stop}%</div>
+      <input type="range" min="10" max="60" step="1" value="${state.stop}" oninput="state.stop=+this.value;document.querySelectorAll('.slider .v')[1].textContent='−'+state.stop+'%'"></div>`,
+  ()=>`<div class="done"><div class="ring"><div class="c">${ic.checkbig}</div></div>
+    <div class="step-letter" style="font-size:40px">C</div><h3 style="margin-top:6px">You're set</h3>
+    <p>Mode: <b style="color:var(--text)">${state.mode==='demo'?'Demo':'Live'}</b> · ${state.risk.toFixed(2)} SOL max · −${state.stop}% stop.<br>The board is scanning. Survivors are waiting.</p></div>`,
+];
+const labels=['Continue','Continue','Launch terminal →'];
+function render(){
+  document.getElementById('mbody').innerHTML=steps[step]();
+  document.querySelectorAll('.prog i').forEach((e,i)=>e.classList.toggle('on',i<=step));
+  document.getElementById('back').style.visibility=step?'visible':'hidden';
+  document.getElementById('next').textContent=labels[step];
+}
+function pick(m){state.mode=m;render()}
+function next(){ if(step<2){step++;render()} else {closeOb();flash()} }
+function prev(){ if(step>0){step--;render()} }
+function openOb(){step=0;render();document.getElementById('scrim').classList.add('on')}
+function closeOb(){document.getElementById('scrim').classList.remove('on')}
+document.getElementById('scrim').addEventListener('click',e=>{if(e.target.id==='scrim')closeOb()});
+addEventListener('keydown',e=>{if(e.key==='Escape')closeOb()});
+set('playbtn','<span style="display:inline-flex;align-items:center;gap:8px">'+ic.play+' See how it works</span>');
+
+/* tiny launch flourish */
+function flash(){
+  const f=document.createElement('div');
+  f.style.cssText='position:fixed;inset:0;z-index:200;pointer-events:none;background:radial-gradient(closest-side,rgba(154,130,255,.5),transparent 60%);opacity:0;transition:.5s';
+  document.body.appendChild(f);requestAnimationFrame(()=>f.style.opacity='1');
+  setTimeout(()=>{f.style.opacity='0';setTimeout(()=>f.remove(),500)},420);
+}
+</script>
+</body>
+</html>
