@@ -1,0 +1,16 @@
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# 实用子集：错误类 + pyflakes + import 排序 + 升级建议；不强求风格洁癖（项目注释密度高、中文多）
+select = ["E", "F", "I", "UP"]
+ignore = [
+    "E501",  # 行宽交给 line-length，长注释不报
+    "E741",  # 允许 l/f 等单字母（既有代码风格）
+    "E702",  # 分号多语句一行：项目刻意的紧凑风格（dataclass 字段、短函数）
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]

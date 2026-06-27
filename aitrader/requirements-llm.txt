@@ -1,0 +1,7 @@
+# 可选：仅在切真实 LLM 判官时需要（GMGN_LLM_PROVIDER=claude）。
+# 默认 heuristic 模式无需安装，不影响其余功能与离线/Mock 联调。
+#   pip install -r requirements-llm.txt
+#   export GMGN_LLM_PROVIDER=claude
+#   export ANTHROPIC_API_KEY=sk-ant-...
+#   export GMGN_LLM_MODEL=claude-opus-4-8   # 可选，默认即此；省钱可换 claude-sonnet-4-6 / claude-haiku-4-5
+anthropic>=0.49

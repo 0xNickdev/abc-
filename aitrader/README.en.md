@@ -64,7 +64,7 @@ Open http://127.0.0.1:8000 in your browser.
 ## LIVE / SHADOW (important)
 - **SHADOW (paper trading) = the default safe state**: buy/sell only writes to the log + positions.json, and **sends no on-chain transactions**.
 - **LIVE = real trades, real funds, irreversible**: requires ① clicking the **MODE icon top-right to switch to LIVE** (with a second confirmation) + ② `GMGN_PRIVATE_KEY` configured in `~/.config/gmgn/.env` (an Ed25519 PEM signing key, not a wallet private key).
-- `LIVE_TRADING_DISABLED` at the top of `app.py`: **currently `False` (unlocked)**. Set it back to `True` to instantly seal off all on-chain writes (even if switched to LIVE it forces SHADOW and never calls `swap()`).
+- `LIVE_TRADING_DISABLED` at the top of `app.py`: **defaults to `True` (locked, safe)**. To allow real on-chain writes, set the env var `ENABLE_LIVE_TRADING=1` (or edit the line). While locked, even switching to LIVE forces SHADOW and never calls `swap()`.
 - It's still **human-in-the-loop**: a trade happens only when you click "one-click buy/sell"; after a backend restart the mode reverts to SHADOW (LIVE is not persisted) and must be switched again.
 - A buy **polls to confirm the real fill**: on failure it records no position and does not lie; the fill prompt includes the tx hash — checking it on a block explorer yourself is the most reliable.
 - ⚠️ Real trading is **currently only fully verified on Solana**; for EVM see "Known limitations" below.
@@ -79,14 +79,17 @@ Deploy: Settings → Pages → `main` branch `/docs`. After editing the frontend
 
 ## Known limitations / TODO
 
-**⚠ Auto sell strategy at buy time — not yet implemented**
-The "exit plan (hard stop-loss / TP ladder / trailing stop)" shown in the frontend buy dialog is **display text only** for now (`exit_plan()`). The `swap()` that `do_buy` calls for the real order **does not pass `--condition-orders`, so no take-profit/stop-loss orders are actually placed**. After buying you can only watch manually + rely on the escape monitor + exit by hand. TODO: assemble `--condition-orders` from the TP/SL ladder and submit it together with the swap (parameter semantics / per-chain support need to be verified against the real interface).
+**⚠ Auto sell strategy at buy time — plumbing wired, OFF by default (needs live verification)**
+The TP/SL ladder is now assembled into structured condition orders (`build_condition_orders()`) and `do_buy` can attach them to the real `swap()` via `--condition-orders`. This is **disabled by default** — set `GMGN_ENABLE_CONDITION_ORDERS=1` to turn it on. ⚠ The exact `gmgn-cli` flag semantics / per-chain support are **not yet verified against the real interface**, so verify with small amounts per chain before relying on it. While off, behavior is unchanged: watch manually + escape monitor + exit by hand.
 
 **⚠ EVM chain screening looks buggy — only Solana is fully working today**
 - **Solana**: the full path — screen / buy / sell / position monitoring — is verified (including a real signed `order quote`).
 - **EVM (BSC / Base / ETH)**: the plumbing is wired (adapter / native token `0x0` / 18-decimal precision / wallet resolution / bsc's default fourmeme platform command all aligned to the authoritative table), but **screening results look wrong/incomplete and are not fully verified, and buy/sell has not been live-tested per chain**. Suspected issues: whether EVM `market trending` row fields match the Solana assumptions in `FeatureExtractor.build_from_row` / `hard_gates` (`is_honeypot`/`renounced_mint`/`bundler_rate`/`buys/sells` etc. may be named differently or be missing → mis-firing the rug gate / momentum scoring); whether base/eth need a per-chain launchpad platform. **For now EVM is recommended for read-only browsing only; before going live, investigate and verify with small amounts chain by chain.**
 
-**Pending integration (marked in code, see SPEC §11)**
-- `LLMJudge.judge`: currently a momentum-heuristic placeholder; in production swap in a real LLM (fed the sanitized `symbol_safe` + numeric features, never the raw token name).
-- `priority_score`: currently a deterministic momentum weighting (the doc's "ML ranking"); can be swapped for a lightweight model.
+**Integrations**
+- `LLMJudge.judge`: now supports a **real Claude** path (structured-output JSON) in addition to the deterministic momentum heuristic. Default is `heuristic` (free, offline, the fallback whenever the LLM errors). To use Claude: `pip install -r requirements-llm.txt`, then `export GMGN_LLM_PROVIDER=claude` + `ANTHROPIC_API_KEY=...` (optional `GMGN_LLM_MODEL`, default `claude-opus-4-8`). It is still fed only the sanitized `symbol_safe` + numeric features, never the raw token name.
+- **Quality filters (new):** liquidity / volume / mcap band / age band / sniper cap / freeze-renounced / vol-to-liquidity (wash-trade) / symbol+address blacklists — all tunable from the screening-settings gear in the dashboard, persisted to `outputs/filters.json`. 0 / empty disables a filter.
+- `priority_score`: still a deterministic momentum weighting (the doc's "ML ranking"); can be swapped for a lightweight model.
 - Feedback flywheel: trade_decisions.jsonl is already the raw material; once backfilled with realized PnL it can tune the CFG thresholds (currently write-only).
+
+**Tests / CI:** `pip install -r requirements-dev.txt && pytest` (33 tests on gates, filters, scoring, risk, escape, LLM dispatch). Lint: `ruff check .`. CI runs both on push/PR (`.github/workflows/aitrader-ci.yml`).

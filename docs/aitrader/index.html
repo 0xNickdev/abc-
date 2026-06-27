@@ -232,6 +232,14 @@ td{padding:5px 10px;vertical-align:middle}
 .scrim{position:fixed;inset:0;background:#000a;backdrop-filter:blur(3px);z-index:100;display:none;align-items:center;justify-content:center}
 .scrim.on{display:flex}
 .modal{width:520px;max-width:92vw;border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,var(--panel2),var(--panel));box-shadow:0 30px 80px #000a}
+.filterfields{display:grid;grid-template-columns:1fr 1fr;gap:7px 12px;margin-top:6px}
+.filterfields .ff{display:flex;flex-direction:column;gap:3px}
+.filterfields .ff.full{grid-column:1 / -1}
+.filterfields .ff label{font-size:10px;color:var(--dim);letter-spacing:.02em}
+.filterfields .ff input[type=number],.filterfields .ff input[type=text]{width:100%;background:var(--ink2);border:1px solid var(--line);border-radius:7px;color:var(--paper);font-family:var(--mono);font-size:11px;padding:5px 8px}
+.filterfields .ff.bool{flex-direction:row;align-items:center;gap:7px}
+.filterfields .ff.bool input{width:14px;height:14px;accent-color:var(--lime)}
+.filterfields .ff input:focus{outline:none;border-color:var(--lime)}
 .modal h2{font-family:var(--disp);font-weight:800;font-size:17px;padding:18px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:9px}
 .modal h2 svg{width:16px;height:16px;color:var(--lime)}
 .modal h2 .x{margin-left:auto;cursor:pointer;color:var(--dim);font-size:22px;line-height:1}.modal h2 .x:hover{color:var(--paper)}
@@ -355,6 +363,7 @@ td{padding:5px 10px;vertical-align:middle}
     <div class="mbody">
       <div class="fld"><label data-i18n="pipe_cmd_label">GMGN-CLI 热榜命令</label><textarea id="trendCmd" rows="3" placeholder="gmgn-cli market trending ..." autocomplete="off" spellcheck="false"></textarea><div class="hint" data-i18n="pipe_cmd_hint">每轮扫描执行的完整命令；须以 <code>gmgn-cli market trending</code> 开头，自动补 <code>--raw</code>。改 --limit / --interval / --order-by / --filter / --chain 即可。</div></div>
       <div class="fld"><label data-i18n="pipe_poll_label">轮询间隔（秒）</label><div class="szrow"><input id="pollSec" type="number" step="0.5" min="1"><span class="unit">s</span></div><div class="hint" data-i18n="pipe_poll_hint">前端每隔多久打一次 /api/run。建议 ≥30s 省配额；先感受可短些。</div></div>
+      <div class="fld"><label data-i18n="pipe_filters_label">质量过滤器（0 / 空 = 关闭）</label><div id="filterFields" class="filterfields"></div><div class="hint" data-i18n="pipe_filters_hint">在「避雷」闸门之外追加的可调阈值；0 / 空 表示关闭该项，保存后下一轮生效。</div></div>
       <div class="mwarn" data-i18n="pipe_mwarn">⚠ 命令在你本机后端执行（127.0.0.1），仅限热榜命令。保存后立即生效：命令下一轮起用，间隔即时重设。</div>
     </div>
     <div class="mfoot"><button class="mbtn" onclick="savePipe()" data-i18n="pipe_save">保存并立即生效</button><button class="mbtn ghost" onclick="resetPipeCmd()" data-i18n="pipe_reset">恢复默认命令</button><button class="mbtn ghost" onclick="closePipe()" data-i18n="btn_close">关闭</button><span class="savestate" id="pipeState"></span></div>
@@ -428,6 +437,8 @@ const I18N={
     pipe_cmd_hint:'每轮扫描执行的完整命令；须以 <code>gmgn-cli market trending</code> 开头，自动补 <code>--raw</code>。改 --limit / --interval / --order-by / --filter / --chain 即可。',
     pipe_poll_label:'轮询间隔（秒）',
     pipe_poll_hint:'前端每隔多久打一次 /api/run。建议 ≥30s 省配额；先感受可短些。',
+    pipe_filters_label:'质量过滤器（0 / 空 = 关闭）',
+    pipe_filters_hint:'在「避雷」闸门之外追加的可调阈值；0 / 空 表示关闭该项，保存后下一轮生效。',
     pipe_mwarn:'⚠ 命令在你本机后端执行（127.0.0.1），仅限热榜命令。保存后立即生效：命令下一轮起用，间隔即时重设。',
     pipe_save:'保存并立即生效', pipe_reset:'恢复默认命令',
     pipe_reset_btn:'↺ 重置', pipe_reset_btn_title:'重置本链热榜命令为默认（服务端持久）',
@@ -576,6 +587,8 @@ const I18N={
     pipe_cmd_hint:'Full command run each scan; must start with <code>gmgn-cli market trending</code>, <code>--raw</code> auto-added. Tune --limit / --interval / --order-by / --filter / --chain.',
     pipe_poll_label:'Poll interval (seconds)',
     pipe_poll_hint:'How often the frontend calls /api/run. ≥30s recommended to save quota; shorter for first feel.',
+    pipe_filters_label:'Quality filters (0 / empty = off)',
+    pipe_filters_hint:'Extra tunable thresholds on top of the rug gate; 0 / empty disables an item. Takes effect next scan.',
     pipe_mwarn:'⚠ The command runs on your local backend (127.0.0.1), trending commands only. Takes effect on save: command from the next round, interval reset instantly.',
     pipe_save:'Save & apply now', pipe_reset:'Restore default command',
     pipe_reset_btn:'↺ Reset', pipe_reset_btn_title:'Reset this chain’s trending command to default (persisted server-side)',
@@ -1150,6 +1163,7 @@ async function openPipe(){
     defaultTrendCmd=d.default_trending_cmd||'';
     cmdEl.value=d.trending_cmd||defaultTrendCmd;
   }catch(e){cmdEl.value='';document.getElementById('pipeState').textContent=t('pipe_be_off');}
+  loadFilters();
   document.getElementById('pipeScrim').classList.add('on');
 }
 function closePipe(){document.getElementById('pipeScrim').classList.remove('on');}
@@ -1162,11 +1176,54 @@ async function resetSettings(){
     if(!r.ok)throw new Error(await errDetail(r));
     const d=await r.json();
     document.getElementById('trendCmd').value=d.trending_cmd||defaultTrendCmd;
+    try{const fr=await fetch(API+'/api/filters/reset',{method:'POST'});const fd=await fr.json();renderFilters(fd.filters||{},filterDefs.types);}catch(_){}
     toast(t('toast_reset_done'),'ok');
     if(bePolling)scanCycle();
   }catch(e){toast(t('toast_reset_fail',e.message),'err');}
 }
 dismissOnBackdrop('pipeScrim',closePipe);
+
+/* ── 质量过滤器面板（自动按 /api/filters 的 types 渲染）── */
+let filterDefs={types:{},defaults:{}};
+const FILTER_LABELS={
+  zh:{min_liquidity:'最小流动性',min_volume_1h:'最小1h成交额',min_mcap:'最小市值',max_mcap:'最大市值',
+      min_age_min:'最小币龄(分)',max_age_min:'最大币龄(分)',max_sniper_count:'最大狙击数(-1关)',
+      require_renounced_freeze:'必须放弃冻结权',max_vol_to_liq:'量/流动性比上限',
+      symbol_blacklist:'符号黑名单(逗号分隔)',address_blacklist:'地址黑名单(逗号分隔)'},
+  en:{min_liquidity:'Min liquidity',min_volume_1h:'Min 1h volume',min_mcap:'Min mcap',max_mcap:'Max mcap',
+      min_age_min:'Min age (min)',max_age_min:'Max age (min)',max_sniper_count:'Max snipers (-1=off)',
+      require_renounced_freeze:'Require freeze renounced',max_vol_to_liq:'Max vol/liq ratio',
+      symbol_blacklist:'Symbol blacklist (comma)',address_blacklist:'Address blacklist (comma)'}
+};
+function flabel(k){return (FILTER_LABELS[lang]||FILTER_LABELS.zh)[k]||k;}
+function renderFilters(filters,types){
+  const box=document.getElementById('filterFields');box.innerHTML='';
+  Object.keys(types).forEach(k=>{
+    const ty=types[k],v=filters[k];const ff=document.createElement('div');ff.className='ff';ff.dataset.k=k;ff.dataset.ty=ty;
+    if(ty==='bool'){ff.classList.add('bool');ff.innerHTML=`<input type="checkbox" id="flt_${k}" ${v?'checked':''}><label for="flt_${k}">${flabel(k)}</label>`;}
+    else if(ty==='list'){ff.classList.add('full');ff.innerHTML=`<label>${flabel(k)}</label><input type="text" id="flt_${k}" value="${(v||[]).join(', ')}">`;}
+    else{ff.innerHTML=`<label>${flabel(k)}</label><input type="number" step="${ty==='int'?'1':'any'}" id="flt_${k}" value="${v}">`;}
+    box.appendChild(ff);
+  });
+}
+async function loadFilters(){
+  if(source!=='backend'){document.getElementById('filterFields').innerHTML='';return;}
+  try{
+    const r=await fetch(API+'/api/filters');const d=await r.json();
+    filterDefs={types:d.types||{},defaults:d.defaults||{}};
+    renderFilters(d.filters||{},filterDefs.types);
+  }catch(e){document.getElementById('filterFields').innerHTML='';}
+}
+function collectFilters(){
+  const patch={};
+  document.querySelectorAll('#filterFields .ff').forEach(ff=>{
+    const k=ff.dataset.k,ty=ff.dataset.ty,el=document.getElementById('flt_'+k);if(!el)return;
+    if(ty==='bool')patch[k]=el.checked;
+    else if(ty==='list')patch[k]=el.value.split(',').map(s=>s.trim()).filter(Boolean);
+    else patch[k]=(el.value===''?0:parseFloat(el.value));
+  });
+  return patch;
+}
 
 /* ── 通用二次确认弹窗（替代浏览器 confirm）── */
 let _confirmCb=null;
@@ -1193,6 +1250,10 @@ async function savePipe(){
   try{
     const r=await fetch(API+'/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({trending_cmd:cmd,chain:curChain})});
     if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.detail||('HTTP '+r.status));}
+    if(source==='backend'){   // 同时保存质量过滤器（独立于热榜命令）
+      const fr=await fetch(API+'/api/filters',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(collectFilters())});
+      if(!fr.ok){const j=await fr.json().catch(()=>({}));throw new Error(j.detail||('filters HTTP '+fr.status));}
+    }
     applyPollInterval(sec);
     ss.textContent=t('pipe_applied',pollMs/1000);
     toast(t('toast_pipe_saved'),'ok');
