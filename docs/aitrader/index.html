@@ -3,29 +3,33 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Trader - 自动筛选，一键成交，持仓监控</title>
+<title>abc. — screen, one tap, trade</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=IBM+Plex+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
 :root{
-  --ink:#0a0907;--ink2:#0f0d0a;--panel:#14110b;--panel2:#191510;--raise:#211c14;
-  --line:#272219;--line2:#39322560;--paper:#ece3d0;--paper2:#cfc6b1;
-  --dim:#8a8268;--dim2:#5b5443;
-  --lime:#c8f24a;--lime-d:#7e992a;--clay:#ec5a40;--amber:#f0a93b;--teal:#5fb4c4;--blue:#7aa7ff;
+  /* abc. — liquid-glass violet theme (remapped onto the original token names) */
+  --ink:#09070f;--ink2:#0c0a16;--panel:rgba(20,16,34,.72);--panel2:rgba(26,21,44,.64);--raise:rgba(34,27,58,.82);
+  --line:rgba(255,255,255,.09);--line2:rgba(255,255,255,.055);--paper:#f5f3fc;--paper2:#cbc6e2;
+  --dim:#a6a1bd;--dim2:#6f6a86;
+  --lime:#9a82ff;--lime-d:#7b5cff;--clay:#ff6b8a;--amber:#ffc56b;--teal:#9a82ff;--blue:#b9a7ff;
   --mono:'IBM Plex Mono',monospace;--disp:'Bricolage Grotesque',sans-serif;
 }
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%}
 body{font-family:var(--mono);font-size:13px;color:var(--paper);overflow:hidden;
-  background:radial-gradient(140% 70% at 12% -10%,#16130c 0%,transparent 55%),
-             radial-gradient(120% 80% at 92% 0%,#131210 0%,transparent 50%),var(--ink);}
+  background:radial-gradient(120% 85% at 50% 122%, rgba(154,130,255,.34), rgba(123,92,255,.10) 38%, transparent 60%),
+             radial-gradient(140% 70% at 12% -10%,#1a1330 0%,transparent 55%),
+             radial-gradient(120% 80% at 92% 0%,#150f26 0%,transparent 50%),var(--ink);}
+/* liquid-glass on the main surfaces (panels are now translucent → aurora shows through) */
+.card,.kpi,.modal,.demobar,.publicbar{backdrop-filter:blur(22px) saturate(140%);-webkit-backdrop-filter:blur(22px) saturate(140%)}
 .grain{position:fixed;inset:0;pointer-events:none;z-index:90;opacity:.045;mix-blend-mode:overlay;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
 .app{height:100vh;display:flex;flex-direction:column;padding:10px;gap:9px;min-width:1160px}
-.demobar{display:none;flex-shrink:0;background:linear-gradient(90deg,#f0a93b1f,#c8f24a14);border:1px solid #f0a93b55;border-radius:9px;padding:7px 14px;font-size:11.5px;color:var(--amber);text-align:center;letter-spacing:.02em}
+.demobar{display:none;flex-shrink:0;background:linear-gradient(90deg,#f0a93b1f,#9a82ff14);border:1px solid #f0a93b55;border-radius:9px;padding:7px 14px;font-size:11.5px;color:var(--amber);text-align:center;letter-spacing:.02em}
 .demobar.on{display:block}
 .demobar b{color:var(--paper)}
-.publicbar{background:linear-gradient(90deg,#5ad6ff1c,#c8f24a14);border-color:#5ad6ff55;color:#7fd9ff}
+.publicbar{background:linear-gradient(90deg,#5ad6ff1c,#9a82ff14);border-color:#5ad6ff55;color:#7fd9ff}
 /* 公开演示只读：藏掉一切写操作入口（买入/配置/切源/切链/持仓监控/买入数量）。
    后端已对写接口 403，这里再从 UI 收掉，避免访客点了报错。 */
 body.publicro .buybtn,
@@ -42,7 +46,7 @@ body.publicro #escCard{display:none !important}
   background:linear-gradient(180deg,var(--panel2),var(--panel));flex-shrink:0}
 .bar-l{display:flex;align-items:center;gap:13px}
 .logo{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;background:var(--lime);color:var(--ink);animation:beat 2.6s ease-in-out infinite}
-@keyframes beat{0%,100%{box-shadow:0 0 14px #c8f24a44}50%{box-shadow:0 0 28px #c8f24a99}}
+@keyframes beat{0%,100%{box-shadow:0 0 14px #9a82ff44}50%{box-shadow:0 0 28px #9a82ff99}}
 .logo svg{width:20px;height:20px}
 .bar h1{font-family:var(--disp);font-weight:800;font-size:19px;letter-spacing:-.01em;line-height:1}
 .bar h1 i{color:var(--lime);font-style:normal;margin:0 6px}
@@ -52,7 +56,7 @@ body.publicro #escCard{display:none !important}
 .chainpill{position:relative;cursor:pointer}
 .chainpill:hover{border-color:var(--lime)}
 .chainpill .caret{color:var(--dim2);font-size:9px}
-.chainmenu{position:absolute;top:calc(100% + 6px);left:0;min-width:100%;background:var(--panel2,#15150f);border:1px solid var(--line);border-radius:9px;box-shadow:0 10px 28px #000b;padding:4px;display:none;z-index:120}
+.chainmenu{position:absolute;top:calc(100% + 6px);left:0;min-width:100%;background:var(--panel2,#16112c);border:1px solid var(--line);border-radius:9px;box-shadow:0 10px 28px #000b;padding:4px;display:none;z-index:120}
 .chainmenu.on{display:block}
 .chainmenu>div{padding:7px 12px;border-radius:6px;font-family:var(--mono);font-size:12px;color:var(--paper2);white-space:nowrap}
 .chainmenu>div:hover{background:var(--ink);color:var(--lime)}
@@ -116,9 +120,9 @@ table{width:100%;border-collapse:collapse;font-size:12px}
 thead th{position:sticky;top:0;background:var(--panel);color:var(--dim);font-weight:500;font-size:9.5px;letter-spacing:.1em;text-align:left;padding:5px 10px;border-bottom:1px solid var(--line);z-index:2}
 tbody tr{border-bottom:1px solid var(--line);cursor:pointer;transition:background .12s}
 tbody tr:hover{background:var(--panel)}
-tbody tr.sel{background:#c8f24a09;box-shadow:inset 3px 0 0 var(--rc)}
-tbody tr.act{background:#c8f24a07}
-tbody tr.ping{animation:ping .7s ease}@keyframes ping{0%{background:#c8f24a18}100%{}}
+tbody tr.sel{background:#9a82ff09;box-shadow:inset 3px 0 0 var(--rc)}
+tbody tr.act{background:#9a82ff07}
+tbody tr.ping{animation:ping .7s ease}@keyframes ping{0%{background:#9a82ff18}100%{}}
 td{padding:5px 10px;vertical-align:middle}
 .sym{font-family:var(--disp);font-weight:800;font-size:14px}
 .sym small{display:block;font-family:var(--mono);font-weight:400;font-size:8.5px;color:var(--dim2);margin-top:1px}
@@ -135,17 +139,17 @@ td{padding:5px 10px;vertical-align:middle}
 .gates{display:flex;gap:4px}
 .pip{width:23px;height:23px;border-radius:6px;display:grid;place-items:center;border:1px solid var(--line);background:var(--ink);color:var(--dim2)}
 .pip svg{width:11px;height:11px}
-.pip.pass{color:var(--lime);border-color:#c8f24a38;background:#c8f24a0d}
+.pip.pass{color:var(--lime);border-color:#9a82ff38;background:#9a82ff0d}
 .pip.fail{color:#fff;border-color:var(--rc);background:var(--rc)}
 .pip.skip{opacity:.3}
 .pip{cursor:help;transition:border-color .1s,box-shadow .1s}
 .pip:hover{border-color:var(--lime);opacity:1}
-.tip{position:fixed;z-index:200;max-width:340px;background:var(--panel2,#15150f);border:1px solid var(--line);color:var(--paper);font-family:var(--mono);font-size:11px;line-height:1.55;padding:8px 11px;border-radius:8px;box-shadow:0 10px 28px #000b;pointer-events:none;opacity:0;transition:opacity .07s}
+.tip{position:fixed;z-index:200;max-width:340px;background:var(--panel2,#16112c);border:1px solid var(--line);color:var(--paper);font-family:var(--mono);font-size:11px;line-height:1.55;padding:8px 11px;border-radius:8px;box-shadow:0 10px 28px #000b;pointer-events:none;opacity:0;transition:opacity .07s}
 .tip.on{opacity:1}
 .has-tip{cursor:help;text-decoration:underline dotted var(--dim2);text-underline-offset:3px}
 .m{font-weight:600}.m.bad{color:var(--clay)}.m.warn{color:var(--amber)}
 .vd{font-weight:700;font-size:10px;padding:3px 8px;border-radius:6px;letter-spacing:.04em}
-.vd.pass{color:var(--lime);background:#c8f24a14;border:1px solid #c8f24a40}
+.vd.pass{color:var(--lime);background:#9a82ff14;border:1px solid #9a82ff40}
 .vd.watch{color:var(--amber);background:#f0a93b14;border:1px solid #f0a93b40}
 .vd.reject{color:var(--clay);background:#ec5a4014;border:1px solid #ec5a4040}
 .pri{font-family:var(--disp);font-weight:800;font-size:15px}
@@ -286,7 +290,7 @@ td{padding:5px 10px;vertical-align:middle}
   <div class="bar">
     <div class="bar-l">
       <div class="logo" id="ic-logo"></div>
-      <div><h1>AI&nbsp;TRADER<i>//</i><span data-i18n="h1_suffix">筛选 + 一键成交</span></h1><div class="tag" data-i18n="tag">确定性规则抓全 · ML 砍狠 · LLM 只解释幸存者 · 你按下成交</div></div>
+      <div><h1>abc<span style="color:var(--lime)">.</span><i>//</i><span data-i18n="h1_suffix">筛选 + 一键成交</span></h1><div class="tag" data-i18n="tag">确定性规则抓全 · ML 砍狠 · LLM 只解释幸存者 · 你按下成交</div></div>
     </div>
     <div class="bar-r">
       <div class="clock" id="clock">--:--:--</div>
