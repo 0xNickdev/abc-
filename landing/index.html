@@ -578,7 +578,7 @@ async function auth(p){
   }
   step=1; render();
 }
-function next(){ if(step<2){step++;render()} else {closeOb();openTerm()} }
+function next(){ if(step<2){step++;render()} else {closeOb();launch()} }
 function prev(){ if(step>0){step--;render()} }
 function openOb(){step=0;render();document.getElementById('scrim').classList.add('on')}
 function closeOb(){document.getElementById('scrim').classList.remove('on')}
@@ -587,6 +587,14 @@ addEventListener('keydown',e=>{if(e.key==='Escape'){closeOb();closeBuy()}});
 set('playbtn','<span style="display:inline-flex;align-items:center;gap:8px">'+ic.play+' See how it works</span>');
 
 /* ── terminal ── */
+const TERMINAL_URL='http://127.0.0.1:8000';
+async function launch(){
+  try{const c=new AbortController();setTimeout(()=>c.abort(),900);
+    const r=await fetch(TERMINAL_URL+'/api/status',{signal:c.signal});
+    if(r.ok){location.href=TERMINAL_URL;return;}   // real engine up → go to live terminal
+  }catch(e){}
+  openTerm();                                       // otherwise → in-page demo terminal
+}
 let curTok=null, maxBal=12.0, positions=[], activity=[];
 function openTerm(){
   const w=document.getElementById('walletChip');
