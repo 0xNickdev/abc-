@@ -314,7 +314,7 @@ footer{position:relative;z-index:2;margin-top:120px;border-top:1px solid var(--l
   <div class="trust">
     <span><i id="t1"></i> Non-custodial — your keys, your coins</span>
     <span><i id="t2"></i> ~120ms full-board scan</span>
-    <span><i id="t3"></i> SOL · BSC · Base · ETH</span>
+    <span><i id="t3"></i> Solana-native · more chains soon</span>
   </div>
 </div></header>
 
@@ -345,19 +345,19 @@ footer{position:relative;z-index:2;margin-top:120px;border-top:1px solid var(--l
           <span class="tok"><span class="av" style="background:linear-gradient(140deg,#f7a531,#9a82ff)">BO</span> BONK</span>
           <span class="muted col-hide">$0.00002341</span>
           <span class="up">+12.4%</span>
-          <span class="pill buy">Tap to ape</span>
+          <span class="pill buy" onclick="openOb()" style="cursor:pointer">Tap to ape</span>
         </div>
         <div class="row">
           <span class="tok"><span class="av" style="background:linear-gradient(140deg,#9a82ff,#7b5cff)">WI</span> WIF</span>
           <span class="muted col-hide">$2.41</span>
           <span class="up">+5.2%</span>
-          <span class="pill buy">Tap to ape</span>
+          <span class="pill buy" onclick="openOb()" style="cursor:pointer">Tap to ape</span>
         </div>
         <div class="row">
           <span class="tok"><span class="av" style="background:linear-gradient(140deg,#5be0a0,#2e9e7a)">PO</span> POPCAT</span>
           <span class="muted col-hide">$1.18</span>
           <span class="down">−3.1%</span>
-          <span class="pill buy">Tap to ape</span>
+          <span class="pill buy" onclick="openOb()" style="cursor:pointer">Tap to ape</span>
         </div>
       </div>
     </div>
@@ -386,7 +386,7 @@ footer{position:relative;z-index:2;margin-top:120px;border-top:1px solid var(--l
   <h2 class="reveal">Three letters. Three steps.</h2>
   <p class="lead reveal">That's the whole product. Scan, pick, trade — the rest is automated.</p>
   <div class="steps">
-    <div class="step glass reveal"><div class="letter">A</div><span class="num">01</span><h3>Scan</h3><p>abc pulls the trending board across four chains and runs every token through hard gates — most get cut in milliseconds.</p></div>
+    <div class="step glass reveal"><div class="letter">A</div><span class="num">01</span><h3>Scan</h3><p>abc pulls the Solana trending board and runs every token through hard gates — most get cut in milliseconds.</p></div>
     <div class="step glass reveal"><div class="letter">B</div><span class="num">02</span><h3>Pick</h3><p>Survivors get scored and momentum-ranked. The best few surface with a confidence score and a one-line thesis.</p></div>
     <div class="step glass reveal"><div class="letter">C</div><span class="num">03</span><h3>Trade</h3><p>One tap. Position size is pre-computed, the stop-loss is set, the escape monitor starts watching. You're in.</p></div>
   </div>
@@ -399,7 +399,7 @@ footer{position:relative;z-index:2;margin-top:120px;border-top:1px solid var(--l
   <div class="grid" style="grid-template-columns:repeat(4,1fr);margin-top:48px">
     <div class="feat glass reveal" style="text-align:center;padding:34px 18px"><div class="step-letter">120ms</div><p style="margin-top:6px">full-board scan</p></div>
     <div class="feat glass reveal" style="text-align:center;padding:34px 18px"><div class="step-letter">0</div><p style="margin-top:6px">custody — your keys</p></div>
-    <div class="feat glass reveal" style="text-align:center;padding:34px 18px"><div class="step-letter">4</div><p style="margin-top:6px">chains supported</p></div>
+    <div class="feat glass reveal" style="text-align:center;padding:34px 18px"><div class="step-letter">24/7</div><p style="margin-top:6px">markets never sleep</p></div>
     <div class="feat glass reveal" style="text-align:center;padding:34px 18px"><div class="step-letter">9</div><p style="margin-top:6px">rug gates per token</p></div>
   </div>
 </div></section>
@@ -432,13 +432,12 @@ footer{position:relative;z-index:2;margin-top:120px;border-top:1px solid var(--l
   </div>
   <div class="term-body">
     <div class="term-rail">
-      <span class="ri on" id="tr1"></span><span class="ri" id="tr2"></span><span class="ri" id="tr3"></span><span class="ri" id="tr4"></span>
+      <span class="ri on" id="tr1" title="Trending" onclick="termTab(0,this)"></span>
+      <span class="ri" id="tr2" title="Screener" onclick="termTab(1,this)"></span>
+      <span class="ri" id="tr3" title="Positions" onclick="termTab(2,this)"></span>
+      <span class="ri" id="tr4" title="Activity" onclick="termTab(3,this)"></span>
     </div>
-    <div class="term-main">
-      <h2>Top memecoins</h2>
-      <p class="muted" style="text-align:left;margin:0;font-size:14px">Screened live · rugs already filtered · tap Buy to ape. Position size &amp; stop are pre-set from your risk profile.</p>
-      <table class="tt"><thead><tr><th>Token</th><th>Price</th><th>24h</th><th>Liquidity</th><th></th></tr></thead><tbody id="ttbody"></tbody></table>
-    </div>
+    <div class="term-main" id="termMain"></div>
   </div>
 </div>
 
@@ -588,23 +587,35 @@ addEventListener('keydown',e=>{if(e.key==='Escape'){closeOb();closeBuy()}});
 set('playbtn','<span style="display:inline-flex;align-items:center;gap:8px">'+ic.play+' See how it works</span>');
 
 /* ── terminal ── */
-let curTok=null, maxBal=12.0;
+let curTok=null, maxBal=12.0, positions=[], activity=[];
 function openTerm(){
-  renderTok(TOK);
   const w=document.getElementById('walletChip');
   w.textContent = state.wallet ? (state.wallet.slice(0,4)+'…'+state.wallet.slice(-4))
                 : ({google:'Google account',twitter:'X account',email:'Email account',demo:'Demo wallet'})[state.auth]||'Account';
+  termTab(0,document.getElementById('tr1'));
   document.getElementById('term').classList.add('on');
   document.body.style.overflow='hidden';
 }
 function closeTerm(){document.getElementById('term').classList.remove('on');document.body.style.overflow=''}
-function renderTok(list){
-  document.getElementById('ttbody').innerHTML=list.map(t=>`<tr>
-    <td><span class="tok">${avT(t,32)}<span>${t.s}<br><small class="muted" style="font-weight:400">${t.n}</small></span></span></td>
-    <td>${fmt(t.p)}</td><td>${chgT(t.c)}</td><td class="muted">${t.liq}</td>
-    <td style="text-align:right"><button class="bbtn" onclick="openBuy('${t.s}')">Buy</button></td></tr>`).join('');
+const views=[discoverView,discoverView,positionsView,activityView];
+function termTab(i,el){document.querySelectorAll('.term-rail .ri').forEach(r=>r.classList.remove('on'));(el||document.querySelectorAll('.term-rail .ri')[i]).classList.add('on');views[i]()}
+function discoverView(){
+  document.getElementById('termMain').innerHTML=`<h2>Top memecoins</h2><p class="muted" style="text-align:left;margin:0;font-size:14px">Screened live · rugs already filtered · tap Buy to ape. Size &amp; stop are pre-set from your risk profile.</p><table class="tt"><thead><tr><th>Token</th><th>Price</th><th>24h</th><th>Liquidity</th><th></th></tr></thead><tbody id="ttbody"></tbody></table>`;
+  renderTok(TOK);
 }
+function renderTok(list){const b=document.getElementById('ttbody');if(!b)return;b.innerHTML=list.map(t=>`<tr>
+  <td><span class="tok">${avT(t,32)}<span>${t.s}<br><small class="muted" style="font-weight:400">${t.n}</small></span></span></td>
+  <td>${fmt(t.p)}</td><td>${chgT(t.c)}</td><td class="muted">${t.liq}</td>
+  <td style="text-align:right"><button class="bbtn" onclick="openBuy('${t.s}')">Buy</button></td></tr>`).join('');}
 function filterTok(q){q=q.toLowerCase().trim();renderTok(TOK.filter(t=>!q||t.s.toLowerCase().includes(q)||t.n.toLowerCase().includes(q)||t.addr.toLowerCase().includes(q)))}
+function positionsView(){
+  const rows=positions.length?positions.map(p=>`<tr><td><span class="tok">${avT(p.t,32)}<span>${p.t.s}</span></span></td><td>${p.amt} SOL</td><td>${chgT(p.t.c)}</td><td style="text-align:right"><button class="bbtn" style="background:var(--glass);border:1px solid var(--line2)" onclick="toastT('Sell &amp; escape-exit — coming soon')">Manage</button></td></tr>`).join(''):`<tr><td colspan="4" class="muted" style="padding:46px;text-align:center">No positions yet — buy something from Trending.</td></tr>`;
+  document.getElementById('termMain').innerHTML=`<h2>Positions</h2><p class="muted" style="text-align:left;margin:0;font-size:14px">Your open bags. The escape monitor watches each one for rug signals.</p><table class="tt"><thead><tr><th>Token</th><th>Size</th><th>24h</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
+}
+function activityView(){
+  const rows=activity.length?activity.map(x=>`<div class="buyrow"><span class="muted">${x.time}</span><span>${x.text}</span></div>`).join(''):`<p class="muted" style="padding:40px 0;text-align:center">No activity yet.</p>`;
+  document.getElementById('termMain').innerHTML=`<h2>Activity</h2><div style="margin-top:16px">${rows}</div>`;
+}
 function openBuy(sym){curTok=TOK.find(t=>t.s===sym);document.getElementById('buySym').textContent=curTok.s;
   document.getElementById('buyPrice').textContent=fmt(curTok.p);document.getElementById('buyChg').innerHTML=chgT(curTok.c);
   setAmt(0.5);document.getElementById('buyscrim').classList.add('on')}
@@ -624,6 +635,8 @@ async function doBuy(){
   }catch(e){ msg='simulated (demo — terminal backend offline)'; }
   await new Promise(r=>setTimeout(r,450));
   btn.disabled=false;btn.textContent='Confirm buy';closeBuy();
+  positions.unshift({t:curTok,amt});
+  activity.unshift({time:new Date().toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'}),text:`Bought ${amt} SOL of ${curTok.s} · ${msg}`});
   toastT(`✓ Bought ${amt} SOL of ${curTok.s} · ${msg}`); flash();
 }
 function toastT(m){const t=document.createElement('div');t.textContent=m;
