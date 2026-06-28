@@ -536,9 +536,28 @@ const fmt=(p)=> p<0.001 ? '$'+p.toFixed(8) : '$'+p.toLocaleString(undefined,{max
 const avT=(t,sz)=>`<span class="av" style="background:linear-gradient(140deg,${t.av},#9a82ff);width:${sz||22}px;height:${sz||22}px;border-radius:${sz?9:6}px;font-size:${sz?11:10}px">${t.s.slice(0,2)}</span>`;
 const chgT=(c)=>`<span class="${c>=0?'up':'down'}">${c>=0?'+':'−'}${Math.abs(c)}%</span>`;
 
-/* ── live ticker ── */
-(function(){const el=document.getElementById('tkTrack');if(!el)return;
- el.innerHTML=[...TOK,...TOK].map(t=>`<div class="tk">${avT(t)}<b>${t.s}</b> <span class="pr">${fmt(t.p)}</span> ${chgT(t.c)}</div>`).join('');})();
+/* ── live ticker + REAL prices via DexScreener (free, no key) ── */
+function renderTicker(){const el=document.getElementById('tkTrack');if(!el)return;
+ el.innerHTML=[...TOK,...TOK].map(t=>`<div class="tk">${avT(t)}<b>${t.s}</b> <span class="pr">${fmt(t.p)}</span> ${chgT(t.c)}</div>`).join('');}
+renderTicker();
+function abbrevUsd(n){n=+n||0;return n>=1e9?'$'+(n/1e9).toFixed(1)+'B':n>=1e6?'$'+(n/1e6).toFixed(1)+'M':n>=1e3?'$'+(n/1e3).toFixed(0)+'K':'$'+n.toFixed(0)}
+async function loadReal(){
+ try{
+   const r=await fetch('https://api.dexscreener.com/latest/dex/tokens/'+TOK.map(t=>t.addr).join(','));
+   const pairs=(await r.json()).pairs||[];
+   TOK.forEach(t=>{
+     const ps=pairs.filter(p=>p.baseToken&&p.baseToken.address&&p.baseToken.address.toLowerCase()===t.addr.toLowerCase());
+     if(!ps.length)return;
+     const best=ps.reduce((a,b)=>(((b.liquidity&&b.liquidity.usd)||0)>((a.liquidity&&a.liquidity.usd)||0)?b:a));
+     if(best.priceUsd)t.p=parseFloat(best.priceUsd);
+     if(best.priceChange&&best.priceChange.h24!=null)t.c=Math.round(parseFloat(best.priceChange.h24)*10)/10;
+     if(best.liquidity&&best.liquidity.usd)t.liq=abbrevUsd(best.liquidity.usd);
+   });
+   renderTicker();
+   if(document.getElementById('term').classList.contains('on')&&document.getElementById('ttbody'))renderTok(TOK);
+ }catch(e){/* network blocked → keep static fallback */}
+}
+loadReal(); setInterval(loadReal,30000);
 
 /* ── onboarding flow (A=get in · B=risk · C=launch) ── */
 let step=0;
