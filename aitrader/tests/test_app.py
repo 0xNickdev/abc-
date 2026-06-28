@@ -197,6 +197,30 @@ def test_position_size_capped():
     assert 0 < size <= appmod.CFG["max_per_trade_sol"]
 
 
+# ── smart-money 跟踪钱包（信号，非跟单）──
+class TestWallets:
+    def test_confluence_matches_tracked(self):
+        import wallets
+        if not wallets.TRACKED:
+            import pytest as _p; _p.skip("no wallets.json present")
+        addr = next(iter(wallets.TRACKED))
+        hits = wallets.confluence([addr, "NOT_A_TRACKED_ADDR"])
+        assert len(hits) == 1 and hits[0]["address"] == addr
+
+    def test_confluence_dedups_and_ignores_unknown(self):
+        import wallets
+        if not wallets.TRACKED:
+            import pytest as _p; _p.skip("no wallets.json present")
+        addr = next(iter(wallets.TRACKED))
+        assert len(wallets.confluence([addr, addr])) == 1
+        assert wallets.confluence(["x", "y"]) == []
+
+    def test_tracked_hits_boost_priority(self):
+        base = appmod.priority_score(feat(tracked_hits=0), 0.8, "early")
+        boosted = appmod.priority_score(feat(tracked_hits=3), 0.8, "early")
+        assert boosted > base
+
+
 # ── 自动止盈止损条件单装配 ──
 def test_build_condition_orders():
     orders = appmod.build_condition_orders()

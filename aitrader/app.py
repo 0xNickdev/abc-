@@ -25,6 +25,7 @@ app.py — GMGN AI Trader 本地后端 (FastAPI)
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import math
 import os
@@ -36,12 +37,15 @@ import subprocess
 import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+import wallets  # 私有 smart-money 跟踪钱包（信号，非跟单）
 
 random.seed(7)
 HERE = pathlib.Path(__file__).resolve().parent
@@ -532,6 +536,8 @@ class TokenFeatures:
     renowned: int = 0
     sniper_count: int = 0
     sm_confluence: int = 0   # = smart_degen + renowned
+    tracked_hits: int = 0            # 我方私有跟踪钱包在场数量（smart-money 信号）
+    tracked_names: list = field(default_factory=list)
 
 class FeatureExtractor:
     """trending 一行已含几乎全部尽调字段，直接据此建特征（省掉逐个 info/security/holders）。"""
@@ -642,6 +648,7 @@ def priority_score(f: TokenFeatures, conv: float, crowd: str) -> int:
          + w["turnover"] * s_turn + w["consensus"] * s_cons + w["safety"] * s_safe)
     if f.chg_1h <= CFG["momentum_reject_chg1h"]:        # 阴跌沉底
         s *= 0.4
+    s += min(18, f.tracked_hits * 7)                    # 私有 smart-money 在场 → 强加成
     return max(0, min(99, round(s)))
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -960,6 +967,25 @@ def log(action: str, symbol: str, reason: str, extra: dict | None = None):
 # ──────────────────────────────────────────────────────────────────────────
 # 11. 筛选流水线（核心：确定性先筛 → 评分 → LLM 只判幸存者 → 产候选，不执行）
 # ──────────────────────────────────────────────────────────────────────────
+def _tracked_for(f: TokenFeatures, g: GMGNAdapter):
+    """某 token 命中多少我方私有跟踪钱包（smart-money 信号）。
+    Live + 显式开启(GMGN_WALLET_HOLDERS=1)：用 token holders ∩ 跟踪集（较慢，默认关，保执行速度）。
+    Mock/默认：用地址确定性合成 0~3 命中，便于演示与测试，不污染真实数据。"""
+    if os.getenv("GMGN_WALLET_HOLDERS", "").strip().lower() in ("1", "true", "yes", "on") and ST.is_live_adapter:
+        try:
+            h = g.token_holders(f.address)
+            rows = h.get("holders") or h.get("list") or h.get("data") or []
+            addrs = [x.get("address") for x in rows if isinstance(x, dict)]
+            hits = wallets.confluence(addrs)
+            return len(hits), [(w["name"] or w["address"][:4]) for w in hits][:5]
+        except Exception:
+            return 0, []
+    if not ST.is_live_adapter:   # 演示合成
+        n = int(hashlib.md5(f.address.encode()).hexdigest(), 16) % 4
+        names = [w.get("name") or a[:4] for a, w in list(wallets.TRACKED.items())[:n]]
+        return n, names
+    return 0, []
+
 def screen_once(chain: str) -> dict:
     g = ST.adapter_for(chain)
     fx = FeatureExtractor(g)
@@ -974,6 +1000,7 @@ def screen_once(chain: str) -> dict:
         if not t.get("address"):
             continue
         f = fx.build_from_row(t)                          # STEP 2 尽调（直接用 trending 行字段）
+        f.tracked_hits, f.tracked_names = _tracked_for(f, g)   # 私有 smart-money 共识信号
         ok, reason, gate_idx = hard_gates(f, ST.filters) # STEP 3 确定性硬门槛（先跑，含可调过滤器）
         if not ok:
             decisions.append(_reject(f, reason, gate_idx, None))
@@ -1051,6 +1078,7 @@ def _feat(f):
                 renounced_mint=f.renounced_mint, buy_tax=round(f.buy_tax, 3), sell_tax=round(f.sell_tax, 3),
                 bundler=round(f.bundler, 2), dev_hold=round(f.dev_hold, 2), top10=round(f.top10, 2),
                 smart_degen=f.smart_degen, renowned=f.renowned, sm_confluence=f.sm_confluence,
+                tracked_hits=f.tracked_hits, tracked_names=f.tracked_names,
                 sniper_count=f.sniper_count, chg_1h=round(f.chg_1h, 3), chg_5m=round(f.chg_5m, 3),
                 buy_ratio=round(f.buy_ratio, 2), turnover=round(f.turnover, 2),
                 liquidity=f.liquidity, mcap=f.mcap, age_min=round(f.age_min, 1))
@@ -1243,7 +1271,6 @@ app = FastAPI(title="GMGN AI Trader (local)", lifespan=_lifespan)
 
 # 允许 abc. 前端(本地 file:// 或别处托管的 landing)跨源调用本机引擎。
 # 仍只绑 127.0.0.1（见 __main__），CORS 只是放开浏览器同源限制，不扩大监听面。
-from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=False,
     allow_methods=["*"], allow_headers=["*"],
@@ -1363,6 +1390,11 @@ def api_settings_reset(c: ChainIn):
     with ST.lock:
         ST.reset_trending_cmd(ch)
     return dict(ok=True, trending_cmd=ST.get_trending_cmd(ch))
+
+@app.get("/api/wallets")
+def api_wallets():
+    """私有 smart-money 跟踪钱包统计（总数/分组/样本）。地址在响应里做脱敏。"""
+    return wallets.summary()
 
 @app.get("/api/filters")
 def api_filters_get():
