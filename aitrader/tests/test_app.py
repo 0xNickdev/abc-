@@ -202,7 +202,7 @@ class TestWallets:
     def test_confluence_matches_tracked(self):
         import wallets
         if not wallets.TRACKED:
-            import pytest as _p; _p.skip("no wallets.json present")
+            pytest.skip("no wallets.json present")
         addr = next(iter(wallets.TRACKED))
         hits = wallets.confluence([addr, "NOT_A_TRACKED_ADDR"])
         assert len(hits) == 1 and hits[0]["address"] == addr
@@ -210,7 +210,7 @@ class TestWallets:
     def test_confluence_dedups_and_ignores_unknown(self):
         import wallets
         if not wallets.TRACKED:
-            import pytest as _p; _p.skip("no wallets.json present")
+            pytest.skip("no wallets.json present")
         addr = next(iter(wallets.TRACKED))
         assert len(wallets.confluence([addr, addr])) == 1
         assert wallets.confluence(["x", "y"]) == []
