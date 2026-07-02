@@ -39,6 +39,9 @@ body.publicro .seg2,
 body.publicro .amt-wrap,
 body.publicro #chainPillWrap,
 body.publicro #escCard{display:none !important}
+/* 凭据面板仅运营者(admin)可见；外部交易者看不到（密钥服务器侧管理 / 钱包 non-custodial）。
+   默认隐藏，待 /api/status 确认 admin 才显示，避免外部用户误触配置。 */
+body:not(.admin) #gearBtn{display:none !important}
 
 /* status strip */
 .bar{display:flex;align-items:center;justify-content:space-between;gap:18px;
@@ -75,6 +78,12 @@ body.publicro #escCard{display:none !important}
 .gear{width:36px;height:36px;border-radius:9px;border:1px solid var(--line);background:var(--ink2);color:var(--paper2);display:grid;place-items:center;cursor:pointer}
 .gear:hover{border-color:var(--lime);color:var(--lime)}.gear svg{width:16px;height:16px}
 .langbtn{height:36px;padding:0 12px;border-radius:9px;border:1px solid var(--line);background:var(--ink2);color:var(--paper2);display:grid;place-items:center;cursor:pointer;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.04em;white-space:nowrap}
+/* Connect Wallet (non-custodial · Phantom)：连接后显示截断地址，绿点表示已连。 */
+.wbtn{height:36px;padding:0 13px;border-radius:9px;border:1px solid var(--line);background:var(--ink2);color:var(--paper2);display:flex;align-items:center;gap:7px;cursor:pointer;font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.03em;white-space:nowrap;transition:.15s}
+.wbtn:hover{border-color:var(--lime);color:var(--lime)}
+.wbtn.on{border-color:var(--lime);color:var(--lime)}
+.wbtn .wdot{width:7px;height:7px;border-radius:50%;background:var(--dim)}
+.wbtn.on .wdot{background:var(--lime);box-shadow:0 0 6px var(--lime)}
 .langbtn:hover{border-color:var(--lime);color:var(--lime)}
 .pill.mode.clk{cursor:pointer;transition:border-color .15s}
 .pill.mode.clk:hover{border-color:var(--lime)}
@@ -306,6 +315,7 @@ td{padding:5px 10px;vertical-align:middle}
       <div class="pill"><div><span class="k">P50 LAT</span><span class="v" id="lat">182ms</span></div></div>
       <div class="pill mode clk" id="modePillWrap" onclick="toggleMode()" data-i18n-title="mode_toggle_title"><span class="dot" id="modeDot" style="background:var(--amber)"></span><div><span class="k">MODE</span><span class="v" id="modePill">模拟盘</span></div></div>
       <div class="seg2"><button id="srcDemo" class="on" onclick="setSource('demo')">DEMO</button><button id="srcBe" onclick="setSource('backend')" data-i18n="src_backend">本地后端</button></div>
+      <div class="wbtn" id="walletBtn" onclick="onWalletClick()" data-i18n-title="wallet_title"><span class="wdot"></span><span id="walletLbl" data-i18n="wallet_connect">Connect Wallet</span></div>
       <div class="langbtn" id="langBtn" data-i18n-title="lang_title" onclick="switchLang()">中文</div>
       <div class="gear" id="gearBtn" data-i18n-title="gear_title"></div>
     </div>
@@ -413,6 +423,10 @@ const I18N={
     tag:'确定性规则抓全 · ML 砍狠 · LLM 只解释幸存者 · 你按下成交',
     mode_tip:'成交模式　|　模拟盘：买卖只记录、不上链（当前锁定，先感受用）；实盘：经签名密钥真实成交、动用资金',
     gear_title:'配置凭据',
+    wallet_title:'连接你的钱包（Phantom · 自托管，密钥不离开浏览器）',
+    wallet_connect:'连接钱包', wallet_connected:'已连接', wallet_disconnect:'断开连接',
+    wallet_no_phantom:'未检测到 Phantom 钱包，请先安装 phantom.app', wallet_connected_toast:'钱包已连接',
+    wallet_disconnected_toast:'钱包已断开',
     lang_title:'中文 / English',
     chain_title:'点击切换链',
     src_backend:'本地后端',
@@ -563,6 +577,10 @@ const I18N={
     tag:'Deterministic rules cast wide · ML cuts hard · LLM only explains survivors · you press to trade',
     mode_tip:'Trade mode　|　Shadow: trades recorded only, never on-chain (locked for now, just to feel it); Live: real settlement via signing key, real funds',
     gear_title:'Configure credentials',
+    wallet_title:'Connect your wallet (Phantom · non-custodial, keys never leave your browser)',
+    wallet_connect:'Connect Wallet', wallet_connected:'Connected', wallet_disconnect:'Disconnect',
+    wallet_no_phantom:'Phantom wallet not found — install it at phantom.app', wallet_connected_toast:'Wallet connected',
+    wallet_disconnected_toast:'Wallet disconnected',
     lang_title:'中文 / English',
     chain_title:'Click to switch chain',
     src_backend:'Local backend',
@@ -1140,7 +1158,7 @@ function setSource(s){
   const mcp=document.getElementById('mcpPill');
   if(s==='backend'){mcp.textContent='LIVE';mcp.style.color='var(--lime)';
     if(beReady){bePolling=true;scanCycle();}              // 环境已有 key，直接轮询，不弹框
-    else{toast(t('toast_be_switched'),'ok');openCfg();}}
+    else{toast(t('toast_be_switched'),'ok');if(document.body.classList.contains('admin'))openCfg();}}  // 凭据面板仅运营者弹出
   else{mcp.textContent='DEMO';mcp.style.color='var(--amber)';loadingScreen=false;T=freshSeed();POS=seedPositions();RISK={open:1,openMax:20,expo:0.2857,expoMax:1.0,loss:0,lossMax:0.5,consec:0,consecMax:3,killed:false};sel=-1;cycles=1;renderAll(false);feed.innerHTML='';logScreen();}
 }
 
@@ -1148,6 +1166,47 @@ function setSource(s){
 function openCfg(){document.getElementById('cfgScrim').classList.add('on');}
 function closeCfg(){document.getElementById('cfgScrim').classList.remove('on');}
 document.getElementById('gearBtn').onclick=openCfg;
+
+/* ── wallet (non-custodial · Phantom) ──
+   自托管：仅连接、读取公钥、展示地址。私钥永不离开浏览器；签名(下单)在后续执行阶段做。 */
+let walletPubkey=null;
+/* 多用户：连上钱包后，所有发往本引擎 /api/* 的请求自动带 X-Wallet —— 后端按 pubkey
+   分区状态（持仓/过滤器/模式/机器人）。未连钱包 → 不带头 → 默认会话(local)。 */
+const _rawFetch=window.fetch.bind(window);
+window.fetch=function(url,opts){
+  if(walletPubkey&&typeof url==='string'&&url.indexOf(API+'/api/')===0){
+    opts=opts||{};opts.headers=Object.assign({},opts.headers||{},{'X-Wallet':walletPubkey});
+  }
+  return _rawFetch(url,opts);
+};
+function _provider(){const p=window.phantom&&window.phantom.solana;if(p&&p.isPhantom)return p;if(window.solana&&window.solana.isPhantom)return window.solana;return null;}
+function _short(a){return a.slice(0,4)+'…'+a.slice(-4);}
+function renderWallet(){
+  const btn=document.getElementById('walletBtn'),lbl=document.getElementById('walletLbl');if(!btn)return;
+  if(walletPubkey){btn.classList.add('on');lbl.textContent=_short(walletPubkey);btn.title=t('wallet_disconnect')+' · '+walletPubkey;}
+  else{btn.classList.remove('on');lbl.textContent=t('wallet_connect');btn.title=t('wallet_title');}
+}
+async function connectWallet(){
+  const p=_provider();
+  if(!p){toast(t('wallet_no_phantom'),'err');window.open('https://phantom.app/','_blank');return;}
+  try{const res=await p.connect();walletPubkey=res.publicKey.toString();renderWallet();toast(t('wallet_connected_toast'),'ok');}
+  catch(e){/* 用户拒绝授权：静默 */}
+}
+async function disconnectWallet(){
+  const p=_provider();try{if(p)await p.disconnect();}catch(e){}
+  walletPubkey=null;renderWallet();toast(t('wallet_disconnected_toast'),'ok');
+}
+function onWalletClick(){walletPubkey?disconnectWallet():connectWallet();}
+(function initWallet(){
+  const p=_provider();if(!p){renderWallet();return;}
+  if(p.on){
+    p.on('connect',pk=>{walletPubkey=(pk&&pk.toString&&pk.toString())||(p.publicKey&&p.publicKey.toString())||walletPubkey;renderWallet();});
+    p.on('disconnect',()=>{walletPubkey=null;renderWallet();});
+    p.on('accountChanged',pk=>{walletPubkey=pk?pk.toString():null;renderWallet();});
+  }
+  // 静默重连：之前授权过则自动连上，不弹窗
+  p.connect({onlyIfTrusted:true}).then(res=>{walletPubkey=res.publicKey.toString();renderWallet();}).catch(()=>renderWallet());
+})();
 /* 仅当“按下”和“松开”都在遮罩本身时才关闭——避免在输入框里拖拽复制、松手落在遮罩上误关 */
 function dismissOnBackdrop(id,fn){
   const el=document.getElementById(id);let downSelf=false;
@@ -1449,7 +1508,7 @@ function applyI18n(){
   renderAll(false);
   if(source==='demo'){feed.innerHTML='';logScreen();}   // 重置日志为当前语言
 }
-function switchLang(){lang=(lang==='zh'?'en':'zh');localStorage.setItem('aitrader_lang',lang);applyI18n();}
+function switchLang(){lang=(lang==='zh'?'en':'zh');localStorage.setItem('aitrader_lang',lang);applyI18n();renderWallet();}
 
 /* ── init ── */
 applyI18n();tick();
@@ -1472,6 +1531,7 @@ async function autoConnect(){
   try{
     const r=await fetch(API+'/api/status'); if(!r.ok)throw 0;
     const d=await r.json(); beReady=!!d.has_key; tradingLocked=!!d.trading_locked;
+    if(d.admin){document.body.classList.add('admin');}   // 运营者模式：显示凭据面板（外部用户不显示）
     if(d.public_demo){
       // 公开只读演示：后端定时广播真实筛选缓存。锁定 UI 为只读，链跟随后端。
       document.body.classList.add('publicro');

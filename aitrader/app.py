@@ -39,12 +39,15 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass, field
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import backtest  # 纸面/SHADOW 回测复盘（已实现 PnL/胜率/R）
+import bot  # 自主执行回路（量化机器人，纸面优先）
+import strategy  # ABC Alpha v1：具名策略预设 + 入场信号评估
 import wallets  # 私有 smart-money 跟踪钱包（信号，非跟单）
 
 random.seed(7)
@@ -163,6 +166,11 @@ LIVE_TRADING_DISABLED = os.getenv("ENABLE_LIVE_TRADING", "").strip().lower() not
 # 仍只绑 127.0.0.1，公网暴露请走带鉴权/限频的隧道（cloudflared / ngrok）在外层完成。
 PUBLIC_DEMO = os.getenv("PUBLIC_DEMO", "").strip().lower() in ("1", "true", "yes", "on")
 
+# 管理员/运营模式：只有运营者（你）需要从 UI 写凭据(API/LLM key)。外部交易者不应看到凭据面板，
+# 也无权写 .env —— 他们的密钥(钱包)走 non-custodial（浏览器侧），运营密钥在服务器 .env 自动加载。
+# 设 ABC_ADMIN=1 解锁凭据面板与 /api/config 写入；默认(未设)=外部用户模式，凭据面板隐藏、写入 403。
+ADMIN_MODE = os.getenv("ABC_ADMIN", "").strip().lower() in ("1", "true", "yes", "on")
+
 # 热榜扫描命令（可在前端「筛选结果」齿轮里改）。按链给默认值：
 #   sol 用经调优的命令（含 not_wash_trading 过滤）；其他链先用通用模板（仅换 --chain）。
 DEFAULT_TRENDING_CMDS = {
@@ -276,6 +284,71 @@ def save_filters(flt: dict):
         FILTERS_PATH.write_text(json.dumps(flt, ensure_ascii=False))
     except Exception:
         pass
+
+# ── 多用户落盘：每个钱包 pubkey 一份 持仓/过滤器（outputs/users/<pubkey>/）。
+#    默认会话(local) 仍用顶层 positions.json / filters.json，保持单用户行为与既有测试不变。
+USERS_DIR = OUT_DIR / "users"
+DEFAULT_PUBKEY = "local"
+
+def _safe_pk(pubkey: str) -> str:
+    """pubkey → 安全文件名（防路径穿越）：仅留字母数字/_-，截断 64。"""
+    return re.sub(r"[^A-Za-z0-9_-]", "", pubkey or "")[:64] or "anon"
+
+def _user_dir(pubkey: str) -> pathlib.Path:
+    return USERS_DIR / _safe_pk(pubkey)
+
+def load_user_positions(pubkey: str) -> list:
+    p = _user_dir(pubkey) / "positions.json"
+    if not p.exists():
+        return []
+    try:
+        data = json.loads(p.read_text())
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+def save_user_positions(pubkey: str, lst: list):
+    try:
+        d = _user_dir(pubkey); d.mkdir(parents=True, exist_ok=True)
+        (d / "positions.json").write_text(json.dumps(lst, ensure_ascii=False))
+    except Exception:
+        pass
+
+def load_user_filters(pubkey: str) -> dict:
+    base = dict(DEFAULT_FILTERS)
+    p = _user_dir(pubkey) / "filters.json"
+    if p.exists():
+        try:
+            data = json.loads(p.read_text())
+            if isinstance(data, dict):
+                base.update(sanitize_filters(data))
+        except Exception:
+            pass
+    return base
+
+def save_user_filters(pubkey: str, flt: dict):
+    try:
+        d = _user_dir(pubkey); d.mkdir(parents=True, exist_ok=True)
+        (d / "filters.json").write_text(json.dumps(flt, ensure_ascii=False))
+    except Exception:
+        pass
+
+def save_positions(lst: list):
+    """默认会话(local)持仓落盘到顶层 positions.json（重启/reload 不丢）。"""
+    try:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        POSITIONS_PATH.write_text(json.dumps(lst, ensure_ascii=False))
+    except Exception:
+        pass
+
+def load_positions() -> list:
+    if not POSITIONS_PATH.exists():
+        return []
+    try:
+        data = json.loads(POSITIONS_PATH.read_text())
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
 
 # ──────────────────────────────────────────────────────────────────────────
 # 2. GMGN 适配器
@@ -842,22 +915,18 @@ class RiskManager:
 
 SUPPORTED_CHAINS = ("sol", "bsc", "base", "eth")
 
-class AppState:
-    """链改为「请求维度」：不再有全局当前链，按链缓存 adapter + trending 结果。
-    mode/risk/positions 仍全局（钱包级、跨链合一）。self.chain 仅作启动默认 + status 展示。"""
+class MarketLayer:
+    """共享市场层（运营者维度，全用户共用）：行情适配器 + 热榜缓存/命令。
+    用运营者的 API key 拉数据，与具体用户无关 → 全局单例、跨会话共享，避免重复打 cli/配额翻倍。
+    链是「请求维度」：不存全局当前链，按链缓存 adapter + trending。"""
     def __init__(self):
         self.lock = threading.Lock()
-        self.mode = "SHADOW"          # SHADOW | LIVE（钱包级安全设置，全局）
         self.chain = CFG["chain"]     # 启动默认链（仅用于未带 chain 的请求兜底 + status 展示）
         self.live = False             # 是否已配 key（决定按链建 Live 还是 Mock 适配器）
-        self._adapters: dict[str, GMGNAdapter] = {}              # chain -> 适配器（缓存）
-        self._mock = MockGMGN()                                  # 无 key 时所有链共用一个 Mock
-        self._trending_cache: dict[str, tuple] = {}             # chain -> (monotonic_ts, rows)
-        self.risk = RiskManager()
-        self.positions: list[dict] = []          # 每项含 entry 快照 + cycles + chain
-        self.trending_cmds: dict[str, str] = load_trending_cmds()   # 按链热榜命令（落盘持久，重启不丢）
-        self.filters: dict = load_filters()                         # 可调过滤器阈值（落盘持久，重启不丢）
-        # 启动即读环境 key：有 API key 就走真实数据适配器（交易仍要 LIVE 模式 + 私钥）。
+        self._adapters: dict[str, GMGNAdapter] = {}
+        self._mock = MockGMGN()
+        self._trending_cache: dict[str, tuple] = {}
+        self.trending_cmds: dict[str, str] = load_trending_cmds()
         env = load_env()
         if env.get("GMGN_API_KEY"):
             self.chain = env.get("GMGN_CHAIN", self.chain) or self.chain
@@ -867,11 +936,10 @@ class AppState:
                 pass
 
     @property
-    def is_live_adapter(self) -> bool:   # 兼容旧引用（status / 监控判分支）
+    def is_live_adapter(self) -> bool:
         return self.live
 
     def adapter_for(self, chain: str) -> GMGNAdapter:
-        """取某链的适配器（按链缓存）。无 key → 共用 Mock；有 key → 各链一个 LiveGMGN（同 key 仅 --chain 不同）。"""
         if not self.live:
             return self._mock
         a = self._adapters.get(chain)
@@ -881,7 +949,6 @@ class AppState:
         return a
 
     def use_live(self):
-        """配了 key：标记走真实数据，清空适配器缓存（让各链按需重建为 Live）。"""
         self.live = True
         self._adapters.clear()
         self._trending_cache.clear()
@@ -891,31 +958,14 @@ class AppState:
 
     def set_trending_cmd(self, chain: str, cmd: str):
         self.trending_cmds[chain] = cmd
-        save_trending_cmds(self.trending_cmds)        # 落盘：重启/刷新不回默认
+        save_trending_cmds(self.trending_cmds)
 
     def reset_trending_cmd(self, chain: str):
-        """重置该链热榜命令为默认（删除用户覆盖 + 作废缓存 + 落盘）。"""
         self.trending_cmds.pop(chain, None)
         self._trending_cache.pop(chain, None)
         save_trending_cmds(self.trending_cmds)
 
-    def set_filters(self, patch: dict) -> dict:
-        """合并清洗后的过滤器补丁到当前过滤器并落盘；返回生效后的全量过滤器。"""
-        self.filters.update(sanitize_filters(patch))
-        save_filters(self.filters)
-        return self.filters
-
-    def reset_filters(self) -> dict:
-        """重置过滤器为默认（删除落盘覆盖）。"""
-        self.filters = dict(DEFAULT_FILTERS)
-        try:
-            FILTERS_PATH.unlink(missing_ok=True)
-        except Exception:
-            pass
-        return self.filters
-
     def trending_rows(self, chain: str) -> list:
-        """取某链热榜行：TTL 内复用缓存（同链多 tab 共享一次 cli），过期才真打 cli。"""
         now = time.monotonic()
         hit = self._trending_cache.get(chain)
         if hit and (now - hit[0]) < TRENDING_CACHE_TTL:
@@ -924,10 +974,83 @@ class AppState:
         self._trending_cache[chain] = (now, rows)
         return rows
 
+MK = MarketLayer()
+
+class UserSession:
+    """单个用户(钱包 pubkey)的会话：自己的 模式/过滤器/持仓/风控/机器人。
+    市场层(adapter/trending)走共享 MK；为兼容既有调用，市场方法在此委托给 MK。
+    ⚠️ 身份当前 = 请求头(X-Wallet)分区，非签名鉴权；真正的钱包签名鉴权随 Stage 5(浏览器签名)一起加。
+    本机 127.0.0.1 单机场景下足够；公网部署前必须补 sign-in-with-wallet。"""
+    def __init__(self, pubkey: str):
+        self.pubkey = pubkey
+        self._default = (pubkey == DEFAULT_PUBKEY)
+        self.lock = threading.Lock()
+        self.mode = "SHADOW"          # SHADOW | LIVE（每用户独立）
+        self.risk = RiskManager()
+        self.bot = bot.BotRunner()    # 每用户一个自主回路（默认关闭）
+        self.filters = load_filters() if self._default else load_user_filters(pubkey)
+        self.positions = load_positions() if self._default else load_user_positions(pubkey)
+
+    # ── 市场层委托（保持旧 ST.* 调用兼容；全部走共享 MK）──
+    @property
+    def is_live_adapter(self) -> bool: return MK.is_live_adapter
+    @property
+    def live(self) -> bool: return MK.live
+    @property
+    def chain(self) -> str: return MK.chain
+    def adapter_for(self, chain): return MK.adapter_for(chain)
+    def use_live(self): return MK.use_live()
+    def get_trending_cmd(self, chain): return MK.get_trending_cmd(chain)
+    def set_trending_cmd(self, chain, cmd): return MK.set_trending_cmd(chain, cmd)
+    def reset_trending_cmd(self, chain): return MK.reset_trending_cmd(chain)
+    def trending_rows(self, chain): return MK.trending_rows(chain)
+
+    # ── 每用户状态 ──
     def exposure(self):
         return round(sum(p["size_sol"] for p in self.positions), 4)
 
-ST = AppState()
+    def save_positions(self):
+        if self._default:
+            save_positions(self.positions)
+        else:
+            save_user_positions(self.pubkey, self.positions)
+
+    def persist_filters(self):
+        if self._default:
+            save_filters(self.filters)
+        else:
+            save_user_filters(self.pubkey, self.filters)
+
+    def set_filters(self, patch: dict) -> dict:
+        self.filters.update(sanitize_filters(patch))
+        self.persist_filters()
+        return self.filters
+
+    def reset_filters(self) -> dict:
+        self.filters = dict(DEFAULT_FILTERS)
+        if self._default:
+            try:
+                FILTERS_PATH.unlink(missing_ok=True)
+            except Exception:
+                pass
+        else:
+            save_user_filters(self.pubkey, self.filters)
+        return self.filters
+
+SESSIONS: dict[str, UserSession] = {}
+_sessions_lock = threading.Lock()
+
+def get_session(pubkey: str | None) -> UserSession:
+    """按 pubkey 取/建会话；空 pubkey → 默认会话(local，兼容单用户/未连钱包)。"""
+    pk = (pubkey or "").strip() or DEFAULT_PUBKEY
+    with _sessions_lock:
+        s = SESSIONS.get(pk)
+        if s is None:
+            s = UserSession(pk)
+            SESSIONS[pk] = s
+        return s
+
+ST = get_session(DEFAULT_PUBKEY)    # 默认会话：兼容既有 ST.* 引用与单用户/未连钱包场景
 
 def valid_chain(ch: str) -> str:
     ch = (ch or "").lower()
@@ -938,29 +1061,10 @@ def valid_chain(ch: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────
 # 10. 日志（私有 ground truth；反馈飞轮的原料）
 # ──────────────────────────────────────────────────────────────────────────
-def save_positions():
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    try:
-        POSITIONS_PATH.write_text(json.dumps(ST.positions, ensure_ascii=False))
-    except Exception:
-        pass
-
-def load_positions() -> list:
-    if not POSITIONS_PATH.exists():
-        return []
-    try:
-        data = json.loads(POSITIONS_PATH.read_text())
-        return data if isinstance(data, list) else []
-    except Exception:
-        return []
-
-# 启动时把落盘的持仓加载回内存（reload/重启后持仓不丢，且与筛选榜无关）
-ST.positions = load_positions()
-
-def log(action: str, symbol: str, reason: str, extra: dict | None = None):
+def log(action: str, symbol: str, reason: str, extra: dict | None = None, mode: str | None = None):
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     rec = dict(ts=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-               action=action, symbol=symbol, reason=reason, mode=ST.mode, **(extra or {}))
+               action=action, symbol=symbol, reason=reason, mode=(mode or ST.mode), **(extra or {}))
     with LOG_PATH.open("a") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
@@ -986,13 +1090,14 @@ def _tracked_for(f: TokenFeatures, g: GMGNAdapter):
         return n, names
     return 0, []
 
-def screen_once(chain: str) -> dict:
-    g = ST.adapter_for(chain)
+def screen_once(chain: str, s: UserSession | None = None) -> dict:
+    s = s or ST                       # 会话（多用户：每 pubkey 自己的过滤器/持仓/风控）
+    g = s.adapter_for(chain)          # 市场层共享（运营者 key），与会话无关
     fx = FeatureExtractor(g)
     judge = LLMJudge()
 
     # STEP 1 trending（便宜，行内已含富字段；同链 TTL 内复用缓存）→ top-N 粗筛
-    candidates = ST.trending_rows(chain)
+    candidates = s.trending_rows(chain)
     candidates = candidates[:CFG["top_n_prefilter"]]
 
     decisions, survivors = [], []
@@ -1001,7 +1106,7 @@ def screen_once(chain: str) -> dict:
             continue
         f = fx.build_from_row(t)                          # STEP 2 尽调（直接用 trending 行字段）
         f.tracked_hits, f.tracked_names = _tracked_for(f, g)   # 私有 smart-money 共识信号
-        ok, reason, gate_idx = hard_gates(f, ST.filters) # STEP 3 确定性硬门槛（先跑，含可调过滤器）
+        ok, reason, gate_idx = hard_gates(f, s.filters)  # STEP 3 确定性硬门槛（先跑，含可调过滤器）
         if not ok:
             decisions.append(_reject(f, reason, gate_idx, None))
             continue
@@ -1018,8 +1123,8 @@ def screen_once(chain: str) -> dict:
         decisions.append(_reject(f, "REJECT 排序：优先级低于本轮 LLM 名额", 3, None))
 
     # STEP 5 LLM 只对幸存者解释；STEP 6 仓位由代码算；产出候选（不执行）
-    n_pos = len(ST.positions)
-    exposure = ST.exposure()
+    n_pos = len(s.positions)
+    exposure = s.exposure()
     for sc, f in to_llm:
         v = judge.judge(f)
         if v.verdict != "pass":
@@ -1030,22 +1135,25 @@ def screen_once(chain: str) -> dict:
             continue
         size = position_size()
         # 组合风控不在此阻断，只标 risk_warn（人在环：提示而非硬拦）
-        allow, rnote = ST.risk.gate(size, n_pos, exposure)
+        allow, rnote = s.risk.gate(size, n_pos, exposure)
         pri = priority_score(f, v.conviction, v.crowdedness)
+        abc = strategy.evaluate(f).as_dict()      # ABC Alpha v1 入场信号（与回测复盘共用同一逻辑）
         decisions.append(dict(
             decision=dict(symbol=f.symbol_safe, address=f.address, action="ACTION",
                           reason="通过全部闸门 · 待决策", size_sol=size, risk_warn=(not allow),
-                          verdict=asdict(v), features=_feat(f), priority=pri),
+                          verdict=asdict(v), features=_feat(f), priority=pri, abc=abc),
             exec=exit_plan()))
+        # 落特征快照 + abc 信号，喂回测纸面复盘（backtest.paper 读 features）；保持反馈飞轮闭环。
         log("SCREEN", f.symbol_safe, "通过闸门 · 待决策",
-            dict(size_sol=size, priority=pri, risk_warn=(not allow)))
+            dict(size_sol=size, priority=pri, risk_warn=(not allow),
+                 features=_feat(f), abc=abc))
 
     # 持仓逃生监控（与筛选同一轮跑）；把本轮热榜行喂进去，持仓在榜则零额外 cli
     rows_by_addr = {t["address"]: t for t in candidates if t.get("address")}
-    positions_out = monitor_positions(chain, rows_by_addr)
+    positions_out = monitor_positions(chain, rows_by_addr, s)
 
     # 回传后端真实 mode：前端据此同步 LIVE/SHADOW 开关，避免重启后端后开关停留在 LIVE 误导
-    return dict(decisions=decisions, portfolio=_portfolio(), positions=positions_out, mode=ST.mode)
+    return dict(decisions=decisions, portfolio=_portfolio(s), positions=positions_out, mode=s.mode)
 
 # 公开演示缓存：后台线程定时刷新真实筛选结果，访客只读这份缓存（见 PUBLIC_DEMO 注释）。
 _PUBLIC_CACHE: dict = {"data": None, "err": None}
@@ -1083,12 +1191,13 @@ def _feat(f):
                 buy_ratio=round(f.buy_ratio, 2), turnover=round(f.turnover, 2),
                 liquidity=f.liquidity, mcap=f.mcap, age_min=round(f.age_min, 1))
 
-def _portfolio():
-    return dict(open_positions=len(ST.positions), max_concurrent=CFG["max_concurrent_positions"],
-                total_exposure=ST.exposure(), max_total_exposure=CFG["max_total_exposure_sol"],
-                realized_loss_today=ST.risk.realized_loss_today, daily_loss_cap=CFG["daily_loss_cap_sol"],
-                consec_losses=ST.risk.consec_losses, kill_switch_consec=CFG["kill_switch_consec_losses"],
-                kill_switch=ST.risk.halted)
+def _portfolio(s: UserSession | None = None):
+    s = s or ST
+    return dict(open_positions=len(s.positions), max_concurrent=CFG["max_concurrent_positions"],
+                total_exposure=s.exposure(), max_total_exposure=CFG["max_total_exposure_sol"],
+                realized_loss_today=s.risk.realized_loss_today, daily_loss_cap=CFG["daily_loss_cap_sol"],
+                consec_losses=s.risk.consec_losses, kill_switch_consec=CFG["kill_switch_consec_losses"],
+                kill_switch=s.risk.halted)
 
 def _sec_from_row(row: dict) -> dict:
     """从 trending 行直接取归一化安全快照（免单独 cli 调用）。"""
@@ -1098,15 +1207,17 @@ def _sec_from_row(row: dict) -> dict:
                 burn_ratio=_f(row.get("burn_ratio")),
                 top10=_f(row.get("top_10_holder_rate")))
 
-def monitor_positions(chain: str, rows_by_addr: dict | None = None) -> list[dict]:
+def monitor_positions(chain: str, rows_by_addr: dict | None = None,
+                      s: UserSession | None = None) -> list[dict]:
+    s = s or ST
     rows_by_addr = rows_by_addr or {}
     out = []
-    g = ST.adapter_for(chain)
-    for p in ST.positions:
+    g = s.adapter_for(chain)
+    for p in s.positions:
         if p.get("chain", "sol") != chain:       # 只监控该链的持仓
             continue
         p["cycles"] = p.get("cycles", 0) + 1
-        if ST.is_live_adapter:
+        if s.is_live_adapter:
             row = rows_by_addr.get(p["address"])
             if row is not None:                  # 持仓币在本轮热榜里 → 复用行数据，零额外 cli
                 cur_sec = _sec_from_row(row)
@@ -1153,13 +1264,14 @@ def _mock_drift(p):
 # ──────────────────────────────────────────────────────────────────────────
 # 12. 成交（人按下才发生）
 # ──────────────────────────────────────────────────────────────────────────
-def do_buy(chain: str, address: str, size_sol: float) -> dict:
+def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = None) -> dict:
+    s = s or ST
     # 成交前再过一次组合风控（硬拦；与筛选时的提示分离）
-    allow, rnote = ST.risk.gate(size_sol, len(ST.positions), ST.exposure())
+    allow, rnote = s.risk.gate(size_sol, len(s.positions), s.exposure())
     if not allow:
-        log("BUY_BLOCK", address[:8], rnote)
+        log("BUY_BLOCK", address[:8], rnote, mode=s.mode)
         raise HTTPException(409, rnote)
-    g = ST.adapter_for(chain)
+    g = s.adapter_for(chain)
     info = g.token_info(address)
     sec  = g.token_security(address)             # 已归一化安全快照（建仓基线，逃生 diff 用）
     entry = dict(honeypot=sec.get("honeypot", False),
@@ -1174,7 +1286,7 @@ def do_buy(chain: str, address: str, size_sol: float) -> dict:
         entry_price = 0.0
 
     # LIVE 且未锁：真实买入（input=本链原生币，output=目标币，amount=最小单位）。
-    if ST.mode == "LIVE" and not LIVE_TRADING_DISABLED:
+    if s.mode == "LIVE" and not LIVE_TRADING_DISABLED:
         try:
             wallet = g.wallet_address()              # 绑定 Key 的本链钱包，--from 必须一致
             amount = int(size_sol * (10 ** native_decimals(chain)))
@@ -1212,49 +1324,69 @@ def do_buy(chain: str, address: str, size_sol: float) -> dict:
         filled = False
         status_msg = "SHADOW（未真实发送，需切 LIVE + 配签名密钥）"
 
-    ST.positions.append(dict(symbol=symbol, address=address, size_sol=round(size_sol, 4),
-                             pnl=0.0, cycles=0, entry=entry, chain=chain,
-                             entry_price=entry_price, cur_price=entry_price))
-    save_positions()
-    _verb = "成交" if filled else ("提交·待确认" if ST.mode == "LIVE" else "记录")
-    log("BUY", symbol, f"{ST.mode} {_verb} {size_sol} ({chain})", dict(size_sol=size_sol, chain=chain, **exit_plan()))
+    s.positions.append(dict(symbol=symbol, address=address, size_sol=round(size_sol, 4),
+                            pnl=0.0, cycles=0, entry=entry, chain=chain,
+                            entry_price=entry_price, cur_price=entry_price))
+    s.save_positions()
+    _verb = "成交" if filled else ("提交·待确认" if s.mode == "LIVE" else "记录")
+    log("BUY", symbol, f"{s.mode} {_verb} {size_sol} ({chain})",
+        dict(size_sol=size_sol, chain=chain, **exit_plan()), mode=s.mode)
     return dict(ok=True, status=status_msg, filled=filled, symbol=symbol)
 
-def do_sell(address: str) -> dict:
-    idx = next((i for i, p in enumerate(ST.positions) if p["address"] == address), None)
+def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
+            s: UserSession | None = None) -> dict:
+    """平仓。fraction<1.0 为分批落袋（TP 阶梯用）：减仓不清仓、不计连亏；
+    fraction>=1.0 为全清：连亏/当日亏损照常入账并移除持仓。reason 仅丰富日志（机器人标注离场原因）。"""
+    s = s or ST
+    idx = next((i for i, p in enumerate(s.positions) if p["address"] == address), None)
     if idx is None:
         raise HTTPException(404, "未找到该持仓")
-    p = ST.positions[idx]
+    p = s.positions[idx]
     pchain = p.get("chain", "sol")               # 用持仓自带链，避免用错链的 adapter/原生币
-    if ST.mode == "LIVE" and not LIVE_TRADING_DISABLED:
-        g = ST.adapter_for(pchain)
-        # 清仓：input=持仓币(非 currency，可用 percent)，output=该链原生币，percent=100 全清。
+    frac = max(0.0, min(1.0, float(fraction)))
+    full = frac >= 0.999
+    pct = 100 if full else max(1, int(round(frac * 100)))
+    if s.mode == "LIVE" and not LIVE_TRADING_DISABLED:
+        g = s.adapter_for(pchain)
+        # 清仓：input=持仓币(非 currency，可用 percent)，output=该链原生币，percent 按比例。
         try:
             g.swap(from_wallet=g.wallet_address(), input_token=address,
-                   output_token=native_token(pchain), percent=100, slippage=0.02)
+                   output_token=native_token(pchain), percent=pct, slippage=0.02)
         except Exception as e:                       # 卖出失败→保留持仓，回清晰错误
             log("SELL_FAIL", p["symbol"], str(e))
             raise HTTPException(502, f"链上卖出失败：{e}")
     pnl = p.get("pnl", 0)
-    if pnl < 0:
-        ST.risk.consec_losses += 1
-        ST.risk.realized_loss_today = round(ST.risk.realized_loss_today + abs(pnl) * p["size_sol"], 4)
+    sold_sol = round(p["size_sol"] * frac, 6)        # 本次了结的本金（按比例）
+    tag = (f" · {reason}" if reason else "")
+    if full:
+        if pnl < 0:
+            s.risk.consec_losses += 1
+            s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * p["size_sol"], 4)
+        else:
+            s.risk.consec_losses = 0
+        log("SELL", p["symbol"], f"{s.mode} 平仓 PnL {pnl:+.1%}{tag}",
+            dict(pnl=pnl, size_sol=p.get("size_sol", 0.0), address=p.get("address"), fraction=1.0),
+            mode=s.mode)
+        s.positions.pop(idx)
     else:
-        ST.risk.consec_losses = 0
-    log("SELL", p["symbol"], f"{ST.mode} 平仓 PnL {pnl:+.1%}")
-    ST.positions.pop(idx)
-    save_positions()
-    return dict(ok=True, symbol=p["symbol"])
+        if pnl < 0:                                  # 分批离场若为亏损也按比例入账当日亏损
+            s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * sold_sol, 4)
+        p["size_sol"] = round(p["size_sol"] - sold_sol, 6)
+        log("SELL", p["symbol"], f"{s.mode} 分批 {pct}% PnL {pnl:+.1%}{tag}",
+            dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac), mode=s.mode)
+    s.save_positions()
+    return dict(ok=True, symbol=p["symbol"], fraction=frac, closed=full)
 
-def do_unmonitor(address: str) -> dict:
+def do_unmonitor(address: str, s: UserSession | None = None) -> dict:
     """从持仓逃生监控移除该币（只停止监控，不卖出、不计风控）。"""
-    idx = next((i for i, p in enumerate(ST.positions) if p["address"] == address), None)
+    s = s or ST
+    idx = next((i for i, p in enumerate(s.positions) if p["address"] == address), None)
     if idx is None:
         raise HTTPException(404, "未找到该持仓")
-    sym = ST.positions[idx]["symbol"]
-    log("UNMONITOR", sym, "取消监控（未卖出）")
-    ST.positions.pop(idx)
-    save_positions()
+    sym = s.positions[idx]["symbol"]
+    log("UNMONITOR", sym, "取消监控（未卖出）", mode=s.mode)
+    s.positions.pop(idx)
+    s.save_positions()
     return dict(ok=True, symbol=sym)
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1308,18 +1440,30 @@ def _block_if_public():
     if PUBLIC_DEMO:
         raise HTTPException(403, "公开演示为只读模式，已禁用写操作")
 
+def _block_if_not_admin():
+    """凭据写入仅限运营者：外部交易者无权改服务器 .env（运营密钥服务器侧自动加载）。"""
+    if not ADMIN_MODE:
+        raise HTTPException(403, "凭据由服务器管理，用户无需也无权配置")
+
+# 多用户：前端连上钱包后在每个请求带 X-Wallet: <pubkey>；不带 → 默认会话(local)。
+# ⚠️ 仅为「状态分区」，非鉴权（见 UserSession 注释）；签名鉴权随 Stage 5 一起加。
+WalletHeader = Header(default=None, alias="X-Wallet")
+
 @app.get("/api/status")
-def api_status():
+def api_status(x_wallet: str | None = WalletHeader):
     """前端加载时探测：后端是否已就绪（环境有 key + 已切真实适配器），免去重填。
     chain 仅为启动默认链（前端各 tab 用自己的链，不依赖这个）。"""
-    return dict(live_adapter=ST.is_live_adapter, chain=ST.chain, mode=ST.mode,
+    s = get_session(x_wallet)
+    return dict(live_adapter=MK.is_live_adapter, chain=MK.chain, mode=s.mode,
                 has_key=bool(load_env().get("GMGN_API_KEY")),
                 trading_locked=LIVE_TRADING_DISABLED, public_demo=PUBLIC_DEMO,
-                trending_cmd=ST.get_trending_cmd(ST.chain))
+                admin=ADMIN_MODE,
+                trending_cmd=MK.get_trending_cmd(MK.chain))
 
 @app.post("/api/config")
 def api_config(cfg: ConfigIn):
     _block_if_public()
+    _block_if_not_admin()       # 凭据写入仅运营者；外部用户走 non-custodial，不碰服务器密钥
     env = load_env()
     # api_key 留空则沿用环境已有的 key（避免空值覆盖、避免每次重填）
     if not cfg.api_key and not env.get("GMGN_API_KEY"):
@@ -1342,25 +1486,26 @@ def api_config(cfg: ConfigIn):
                 trading_locked=LIVE_TRADING_DISABLED)
 
 @app.post("/api/mode")
-def api_mode(m: ModeIn):
-    """切实盘/模拟盘（右上角图标按钮）。LIVE 仅在未锁时生效；不写 env。"""
+def api_mode(m: ModeIn, x_wallet: str | None = WalletHeader):
+    """切实盘/模拟盘（右上角图标按钮）。LIVE 仅在未锁时生效；不写 env。每用户独立。"""
     _block_if_public()
+    s = get_session(x_wallet)
     want_live = m.mode.upper() == "LIVE"
-    with ST.lock:
-        ST.mode = "LIVE" if (want_live and not LIVE_TRADING_DISABLED) else "SHADOW"
-    return dict(ok=True, mode=ST.mode, trading_locked=LIVE_TRADING_DISABLED)
+    with s.lock:
+        s.mode = "LIVE" if (want_live and not LIVE_TRADING_DISABLED) else "SHADOW"
+    return dict(ok=True, mode=s.mode, trading_locked=LIVE_TRADING_DISABLED)
 
 @app.post("/api/chain")
 def api_chain(c: ChainIn):
     """（兼容保留）返回某链的热榜命令；不再改全局状态——链已随各请求传递。"""
     _block_if_public()
     ch = valid_chain(c.chain)
-    return dict(ok=True, chain=ch, trending_cmd=ST.get_trending_cmd(ch))
+    return dict(ok=True, chain=ch, trending_cmd=MK.get_trending_cmd(ch))
 
 @app.get("/api/settings")
 def api_settings_get(chain: str = "sol"):
     ch = valid_chain(chain)
-    return dict(trending_cmd=ST.get_trending_cmd(ch),
+    return dict(trending_cmd=MK.get_trending_cmd(ch),
                 default_trending_cmd=default_trending_cmd(ch),
                 poll_interval_s=DEFAULT_POLL_S)
 
@@ -1368,7 +1513,7 @@ def api_settings_get(chain: str = "sol"):
 def api_settings(s: SettingsIn):
     _block_if_public()
     ch = valid_chain(s.chain)
-    with ST.lock:
+    with MK.lock:
         if s.trending_cmd is not None:
             cmd = s.trending_cmd.strip()
             try:
@@ -1378,18 +1523,18 @@ def api_settings(s: SettingsIn):
             # 安全护栏：只允许热榜命令，禁止借此执行任意命令
             if parts[:3] != ["gmgn-cli", "market", "trending"]:
                 raise HTTPException(400, "命令必须以 `gmgn-cli market trending` 开头")
-            ST.set_trending_cmd(ch, cmd)         # set_trending_cmd 内已落盘
-            ST._trending_cache.pop(ch, None)     # 命令变了，作废该链缓存
-    return dict(ok=True, trending_cmd=ST.get_trending_cmd(ch))
+            MK.set_trending_cmd(ch, cmd)         # set_trending_cmd 内已落盘
+            MK._trending_cache.pop(ch, None)     # 命令变了，作废该链缓存
+    return dict(ok=True, trending_cmd=MK.get_trending_cmd(ch))
 
 @app.post("/api/settings/reset")
 def api_settings_reset(c: ChainIn):
     """重置该链热榜命令为默认（删除落盘的用户覆盖），返回恢复后的默认命令。"""
     _block_if_public()
     ch = valid_chain(c.chain)
-    with ST.lock:
-        ST.reset_trending_cmd(ch)
-    return dict(ok=True, trending_cmd=ST.get_trending_cmd(ch))
+    with MK.lock:
+        MK.reset_trending_cmd(ch)
+    return dict(ok=True, trending_cmd=MK.get_trending_cmd(ch))
 
 @app.get("/api/wallets")
 def api_wallets():
@@ -1397,30 +1542,33 @@ def api_wallets():
     return wallets.summary()
 
 @app.get("/api/filters")
-def api_filters_get():
-    """返回当前生效的过滤器 + 默认值（前端面板据此渲染，并能"恢复默认"）。"""
-    return dict(filters=ST.filters, defaults=DEFAULT_FILTERS, types=_FILTER_TYPES)
+def api_filters_get(x_wallet: str | None = WalletHeader):
+    """返回当前生效的过滤器 + 默认值（前端面板据此渲染，并能"恢复默认"）。每用户独立。"""
+    s = get_session(x_wallet)
+    return dict(filters=s.filters, defaults=DEFAULT_FILTERS, types=_FILTER_TYPES)
 
 @app.post("/api/filters")
-def api_filters(patch: dict):
-    """合并写入过滤器（只收已知键，类型清洗，落盘持久）。"""
+def api_filters(patch: dict, x_wallet: str | None = WalletHeader):
+    """合并写入过滤器（只收已知键，类型清洗，落盘持久）。每用户独立。"""
     _block_if_public()
     if not isinstance(patch, dict):
         raise HTTPException(400, "请求体须为对象")
-    with ST.lock:
-        flt = ST.set_filters(patch)
+    s = get_session(x_wallet)
+    with s.lock:
+        flt = s.set_filters(patch)
     return dict(ok=True, filters=flt)
 
 @app.post("/api/filters/reset")
-def api_filters_reset():
-    """重置过滤器为默认（删除落盘覆盖）。"""
+def api_filters_reset(x_wallet: str | None = WalletHeader):
+    """重置过滤器为默认（删除落盘覆盖）。每用户独立。"""
     _block_if_public()
-    with ST.lock:
-        flt = ST.reset_filters()
+    s = get_session(x_wallet)
+    with s.lock:
+        flt = s.reset_filters()
     return dict(ok=True, filters=flt)
 
 @app.post("/api/run")
-def api_run(r: RunIn):
+def api_run(r: RunIn, x_wallet: str | None = WalletHeader):
     # 公开演示：不让访客触发 CLI，只回后台线程定时刷新的真实筛选缓存（配额与人数解耦）。
     if PUBLIC_DEMO:
         data = _PUBLIC_CACHE["data"]
@@ -1429,38 +1577,116 @@ def api_run(r: RunIn):
             return JSONResponse(dict(decisions=[], portfolio=None, positions=[]))
         return JSONResponse(data)
     ch = valid_chain(r.chain)
-    with ST.lock:
+    sess = get_session(x_wallet)
+    with sess.lock:
         try:
-            return JSONResponse(screen_once(ch))
+            return JSONResponse(screen_once(ch, sess))
         except Exception as e:
             raise HTTPException(502, f"扫描失败：{e}")
 
 @app.post("/api/buy")
-def api_buy(b: BuyIn):
+def api_buy(b: BuyIn, x_wallet: str | None = WalletHeader):
     _block_if_public()
     ch = valid_chain(b.chain)
-    with ST.lock:
-        return do_buy(ch, b.address, b.size_sol)
+    sess = get_session(x_wallet)
+    with sess.lock:
+        return do_buy(ch, b.address, b.size_sol, sess)
 
 @app.post("/api/sell")
-def api_sell(s: SellIn):
+def api_sell(s: SellIn, x_wallet: str | None = WalletHeader):
     _block_if_public()
-    with ST.lock:
-        return do_sell(s.address)
+    sess = get_session(x_wallet)
+    with sess.lock:
+        return do_sell(s.address, s=sess)
 
 @app.post("/api/unmonitor")
-def api_unmonitor(s: SellIn):
+def api_unmonitor(s: SellIn, x_wallet: str | None = WalletHeader):
     _block_if_public()
-    with ST.lock:
-        return do_unmonitor(s.address)
+    sess = get_session(x_wallet)
+    with sess.lock:
+        return do_unmonitor(s.address, sess)
 
 @app.get("/api/positions")
-def api_positions(chain: str = "sol"):
+def api_positions(chain: str = "sol", x_wallet: str | None = WalletHeader):
     if PUBLIC_DEMO:                       # 公开页不广播本机持仓
         return dict(positions=[], portfolio=None)
     ch = valid_chain(chain)
-    with ST.lock:
-        return dict(positions=monitor_positions(ch), portfolio=_portfolio())
+    sess = get_session(x_wallet)
+    with sess.lock:
+        return dict(positions=monitor_positions(ch, s=sess), portfolio=_portfolio(sess))
+
+@app.get("/api/strategy")
+def api_strategy():
+    """ABC Alpha v1 策略说明（前端可直接渲染：触发阈值 + 预设 + 论点）。"""
+    return strategy.describe()
+
+@app.post("/api/strategy/apply")
+def api_strategy_apply(x_wallet: str | None = WalletHeader):
+    """把 ABC Alpha v1 预设并入运行参数（CFG + 该用户 filters），并落盘 filters。
+    纪律收紧版（并发回 3 等）；显式触发，不在启动时自动改全局。"""
+    _block_if_public()
+    sess = get_session(x_wallet)
+    with sess.lock:
+        strategy.apply_to_cfg(CFG, sess.filters)
+        sess.persist_filters()
+        log("STRATEGY", strategy.NAME, f"应用预设 {strategy.NAME} v{strategy.VERSION}", mode=sess.mode)
+    return dict(ok=True, applied=strategy.NAME, version=strategy.VERSION,
+                cfg_preset=strategy.PRESET, filters=sess.filters)
+
+@app.get("/api/backtest")
+def api_backtest():
+    """从 trade_decisions.jsonl 复盘：漏斗 + 已实现 PnL/胜率/R + 纸面预期 R。"""
+    return backtest.summary(trig=strategy.TRIGGER)
+
+class BotConfigIn(BaseModel):
+    max_new_per_tick: int | None = None
+    poll_s: float | None = None
+    escape_severity_exit: int | None = None
+    trail_activate_pct: float | None = None
+    require_abc_trigger: bool | None = None
+
+@app.get("/api/bot")
+def api_bot(x_wallet: str | None = WalletHeader):
+    """机器人状态（开关/链/间隔/参数/统计）+ 说明（前端可直接渲染）。每用户一个机器人。"""
+    sess = get_session(x_wallet)
+    return dict(**sess.bot.status(), describe=bot.describe(),
+                mode=sess.mode, trading_locked=LIVE_TRADING_DISABLED)
+
+@app.post("/api/bot/start")
+def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader):
+    """启动该用户的自主执行回路。纸面优先：是否真实上链仍由 mode(LIVE) + ENABLE_LIVE_TRADING 决定。"""
+    _block_if_public()
+    ch = valid_chain(r.chain)
+    sess = get_session(x_wallet)
+    # 把会话绑进回调：机器人跑在该用户的 过滤器/持仓/风控 上（tick 内部会拿 sess.lock）
+    started = sess.bot.start(
+        ch,
+        screen_fn=lambda c: screen_once(c, sess),
+        buy_fn=lambda c, a, sz: do_buy(c, a, sz, sess),
+        sell_fn=lambda a, fraction=1.0, reason=None: do_sell(a, fraction, reason, sess),
+        positions_fn=lambda: sess.positions, risk_cfg=CFG, lock=sess.lock,
+        halted_fn=lambda: sess.risk.halted or sess.risk.realized_loss_today >= CFG["daily_loss_cap_sol"])
+    log("BOT", "ABC", "启动自主回路" if started else "已在运行（忽略重复启动）", mode=sess.mode)
+    return dict(ok=True, started=started, **sess.bot.status())
+
+@app.post("/api/bot/stop")
+def api_bot_stop(x_wallet: str | None = WalletHeader):
+    """停止该用户的自主执行回路（不影响已有持仓，只停自动开/平仓）。"""
+    _block_if_public()
+    sess = get_session(x_wallet)
+    sess.bot.stop()
+    log("BOT", "ABC", "停止自主回路", mode=sess.mode)
+    return dict(ok=True, **sess.bot.status())
+
+@app.post("/api/bot/config")
+def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader):
+    """更新该用户机器人的执行参数（只收已知键，非空才覆盖）。"""
+    _block_if_public()
+    sess = get_session(x_wallet)
+    patch = {k: v for k, v in c.model_dump().items() if v is not None}
+    with sess.lock:
+        sess.bot.cfg.update(patch)
+    return dict(ok=True, cfg=dict(sess.bot.cfg))
 
 # 静态前端（同源，避免 CORS）。把上一版 dashboard 存为 static/index.html
 if STATIC_DIR.exists():

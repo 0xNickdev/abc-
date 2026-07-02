@@ -258,3 +258,352 @@ class TestFiltersAPI:
         client.post("/api/filters", json={"min_mcap": 999})
         r = client.post("/api/filters/reset")
         assert r.json()["filters"]["min_mcap"] == 0.0
+
+
+# ── ABC Alpha v1 策略评估 ──
+class TestStrategy:
+    def test_triggers_on_clean_momentum_token(self):
+        import strategy
+        # feat 默认就是干净+动能+共识；但需落在币龄窗口内（默认 age_min=42 > max 45? 否，<45 ok）
+        s = strategy.evaluate(feat(age_min=10, chg_5m=0.12, buy_ratio=0.6,
+                                   liquidity=54_000, tracked_hits=3))
+        assert s.triggered is True
+        assert s.score > 50 and s.r_expect > 0
+
+    def test_no_trigger_without_smart_money(self):
+        import strategy
+        s = strategy.evaluate(feat(age_min=10, tracked_hits=0, smart_degen=0,
+                                   renowned=0, sm_confluence=0))
+        assert s.triggered is False
+        assert s.r_expect == 0.0
+
+    def test_no_trigger_on_weak_buy_pressure(self):
+        import strategy
+        s = strategy.evaluate(feat(age_min=10, buy_ratio=0.40, tracked_hits=3))
+        assert s.triggered is False
+
+    def test_age_outside_window_blocks(self):
+        import strategy
+        s = strategy.evaluate(feat(age_min=120, tracked_hits=3, chg_5m=0.2, buy_ratio=0.7))
+        assert s.triggered is False
+
+    def test_accepts_feat_dict_too(self):
+        import strategy
+        d = dict(tracked_hits=3, sm_confluence=3, chg_5m=0.12, buy_ratio=0.6,
+                 liquidity=54_000, age_min=10)
+        s = strategy.evaluate(d)
+        assert s.triggered is True
+
+    def test_apply_to_cfg_merges_without_mutating_module(self):
+        import strategy
+        cfg, flt = {}, {}
+        strategy.apply_to_cfg(cfg, flt)
+        assert cfg["max_concurrent_positions"] == 3
+        assert flt["require_renounced_freeze"] is True
+
+    def test_describe_shape(self):
+        import strategy
+        d = strategy.describe()
+        assert d["name"] == "ABC Alpha v1"
+        assert "trigger" in d and "preset" in d
+
+
+# ── 回测复盘（从 jsonl 算已实现 PnL / 漏斗 / 纸面预期）──
+class TestBacktest:
+    def _write(self, tmp_path, rows):
+        import json
+        p = tmp_path / "trade_decisions.jsonl"
+        p.write_text("\n".join(json.dumps(r) for r in rows))
+        return p
+
+    def test_realized_from_sells(self, tmp_path):
+        import backtest
+        rows = [
+            {"action": "SELL", "symbol": "A", "reason": "x", "pnl": 0.60, "size_sol": 0.5},
+            {"action": "SELL", "symbol": "B", "reason": "x", "pnl": -0.35, "size_sol": 0.5},
+        ]
+        r = backtest.realized(backtest.load_records(self._write(tmp_path, rows)))
+        assert r["trades"] == 2
+        assert r["win_rate"] == 0.5
+        assert abs(r["total_pnl_sol"] - 0.125) < 1e-6   # (0.6-0.35)*0.5
+
+    def test_realized_parses_pnl_from_reason(self, tmp_path):
+        import backtest
+        rows = [{"action": "SELL", "symbol": "A", "reason": "SHADOW 平仓 PnL +12.0%"}]
+        r = backtest.realized(backtest.load_records(self._write(tmp_path, rows)))
+        assert r["trades"] == 1 and r["win_rate"] == 1.0
+
+    def test_realized_empty_is_honest(self, tmp_path):
+        import backtest
+        r = backtest.realized(backtest.load_records(self._write(tmp_path, [])))
+        assert r["trades"] == 0 and "note" in r
+
+    def test_funnel_counts_actions_and_gates(self, tmp_path):
+        import backtest
+        rows = [
+            {"action": "REJECT", "gate": 1}, {"action": "REJECT", "gate": 1},
+            {"action": "REJECT", "gate": 4}, {"action": "SCREEN"},
+        ]
+        f = backtest.funnel(backtest.load_records(self._write(tmp_path, rows)))
+        assert f["by_action"]["REJECT"] == 3
+        assert f["rejects_by_gate"]["1"] == 2
+
+    def test_paper_evaluates_feature_snapshots(self, tmp_path):
+        import backtest
+        rows = [{"action": "SCREEN", "symbol": "A", "reason": "x",
+                 "decision": {"features": dict(tracked_hits=3, sm_confluence=3,
+                              chg_5m=0.12, buy_ratio=0.6, liquidity=54_000, age_min=10)}}]
+        p = backtest.paper(backtest.load_records(self._write(tmp_path, rows)))
+        assert p["candidates"] == 1 and p["triggered"] == 1
+
+    def test_summary_combines(self, tmp_path):
+        import backtest
+        rows = [{"action": "SELL", "symbol": "A", "reason": "x", "pnl": 0.2, "size_sol": 0.5}]
+        s = backtest.summary(self._write(tmp_path, rows))
+        assert s["records"] == 1 and s["realized"]["trades"] == 1
+
+
+class TestBot:
+    def _action(self, addr, *, triggered=True, score=70.0, size=0.1, symbol="A"):
+        return dict(decision=dict(action="ACTION", address=addr, symbol=symbol,
+                                  size_sol=size, abc=dict(triggered=triggered, score=score)))
+
+    def test_select_entries_only_triggered_actions(self):
+        import bot
+        decisions = [
+            self._action("aa", triggered=True, score=80, symbol="HI"),
+            self._action("bb", triggered=False, score=99, symbol="NO"),
+            dict(decision=dict(action="SKIP", address="cc", size_sol=0.1,
+                               abc=dict(triggered=True, score=90))),
+        ]
+        out = bot.select_entries(decisions, held_addrs=set(), n_open=0,
+                                 max_concurrent=5, max_new=5)
+        assert out == [("aa", 0.1, "HI")]
+
+    def test_select_entries_skips_held_and_respects_concurrency(self):
+        import bot
+        decisions = [self._action("aa", score=80), self._action("bb", score=90)]
+        # 已持有 aa + 只剩 1 个并发空位 → 只取分高的 bb
+        out = bot.select_entries(decisions, held_addrs={"aa"}, n_open=2,
+                                 max_concurrent=3, max_new=5)
+        assert out == [("bb", 0.1, "A")]
+
+    def test_select_entries_max_new_caps(self):
+        import bot
+        decisions = [self._action(a, score=s) for a, s in [("aa", 50), ("bb", 90), ("cc", 70)]]
+        out = bot.select_entries(decisions, set(), 0, 10, max_new=2)
+        assert [a for a, _s, _y in out] == ["bb", "cc"]   # 按 score 降序取 2
+
+    def test_decide_exit_hard_stop(self):
+        import bot
+        cfg = dict(hard_stop_pct=0.35, trailing_pct=0.25, tp_ladder=[(0.6, 0.4)])
+        ed = bot.decide_exit(dict(pnl=-0.40, peak_pnl=0.1, tp_taken=[]), 0, cfg)
+        assert ed.action == "SELL" and ed.fraction == 1.0
+
+    def test_decide_exit_escape_severity(self):
+        import bot
+        cfg = dict(hard_stop_pct=0.35, trailing_pct=0.25, tp_ladder=[])
+        ed = bot.decide_exit(dict(pnl=0.05, peak_pnl=0.05, tp_taken=[]), 80, cfg)
+        assert ed.action == "SELL" and "逃生" in ed.reason
+
+    def test_decide_exit_trailing_after_activate(self):
+        import bot
+        cfg = dict(hard_stop_pct=0.35, trailing_pct=0.25, tp_ladder=[])
+        # 峰值 +40%（已过 30% 激活线），回撤到 +10% = 30% 回撤 ≥ 25% → 移动止盈
+        ed = bot.decide_exit(dict(pnl=0.10, peak_pnl=0.40, tp_taken=[]), 0, cfg)
+        assert ed.action == "SELL" and "移动止盈" in ed.reason
+
+    def test_decide_exit_tp_ladder_partial(self):
+        import bot
+        cfg = dict(hard_stop_pct=0.35, trailing_pct=0.25, tp_ladder=[(0.6, 0.4), (1.5, 0.3)])
+        ed = bot.decide_exit(dict(pnl=0.70, peak_pnl=0.70, tp_taken=[]), 0, cfg)
+        assert ed.action == "SELL" and ed.fraction == 0.4 and ed.rung == 0
+
+    def test_decide_exit_skips_taken_rung(self):
+        import bot
+        cfg = dict(hard_stop_pct=0.35, trailing_pct=0.25, tp_ladder=[(0.6, 0.4), (1.5, 0.3)])
+        # rung0 已兑现且未触发更高档/止盈 → HOLD
+        ed = bot.decide_exit(dict(pnl=0.70, peak_pnl=0.70, tp_taken=[0]), 0, cfg)
+        assert ed.action == "HOLD"
+
+    def test_decide_exit_hold(self):
+        import bot
+        cfg = dict(hard_stop_pct=0.35, trailing_pct=0.25, tp_ladder=[(0.6, 0.4)])
+        ed = bot.decide_exit(dict(pnl=0.05, peak_pnl=0.05, tp_taken=[]), 0, cfg)
+        assert ed.action == "HOLD"
+
+    def test_tick_buys_triggered_and_exits_via_injection(self):
+        import bot
+        bought, sold = [], []
+        positions = [dict(address="old", symbol="OLD", chain="sol", size_sol=0.1,
+                          pnl=-0.40, peak_pnl=0.0)]   # 持仓亏损 → 应硬止损平掉
+        screened = dict(
+            decisions=[dict(decision=dict(action="ACTION", address="new", symbol="NEW",
+                            size_sol=0.1, abc=dict(triggered=True, score=80)))],
+            positions=[dict(address="old", severity=0)])
+        r = bot.BotRunner()
+
+        class _Lock:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def buy(ch, addr, size): bought.append((ch, addr, size))
+        def sell(addr, fraction=1.0, reason=None): sold.append((addr, fraction))
+
+        r.start("sol", screen_fn=lambda ch: screened, buy_fn=buy, sell_fn=sell,
+                positions_fn=lambda: positions, risk_cfg=dict(
+                    max_concurrent_positions=5, hard_stop_pct=0.35,
+                    trailing_pct=0.25, tp_ladder=[]), lock=_Lock())
+        r.stop()                 # 不让后台线程乱跑；手动调一轮
+        r.enabled = True
+        r.tick()
+        assert ("sol", "new", 0.1) in bought
+        assert ("old", 1.0) in sold
+
+    def test_tick_halted_skips_entries_but_still_exits(self):
+        import bot
+        bought, sold = [], []
+        positions = [dict(address="old", symbol="OLD", chain="sol", size_sol=0.1,
+                          pnl=-0.40, peak_pnl=0.0)]
+        screened = dict(
+            decisions=[dict(decision=dict(action="ACTION", address="new", symbol="NEW",
+                            size_sol=0.1, abc=dict(triggered=True, score=80)))],
+            positions=[dict(address="old", severity=0)])
+        r = bot.BotRunner()
+
+        class _Lock:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        r.start("sol", screen_fn=lambda ch: screened,
+                buy_fn=lambda *a: bought.append(a),
+                sell_fn=lambda addr, fraction=1.0, reason=None: sold.append((addr, fraction)),
+                positions_fn=lambda: positions,
+                risk_cfg=dict(max_concurrent_positions=5, hard_stop_pct=0.35,
+                              trailing_pct=0.25, tp_ladder=[]),
+                lock=_Lock(), halted_fn=lambda: True)
+        r.stop(); r.enabled = True
+        r.tick()
+        assert bought == []                       # 熔断：不开仓
+        assert ("old", 1.0) in sold               # 但仍平仓
+
+
+class TestAdminGate:
+    """Этап 1: ключи оператора серверные; внешний юзер не видит/не пишет凭据."""
+    def _client(self, monkeypatch, *, admin):
+        from fastapi.testclient import TestClient
+        monkeypatch.setattr(appmod, "ADMIN_MODE", admin)
+        monkeypatch.setattr(appmod, "PUBLIC_DEMO", False)
+        return TestClient(appmod.app)
+
+    def test_status_exposes_admin_flag(self, monkeypatch):
+        assert self._client(monkeypatch, admin=False).get("/api/status").json()["admin"] is False
+        assert self._client(monkeypatch, admin=True).get("/api/status").json()["admin"] is True
+
+    def test_config_blocked_for_non_admin(self, monkeypatch):
+        c = self._client(monkeypatch, admin=False)
+        assert c.post("/api/config", json={"api_key": "x"}).status_code == 403
+
+    def test_config_allowed_for_admin(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(appmod, "ENV_PATH", tmp_path / ".env")
+        c = self._client(monkeypatch, admin=True)
+        # admin 通过凭据闸门（有 key 即可落盘；用 mock 适配器，不真连）
+        assert c.post("/api/config", json={"api_key": "k", "mode": "SHADOW"}).status_code == 200
+
+
+# ── Этап 3: мультиюзерность (разделение состояния по X-Wallet) ──
+def _mu_client(tmp_path, monkeypatch):
+    """Изолированный клиент: все пути на tmp, реестр сессий чистый, ST пересоздан."""
+    from fastapi.testclient import TestClient
+    monkeypatch.setattr(appmod, "PUBLIC_DEMO", False)
+    monkeypatch.setattr(appmod, "FILTERS_PATH", tmp_path / "filters.json")
+    monkeypatch.setattr(appmod, "POSITIONS_PATH", tmp_path / "positions.json")
+    monkeypatch.setattr(appmod, "LOG_PATH", tmp_path / "trade_decisions.jsonl")
+    monkeypatch.setattr(appmod, "USERS_DIR", tmp_path / "users")
+    # свежий рыночный слой на Mock: другие тесты (напр. /api/config) могли включить live
+    monkeypatch.setattr(appmod, "ENV_PATH", tmp_path / ".env")
+    monkeypatch.setattr(appmod, "MK", appmod.MarketLayer())
+    monkeypatch.setattr(appmod, "SESSIONS", {})
+    monkeypatch.setattr(appmod, "ST", appmod.get_session(appmod.DEFAULT_PUBKEY))
+    return TestClient(appmod.app)
+
+
+class TestMultiUserSessions:
+    ADDR = "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # чистый токен из MockGMGN
+    H_A = {"X-Wallet": "WalletAAAA1111"}
+    H_B = {"X-Wallet": "WalletBBBB2222"}
+
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        return _mu_client(tmp_path, monkeypatch)
+
+    def test_positions_isolated_per_wallet(self, client):
+        r = client.post("/api/buy", json={"address": self.ADDR, "size_sol": 0.1, "chain": "sol"},
+                        headers=self.H_A)
+        assert r.status_code == 200
+        pa = client.get("/api/positions", headers=self.H_A).json()["positions"]
+        pb = client.get("/api/positions", headers=self.H_B).json()["positions"]
+        pl = client.get("/api/positions").json()["positions"]           # без заголовка = local
+        assert len(pa) == 1 and pa[0]["symbol"] == "CLEANCAT"
+        assert pb == [] and pl == []
+        # позиции юзера падают в свой каталог, не в общий positions.json
+        assert (appmod.USERS_DIR / "WalletAAAA1111" / "positions.json").exists()
+        assert not appmod.POSITIONS_PATH.exists()
+
+    def test_filters_isolated_per_wallet(self, client):
+        client.post("/api/filters", json={"min_mcap": 123456}, headers=self.H_A)
+        assert client.get("/api/filters", headers=self.H_A).json()["filters"]["min_mcap"] == 123456
+        assert client.get("/api/filters", headers=self.H_B).json()["filters"]["min_mcap"] \
+            == appmod.DEFAULT_FILTERS["min_mcap"]
+
+    def test_filters_survive_session_restart(self, client):
+        client.post("/api/filters", json={"min_liquidity": 777}, headers=self.H_A)
+        appmod.SESSIONS.pop("WalletAAAA1111")     # имитация рестарта: кэш сессий пуст → чтение с диска
+        assert client.get("/api/filters", headers=self.H_A).json()["filters"]["min_liquidity"] == 777
+
+    def test_mode_isolated_per_wallet(self, client, monkeypatch):
+        monkeypatch.setattr(appmod, "LIVE_TRADING_DISABLED", False)
+        assert client.post("/api/mode", json={"mode": "LIVE"}, headers=self.H_A).json()["mode"] == "LIVE"
+        assert client.get("/api/status", headers=self.H_A).json()["mode"] == "LIVE"
+        assert client.get("/api/status", headers=self.H_B).json()["mode"] == "SHADOW"
+        assert client.get("/api/status").json()["mode"] == "SHADOW"
+
+    def test_pubkey_sanitized_against_traversal(self):
+        assert appmod._safe_pk("../../etc/passwd") == "etcpasswd"
+        assert appmod._safe_pk("") == "anon"
+        assert len(appmod._safe_pk("x" * 200)) == 64
+
+
+class TestBotAPI:
+    """Эндпоинты бота: у каждого кошелька свой BotRunner; screen_once подменён пустым."""
+    H_A = {"X-Wallet": "BotWalletAAAA"}
+
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        c = _mu_client(tmp_path, monkeypatch)
+        # не гоняем настоящий скрининг в фоновом потоке бота
+        monkeypatch.setattr(appmod, "screen_once",
+                            lambda ch, s=None: dict(decisions=[], positions=[]))
+        return c
+
+    def test_status_shape(self, client):
+        b = client.get("/api/bot").json()
+        assert b["enabled"] is False
+        assert "describe" in b and "cfg" in b and "stats" in b
+
+    def test_start_stop_isolated_per_wallet(self, client):
+        r = client.post("/api/bot/start", json={"chain": "sol"}, headers=self.H_A).json()
+        assert r["started"] is True and r["enabled"] is True
+        assert client.get("/api/bot").json()["enabled"] is False        # local не затронут
+        # повторный старт идемпотентен
+        assert client.post("/api/bot/start", json={"chain": "sol"},
+                           headers=self.H_A).json()["started"] is False
+        assert client.post("/api/bot/stop", headers=self.H_A).json()["enabled"] is False
+
+    def test_config_per_wallet(self, client):
+        r = client.post("/api/bot/config", json={"max_new_per_tick": 1, "poll_s": 5},
+                        headers=self.H_A).json()
+        assert r["cfg"]["max_new_per_tick"] == 1 and r["cfg"]["poll_s"] == 5
+        # у других сессий параметры по умолчанию
+        assert client.get("/api/bot").json()["cfg"]["max_new_per_tick"] \
+            == appmod.bot.CFG["max_new_per_tick"]
