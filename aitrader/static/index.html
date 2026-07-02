@@ -371,13 +371,43 @@ td{padding:5px 10px;vertical-align:middle}
   </div>
 </div>
 
+<style>
+/* 设置面板页签 + 策略卡片 + 机器人面板 + KOL/跟踪徽标 */
+.mtabs{display:flex;gap:6px;margin:0 0 12px;border-bottom:1px solid rgba(255,255,255,.08);padding-bottom:8px}
+.mtab{background:transparent;border:1px solid rgba(255,255,255,.10);color:var(--dim2,#9aa);border-radius:8px;padding:5px 12px;font:inherit;font-size:12px;cursor:pointer}
+.mtab.on{color:var(--paper,#fff);border-color:var(--violet,#8b5cf6);background:rgba(139,92,246,.14)}
+.tabpane{display:none}.tabpane.on{display:block}
+.scard{border:1px solid rgba(255,255,255,.10);border-radius:12px;padding:12px 14px;margin-bottom:10px;background:rgba(255,255,255,.03)}
+.scard.on{border-color:var(--violet,#8b5cf6);background:rgba(139,92,246,.10)}
+.scard .schead{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+.scard .sver{color:var(--dim2,#9aa);font-size:11px}
+.scard .sact{margin-left:auto;color:var(--lime,#9f6);font-size:11px}
+.scard p{margin:4px 0 8px;font-size:12px;line-height:1.6;color:var(--paper2,#ccd)}
+.scbtns{display:flex;gap:8px;margin-top:6px}
+.botrow{display:flex;align-items:center;gap:12px;margin-bottom:8px}
+.botstate{font-size:12px;color:var(--dim2,#9aa)}.botstate.on{color:var(--lime,#9f6)}
+.trkb{color:var(--violet,#b18cff);font-weight:700;cursor:help}
+.kolb{font-size:11px}
+</style>
 <div class="scrim" id="pipeScrim">
   <div class="modal">
     <h2><span id="ic-pipecog"></span><span data-i18n="pipe_h2">筛选设置 · 热榜命令 / 轮询</span><span class="hreset" onclick="resetSettings()" data-i18n="pipe_reset_btn" data-i18n-title="pipe_reset_btn_title">↺ 重置</span><span class="x" onclick="closePipe()">×</span></h2>
     <div class="mbody">
+      <div class="mtabs" id="pipeTabs">
+        <button class="mtab on" data-tab="scan" onclick="pipeTab('scan')" data-i18n="tab_scan">扫描</button>
+        <button class="mtab" data-tab="filters" onclick="pipeTab('filters')" data-i18n="tab_filters">过滤器</button>
+        <button class="mtab" data-tab="strategy" onclick="pipeTab('strategy')" data-i18n="tab_strategy">策略</button>
+        <button class="mtab" data-tab="bot" onclick="pipeTab('bot')" data-i18n="tab_bot">机器人</button>
+      </div>
+      <div class="tabpane on" id="tab_scan">
       <div class="fld"><label data-i18n="pipe_cmd_label">GMGN-CLI 热榜命令</label><textarea id="trendCmd" rows="3" placeholder="gmgn-cli market trending ..." autocomplete="off" spellcheck="false"></textarea><div class="hint" data-i18n="pipe_cmd_hint">每轮扫描执行的完整命令；须以 <code>gmgn-cli market trending</code> 开头，自动补 <code>--raw</code>。改 --limit / --interval / --order-by / --filter / --chain 即可。</div></div>
       <div class="fld"><label data-i18n="pipe_poll_label">轮询间隔（秒）</label><div class="szrow"><input id="pollSec" type="number" step="0.5" min="1"><span class="unit">s</span></div><div class="hint" data-i18n="pipe_poll_hint">前端每隔多久打一次 /api/run。建议 ≥30s 省配额；先感受可短些。</div></div>
+      </div>
+      <div class="tabpane" id="tab_filters">
       <div class="fld"><label data-i18n="pipe_filters_label">质量过滤器（0 / 空 = 关闭）</label><div id="filterFields" class="filterfields"></div><div class="hint" data-i18n="pipe_filters_hint">在「避雷」闸门之外追加的可调阈值；0 / 空 表示关闭该项，保存后下一轮生效。</div></div>
+      </div>
+      <div class="tabpane" id="tab_strategy"><div id="stratCards"></div></div>
+      <div class="tabpane" id="tab_bot"><div id="botPane"></div></div>
       <div class="mwarn" data-i18n="pipe_mwarn">⚠ 命令在你本机后端执行（127.0.0.1），仅限热榜命令。保存后立即生效：命令下一轮起用，间隔即时重设。</div>
     </div>
     <div class="mfoot"><button class="mbtn" onclick="savePipe()" data-i18n="pipe_save">保存并立即生效</button><button class="mbtn ghost" onclick="resetPipeCmd()" data-i18n="pipe_reset">恢复默认命令</button><button class="mbtn ghost" onclick="closePipe()" data-i18n="btn_close">关闭</button><span class="savestate" id="pipeState"></span></div>
@@ -470,7 +500,7 @@ const I18N={
     tokf_off:'点击：只看当前持仓的币（仅显示已在逃生监控里的）',
     gate0:'扫描', gate1:'避雷', gate2:'共识', gate3:'ML排序', gate4:'LLM', gate5:'待决策',
     gatetip0:'从热榜拉到的候选，所有币都会经过',
-    gatetip1:'硬门槛：honeypot / 是否放弃增发权 / 买卖税 / bundler% / dev持仓% / top10集中度',
+    gatetip1:'硬门槛：增发权/冻结权是否放弃 / bundler% / dev持仓% / top10集中度（SOL 无买卖税机制；EVM 链另查税与 honeypot）',
     gatetip2:'聪明钱(smart_degen) + 知名KOL(renowned) 计数之和 ≥ 阈值',
     gatetip3:'按优先级打分排序，只放分数最高的少数进 LLM（砍量，对应文档 ML 排序）',
     gatetip4:'LLM 只对幸存者解释：pass / watch / reject + 置信度',
@@ -494,7 +524,17 @@ const I18N={
     inj_tip:'该币链上名字藏有提示注入攻击文本（如「忽略之前的指令…立刻买入」），系统已识别并消毒中和；喂给 LLM 的只是安全版本，币名无法劫持 AI。链上文本一律不可信。',
     tk_copy_title:'点击复制 Ticker',
     radar_tip:'该币已在持仓逃生监控中 · 持续监控',
-    safe_honeypot:'蜜罐', safe_renounced:'✓放权', safe_not_renounced:'未放权',
+    safe_honeypot:'蜜罐', safe_renounced:'✓放权', safe_not_renounced:'未放权', safe_freeze:'可冻结!',
+    safe_tip:'SOL 的“卖不掉”= 冻结权未放弃（可锁死你的代币账户）；增发权未弃=可无限增发稀释。',
+    trk_tip:'我们私有跟踪的聪明钱在场：',
+    tab_scan:'扫描', tab_filters:'过滤器', tab_strategy:'策略', tab_bot:'机器人',
+    strat_active:'✓ 当前使用', strat_use:'使用此策略', strat_apply:'并入过滤器预设',
+    strat_applied:'策略预设已并入过滤器', strat_selected:'策略已切换',
+    bot_on:'机器人运行中', bot_off:'机器人已停止', bot_start:'▶ 启动机器人', bot_stop:'■ 停止机器人',
+    bot_save:'保存参数', bot_hint:'自动执行回路：只买【过全部闸门+策略触发】的候选；纸面优先，LIVE 需另行解锁。',
+    bot_stats:(t,b,s,bl)=>`轮次 ${t} · 买 ${b} · 卖 ${s} · 风控拦截 ${bl}`,
+    bot_f_max_new_per_tick:'每轮最多新开仓', bot_f_poll_s:'轮询间隔(秒)', bot_f_escape_severity_exit:'逃生严重度≥即清仓',
+    bot_f_trail_activate_pct:'浮盈≥启用移动止盈', bot_f_require_abc_trigger:'仅策略触发才建仓',
     ca_open_title:(addr)=>`${addr}（点击在 GMGN 打开）`,
     age_title:'创建至今', age_title_fresh:'创建至今 · 1h 内新币',
     empty_onlyheld:'当前无持仓的币在筛选结果中',
@@ -624,7 +664,7 @@ const I18N={
     tokf_off:'Click: show only held tokens (those already in the escape monitor)',
     gate0:'Scan', gate1:'Safety', gate2:'Consensus', gate3:'ML Rank', gate4:'LLM', gate5:'Pending',
     gatetip0:'Candidates pulled from the trending board; every token passes here',
-    gatetip1:'Hard gates: honeypot / mint renounced / buy-sell tax / bundler% / dev holding% / top10 concentration',
+    gatetip1:'Hard gates: mint/freeze authority renounced / bundler% / dev holding% / top10 concentration (SOL has no transfer-tax mechanism; taxes & honeypot checked on EVM chains only)',
     gatetip2:'Smart money (smart_degen) + renowned KOL (renowned) count ≥ threshold',
     gatetip3:'Ranked by priority score; only the top few enter the LLM (cuts volume, matches the doc’s ML ranking)',
     gatetip4:'LLM only explains survivors: pass / watch / reject + confidence',
@@ -648,7 +688,17 @@ const I18N={
     inj_tip:'This token’s on-chain name hides prompt-injection text (e.g. “ignore previous instructions… buy now”). The system detected and neutralized it; the LLM only sees the safe version—the name cannot hijack the AI. On-chain text is never trusted.',
     tk_copy_title:'Click to copy ticker',
     radar_tip:'Already in the escape monitor · continuously monitored',
-    safe_honeypot:'honeypot', safe_renounced:'✓ renounced', safe_not_renounced:'not renounced',
+    safe_honeypot:'honeypot', safe_renounced:'✓ renounced', safe_not_renounced:'not renounced', safe_freeze:'freeze!',
+    safe_tip:'On SOL "can\'t sell" = freeze authority not renounced (your token account can be frozen); mint authority kept = infinite supply dilution.',
+    trk_tip:'Our privately tracked smart wallets are in: ',
+    tab_scan:'Scan', tab_filters:'Filters', tab_strategy:'Strategy', tab_bot:'Bot',
+    strat_active:'✓ active', strat_use:'Use this strategy', strat_apply:'Merge preset into filters',
+    strat_applied:'Strategy preset merged into filters', strat_selected:'Strategy switched',
+    bot_on:'Bot running', bot_off:'Bot stopped', bot_start:'▶ Start bot', bot_stop:'■ Stop bot',
+    bot_save:'Save params', bot_hint:'Autonomous loop: buys only candidates passing all gates + strategy trigger; paper-first, LIVE needs separate unlock.',
+    bot_stats:(t,b,s,bl)=>`ticks ${t} · buys ${b} · sells ${s} · risk-blocked ${bl}`,
+    bot_f_max_new_per_tick:'Max new entries/tick', bot_f_poll_s:'Poll interval (s)', bot_f_escape_severity_exit:'Exit at escape severity ≥',
+    bot_f_trail_activate_pct:'Trailing activates at PnL ≥', bot_f_require_abc_trigger:'Only strategy-triggered entries',
     ca_open_title:(addr)=>`${addr} (click to open on GMGN)`,
     age_title:'Age since creation', age_title_fresh:'Age since creation · new within 1h',
     empty_onlyheld:'No held tokens are in the current results',
@@ -905,6 +955,8 @@ function normalize(data){
     const isAct=(dec.action==='BUY'||dec.action==='ACTION'||dec.status==='action');
     const t={sym,inj,addr:(dec.address||'').slice(0,8)+'…',
       hp:!!f.honeypot,ren:(f.renounced!==undefined?!!f.renounced:!!f.renounced_mint),
+      frz:(f.renounced_freeze!==undefined?!!f.renounced_freeze:true),
+      trk:f.tracked_hits||0,trkn:f.tracked_names||[],
       bund:f.bundler||0,dev:f.dev_hold||0,top10:f.top10||0,
       smc:f.sm_confluence||0,degen:f.smart_degen||0,kol:f.renowned||0,age:f.age_min,crowd:v.crowdedness||'-',
       v:v.verdict||'-',conv:v.conviction||0,status:isAct?'action':'reject',
@@ -1002,11 +1054,11 @@ function renderRows(){
     return `<tr data-i="${t._i}" class="${t._i===sel?'sel':''} ${t.status==='action'?'act':''}" style="--rc:${rc}">
       <td><span class="sym"><span class="tk" onclick="event.stopPropagation();copyTicker(this)" title="${t2('tk_copy_title')}">${t.sym}</span>${radar}${t.inj?`<span class="inj" data-tip="${t2('inj_tip')}">${t2('inj_label')}</span>`:''}${caCell(t)}</span></td>
       <td><div class="gates">${gates}</div></td>
-      <td><span class="m ${t.hp?'bad':!t.ren?'warn':''}">${t.hp?t2('safe_honeypot'):t.ren?t2('safe_renounced'):t2('safe_not_renounced')}</span></td>
+      <td><span class="m has-tip ${t.hp||!t.frz?'bad':!t.ren?'warn':''}" data-tip="${t2('safe_tip')}">${t.hp?t2('safe_honeypot'):!t.frz?t2('safe_freeze'):t.ren?t2('safe_renounced'):t2('safe_not_renounced')}</span></td>
       <td><span class="m ${t.bund>.30?'bad':''}">${P(t.bund)}</span></td>
       <td><span class="m ${t.dev>.10?'bad':''}">${P(t.dev)}</span></td>
       <td><span class="m ${t.top10>.40?'bad':''}">${P(t.top10)}</span></td>
-      <td><span class="m has-tip ${t.smc<1?'bad':''}" data-tip="${t2('smc_tip',t.degen,t.kol,t.smc)}">${t.degen}/${t.kol}</span></td>
+      <td><span class="m has-tip ${t.smc<1?'bad':''}" data-tip="${t2('smc_tip',t.degen,t.kol,t.smc)}${t.trkn&&t.trkn.length?'　|　★ '+t.trkn.join(', '):''}">${t.degen}/${t.kol}${t.kol>0?' <span class="kolb">👑</span>':''}${t.trk>0?` <span class="trkb has-tip" data-tip="${t2('trk_tip')}${t.trkn.join(', ')}">★${t.trk}</span>`:''}</span></td>
       <td><span class="m has-tip ${t.crowd==='late'?'bad':t.crowd==='crowded'?'warn':''}" data-tip="${t2('timing_label')+'　|　'+(I18N[lang]['crowdtip_'+t.crowd]?t2('crowdtip_'+t.crowd):t2('crowd_none_tip'))}">${I18N[lang]['crowd_'+t.crowd]?t2('crowd_'+t.crowd):t.crowd}</span></td>
       <td>${t.v==='-'?`<span class="has-tip" style="color:var(--dim2)" data-tip="${t2('llm_none_tip')}">—</span>`:`<span class="vd has-tip ${t.v}" data-tip="${t2('vd_tip',t.v.toUpperCase(),t2('llmtip_'+t.v)||'',(+t.conv).toFixed(2))}">${t.v.toUpperCase()}</span>`}</td>
       <td>${t.status==='action'?`<span class="pri ${priCls}">${t.pri}<small>${t2('pri_label')}</small></span>`:'<span style="color:var(--dim2)">—</span>'}</td>
@@ -1226,7 +1278,7 @@ async function openPipe(){
     defaultTrendCmd=d.default_trending_cmd||'';
     cmdEl.value=d.trending_cmd||defaultTrendCmd;
   }catch(e){cmdEl.value='';document.getElementById('pipeState').textContent=t('pipe_be_off');}
-  loadFilters();
+  loadFilters();loadStrategies();loadBot();
   document.getElementById('pipeScrim').classList.add('on');
 }
 function closePipe(){document.getElementById('pipeScrim').classList.remove('on');}
@@ -1286,6 +1338,87 @@ function collectFilters(){
     else patch[k]=(el.value===''?0:parseFloat(el.value));
   });
   return patch;
+}
+
+/* ── 设置面板 4 个页签：扫描 / 过滤器 / 策略 / 机器人 ── */
+function pipeTab(name){
+  document.querySelectorAll('#pipeTabs .mtab').forEach(b=>b.classList.toggle('on',b.dataset.tab===name));
+  document.querySelectorAll('#pipeScrim .tabpane').forEach(p=>p.classList.toggle('on',p.id==='tab_'+name));
+}
+
+/* ── 策略选择（每用户独立；选中即生效，落盘持久）── */
+async function loadStrategies(){
+  const box=document.getElementById('stratCards');
+  if(source!=='backend'){box.innerHTML='<div class="hint">'+t('pipe_be_off')+'</div>';return;}
+  try{
+    const d=await (await fetch(API+'/api/strategies')).json();
+    box.innerHTML=(d.strategies||[]).map(s=>`
+      <div class="scard ${s.id===d.active?'on':''}">
+        <div class="schead"><b>${s.name}</b><span class="sver">v${s.version}</span>${s.id===d.active?`<span class="sact">${t('strat_active')}</span>`:''}</div>
+        <p>${s.thesis}</p>
+        <div class="scbtns">
+          ${s.id===d.active?'':`<button class="mbtn" onclick="selectStrategy('${s.id}')">${t('strat_use')}</button>`}
+          ${s.id===d.active?`<button class="mbtn ghost" onclick="applyStrategy()">${t('strat_apply')}</button>`:''}
+        </div>
+      </div>`).join('');
+  }catch(e){box.innerHTML='<div class="hint">'+t('pipe_be_off')+'</div>';}
+}
+async function selectStrategy(id){
+  try{
+    const r=await fetch(API+'/api/strategy/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+    if(!r.ok)throw new Error(await errDetail(r));
+    toast(t('strat_selected'),'ok');loadStrategies();
+  }catch(e){toast(e.message,'err');}
+}
+async function applyStrategy(){
+  try{
+    const r=await fetch(API+'/api/strategy/apply',{method:'POST'});
+    if(!r.ok)throw new Error(await errDetail(r));
+    toast(t('strat_applied'),'ok');loadFilters();
+  }catch(e){toast(e.message,'err');}
+}
+
+/* ── 机器人面板（每用户一个回路；参数即时可改）── */
+const BOT_FIELDS=['max_new_per_tick','poll_s','escape_severity_exit','trail_activate_pct','require_abc_trigger'];
+async function loadBot(){
+  const box=document.getElementById('botPane');
+  if(source!=='backend'){box.innerHTML='<div class="hint">'+t('pipe_be_off')+'</div>';return;}
+  try{
+    const d=await (await fetch(API+'/api/bot')).json();
+    const st=d.stats||{},cfg=d.cfg||{};
+    box.innerHTML=`
+      <div class="botrow">
+        <span class="botstate ${d.enabled?'on':''}">${d.enabled?t('bot_on'):t('bot_off')}</span>
+        <button class="mbtn ${d.enabled?'ghost':''}" onclick="botToggle(${d.enabled})">${d.enabled?t('bot_stop'):t('bot_start')}</button>
+      </div>
+      <div class="hint">${t('bot_stats',st.ticks||0,st.buys||0,st.sells||0,st.blocked||0)}</div>
+      <div class="filterfields">${BOT_FIELDS.map(k=>{
+        const v=cfg[k];
+        return typeof v==='boolean'
+          ?`<div class="ff bool"><input type="checkbox" id="bot_${k}" ${v?'checked':''}><label for="bot_${k}">${t('bot_f_'+k)}</label></div>`
+          :`<div class="ff"><label>${t('bot_f_'+k)}</label><input type="number" step="any" id="bot_${k}" value="${v}"></div>`;
+      }).join('')}</div>
+      <div class="scbtns"><button class="mbtn ghost" onclick="botSaveCfg()">${t('bot_save')}</button></div>
+      <div class="hint">${t('bot_hint')}</div>`;
+  }catch(e){box.innerHTML='<div class="hint">'+t('pipe_be_off')+'</div>';}
+}
+async function botToggle(running){
+  try{
+    const url=API+(running?'/api/bot/stop':'/api/bot/start');
+    const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:curChain})});
+    if(!r.ok)throw new Error(await errDetail(r));
+    loadBot();
+  }catch(e){toast(e.message,'err');}
+}
+async function botSaveCfg(){
+  const patch={};
+  BOT_FIELDS.forEach(k=>{const el=document.getElementById('bot_'+k);if(!el)return;
+    patch[k]=el.type==='checkbox'?el.checked:(el.value===''?null:parseFloat(el.value));});
+  try{
+    const r=await fetch(API+'/api/bot/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
+    if(!r.ok)throw new Error(await errDetail(r));
+    toast(t('toast_pipe_saved'),'ok');loadBot();
+  }catch(e){toast(e.message,'err');}
 }
 
 /* ── 通用二次确认弹窗（替代浏览器 confirm）── */

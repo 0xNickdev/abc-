@@ -74,13 +74,15 @@ def _get(f, name, default=0.0):
     return getattr(f, name, default)
 
 
-def evaluate(f, trig: dict | None = None) -> ABCSignal:
-    """对一个已过避雷门槛的候选评 ABC Alpha v1 入场信号。
+def evaluate(f, trig: dict | None = None, preset: dict | None = None) -> ABCSignal:
+    """对一个已过避雷门槛的候选评入场信号（默认按 ABC Alpha v1 阈值）。
 
     入参 f 可以是 TokenFeatures 或 _feat() 的 dict。返回 ABCSignal。
     评分逻辑全可解释（无黑盒）：四个维度命中即累计，差一项则降级 watch。
+    trig/preset 可传其他策略的阈值/预设（见 STRATEGIES），r_expect 用该预设的阶梯/止损。
     """
     t = trig or TRIGGER
+    p = preset or PRESET
     smart = max(int(_get(f, "tracked_hits", 0)), int(_get(f, "sm_confluence", 0)))
     chg5 = float(_get(f, "chg_5m", 0.0))
     buyr = float(_get(f, "buy_ratio", 0.5))
@@ -124,7 +126,7 @@ def evaluate(f, trig: dict | None = None) -> ABCSignal:
     triggered = ok_smart and ok_mom and ok_buy and ok_liq and ok_age
 
     # 预期 R：以 TP 阶梯加权命中收益、硬止损为 1R 下行，用 score 调命中概率粗估。
-    r_expect = _expected_r(score, PRESET["tp_ladder"], PRESET["hard_stop_pct"]) if triggered else 0.0
+    r_expect = _expected_r(score, p["tp_ladder"], p["hard_stop_pct"]) if triggered else 0.0
     return ABCSignal(triggered=triggered, score=score, r_expect=r_expect, reasons=reasons)
 
 
@@ -153,3 +155,60 @@ def describe() -> dict:
                 thesis=("不抢 slot-0；盯毕业后 0–15min；避雷过关 + ≥2 聪明钱在场 + "
                         "5m 动能向上 + 买盘占优 + 流动性达标 → 触发；"
                         "TP 阶梯/移动止盈/硬止损/逃生预警退出；连亏熔断 + 当日上限 + 纸面先行。"))
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# 策略注册表：具名预设可选（每用户各选各的，见 app.UserSession.strategy_id）。
+# 结构同构：trigger（入场触发阈值）+ preset（并入 CFG 的纪律参数）+ preset_filters。
+# ──────────────────────────────────────────────────────────────────────────
+def _mk(sid, name, version, thesis, trigger, preset, preset_filters):
+    return dict(id=sid, name=name, version=version, thesis=thesis,
+                trigger=trigger, preset=preset, preset_filters=preset_filters)
+
+_SNIPER_TRIGGER = dict(TRIGGER, min_tracked_or_smart=3, min_buy_ratio=0.60,
+                       min_liquidity=15000.0, max_age_min=30.0, ideal_age_max=10.0)
+_SNIPER_PRESET = dict(PRESET, max_concurrent_positions=2, risk_per_trade=0.005,
+                      hard_stop_pct=0.25, trailing_pct=0.20,
+                      tp_ladder=[(0.40, 0.50), (1.00, 0.30), (2.00, 0.20)],
+                      kill_switch_consec_losses=2)
+_DEGEN_TRIGGER = dict(TRIGGER, min_tracked_or_smart=1, min_buy_ratio=0.52,
+                      min_liquidity=5000.0, max_age_min=90.0, ideal_age_max=25.0)
+_DEGEN_PRESET = dict(PRESET, max_concurrent_positions=5, risk_per_trade=0.015,
+                     hard_stop_pct=0.45, trailing_pct=0.35,
+                     tp_ladder=[(1.00, 0.30), (3.00, 0.30), (8.00, 0.20)],
+                     kill_switch_consec_losses=4)
+
+DEFAULT_STRATEGY = "abc_alpha_v1"
+STRATEGIES = {
+    "abc_alpha_v1": _mk(
+        "abc_alpha_v1", NAME, VERSION,
+        ("Сбалансированная: пост-градация 0–15 мин, ≥2 умных кошелька, моментум 5m + "
+         "перевес покупок; TP-лестница, трейлинг, жёсткий стоп."),
+        TRIGGER, PRESET, PRESET_FILTERS),
+    "abc_sniper_v1": _mk(
+        "abc_sniper_v1", "ABC Sniper (консервативная)", "1.0",
+        ("Мало сделок, высокая планка: ≥3 умных кошелька, покупки ≥60%, ликвидность ≥$15k, "
+         "окно до 30 мин; риск/сделку вдвое ниже, стоп короче, фьюз после 2 убытков."),
+        _SNIPER_TRIGGER, _SNIPER_PRESET,
+        dict(min_liquidity=_SNIPER_TRIGGER["min_liquidity"], min_age_min=1.0,
+             max_age_min=_SNIPER_TRIGGER["max_age_min"], require_renounced_freeze=True)),
+    "abc_degen_v1": _mk(
+        "abc_degen_v1", "ABC Degen (агрессивная)", "1.0",
+        ("Больше входов, шире окно (до 90 мин), достаточно 1 умного кошелька; "
+         "стоп дальше, цели выше (до 8x), риск/сделку выше — только для бумажной обкатки."),
+        _DEGEN_TRIGGER, _DEGEN_PRESET,
+        dict(min_liquidity=_DEGEN_TRIGGER["min_liquidity"], min_age_min=1.0,
+             max_age_min=_DEGEN_TRIGGER["max_age_min"], require_renounced_freeze=True)),
+}
+
+def get(sid: str) -> dict:
+    """取具名策略（未知 id → 默认 ABC Alpha v1，绝不 KeyError）。"""
+    return STRATEGIES.get(sid) or STRATEGIES[DEFAULT_STRATEGY]
+
+def evaluate_for(sid: str, f) -> ABCSignal:
+    st = get(sid)
+    return evaluate(f, trig=st["trigger"], preset=st["preset"])
+
+def describe_all(active: str = DEFAULT_STRATEGY) -> dict:
+    return dict(active=get(active)["id"],
+                strategies=[STRATEGIES[k] for k in STRATEGIES])

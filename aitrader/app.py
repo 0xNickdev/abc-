@@ -333,6 +333,30 @@ def save_user_filters(pubkey: str, flt: dict):
     except Exception:
         pass
 
+def _strategy_path(pubkey: str) -> pathlib.Path:
+    """选定策略落盘路径：默认会话在顶层，其他用户在自己目录。"""
+    if pubkey == DEFAULT_PUBKEY:
+        return OUT_DIR / "strategy.json"
+    return _user_dir(pubkey) / "strategy.json"
+
+def load_user_strategy(pubkey: str) -> str:
+    p = _strategy_path(pubkey)
+    if p.exists():
+        try:
+            sid = json.loads(p.read_text()).get("id", "")
+            if sid in strategy.STRATEGIES:
+                return sid
+        except Exception:
+            pass
+    return strategy.DEFAULT_STRATEGY
+
+def save_user_strategy(pubkey: str, sid: str):
+    try:
+        p = _strategy_path(pubkey); p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(dict(id=sid)))
+    except Exception:
+        pass
+
 def save_positions(lst: list):
     """默认会话(local)持仓落盘到顶层 positions.json（重启/reload 不丢）。"""
     try:
@@ -655,7 +679,10 @@ class FeatureExtractor:
 # 4. 确定性硬门槛（先跑、便宜、无情）——返回 (ok, reason, gate_idx)
 #    gate_idx 与前端漏斗对齐：1=避雷 2=共识 3=ML排序 4=LLM
 # ──────────────────────────────────────────────────────────────────────────
-def hard_gates(f: TokenFeatures, flt: dict | None = None):
+def hard_gates(f: TokenFeatures, flt: dict | None = None, chain: str | None = None):
+    """chain 传入时按链裁剪不适用的闸门：sol(SPL) 没有转账税机制（Token-2022 转账费极罕见，
+    pump.fun 系全是标准 SPL），故 sol 跳过税闸；EVM 链照常。honeypot 布尔仍保留（数据驱动，
+    sol 上真正的"卖不掉"= freeze 权未弃，由 require_renounced_freeze / 逃生监控覆盖）。"""
     flt = flt if flt is not None else DEFAULT_FILTERS
     # gate 1 避雷（真实布尔/数值字段，无合成安全分）
     if f.honeypot:
@@ -686,7 +713,7 @@ def hard_gates(f: TokenFeatures, flt: dict | None = None):
         return False, "REJECT 过滤：符号在黑名单", 1
     if f.address in set(flt.get("address_blacklist", [])):
         return False, "REJECT 过滤：地址在黑名单", 1
-    if f.buy_tax > CFG["max_buy_tax"] or f.sell_tax > CFG["max_sell_tax"]:
+    if chain != "sol" and (f.buy_tax > CFG["max_buy_tax"] or f.sell_tax > CFG["max_sell_tax"]):
         return False, f"REJECT 避雷：税过高 买{f.buy_tax:.0%}/卖{f.sell_tax:.0%}", 1
     if f.rug_ratio > CFG["max_rug_ratio"]:
         return False, f"REJECT 避雷：rug 比例 {f.rug_ratio:.0%} > {CFG['max_rug_ratio']:.0%}", 1
@@ -990,6 +1017,7 @@ class UserSession:
         self.bot = bot.BotRunner()    # 每用户一个自主回路（默认关闭）
         self.filters = load_filters() if self._default else load_user_filters(pubkey)
         self.positions = load_positions() if self._default else load_user_positions(pubkey)
+        self.strategy_id = load_user_strategy(pubkey)   # 选定策略（落盘，重启不丢）
 
     # ── 市场层委托（保持旧 ST.* 调用兼容；全部走共享 MK）──
     @property
@@ -1020,6 +1048,11 @@ class UserSession:
             save_filters(self.filters)
         else:
             save_user_filters(self.pubkey, self.filters)
+
+    def set_strategy(self, sid: str) -> str:
+        self.strategy_id = strategy.get(sid)["id"]
+        save_user_strategy(self.pubkey, self.strategy_id)
+        return self.strategy_id
 
     def set_filters(self, patch: dict) -> dict:
         self.filters.update(sanitize_filters(patch))
@@ -1106,7 +1139,7 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
             continue
         f = fx.build_from_row(t)                          # STEP 2 尽调（直接用 trending 行字段）
         f.tracked_hits, f.tracked_names = _tracked_for(f, g)   # 私有 smart-money 共识信号
-        ok, reason, gate_idx = hard_gates(f, s.filters)  # STEP 3 确定性硬门槛（先跑，含可调过滤器）
+        ok, reason, gate_idx = hard_gates(f, s.filters, chain)  # STEP 3 确定性硬门槛（按链裁剪）
         if not ok:
             decisions.append(_reject(f, reason, gate_idx, None))
             continue
@@ -1137,7 +1170,8 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
         # 组合风控不在此阻断，只标 risk_warn（人在环：提示而非硬拦）
         allow, rnote = s.risk.gate(size, n_pos, exposure)
         pri = priority_score(f, v.conviction, v.crowdedness)
-        abc = strategy.evaluate(f).as_dict()      # ABC Alpha v1 入场信号（与回测复盘共用同一逻辑）
+        abc = strategy.evaluate_for(s.strategy_id, f).as_dict()   # 按该用户选定策略评入场信号
+        abc["strategy"] = strategy.get(s.strategy_id)["name"]
         decisions.append(dict(
             decision=dict(symbol=f.symbol_safe, address=f.address, action="ACTION",
                           reason="通过全部闸门 · 待决策", size_sol=size, risk_warn=(not allow),
@@ -1183,7 +1217,8 @@ def _reject(f, reason, gate_idx, v):
 
 def _feat(f):
     return dict(honeypot=f.honeypot, renounced=(f.renounced_mint and f.renounced_freeze),
-                renounced_mint=f.renounced_mint, buy_tax=round(f.buy_tax, 3), sell_tax=round(f.sell_tax, 3),
+                renounced_mint=f.renounced_mint, renounced_freeze=f.renounced_freeze,
+                buy_tax=round(f.buy_tax, 3), sell_tax=round(f.sell_tax, 3),
                 bundler=round(f.bundler, 2), dev_hold=round(f.dev_hold, 2), top10=round(f.top10, 2),
                 smart_degen=f.smart_degen, renowned=f.renowned, sm_confluence=f.sm_confluence,
                 tracked_hits=f.tracked_hits, tracked_names=f.tracked_names,
@@ -1616,27 +1651,52 @@ def api_positions(chain: str = "sol", x_wallet: str | None = WalletHeader):
         return dict(positions=monitor_positions(ch, s=sess), portfolio=_portfolio(sess))
 
 @app.get("/api/strategy")
-def api_strategy():
-    """ABC Alpha v1 策略说明（前端可直接渲染：触发阈值 + 预设 + 论点）。"""
-    return strategy.describe()
+def api_strategy(x_wallet: str | None = WalletHeader):
+    """当前用户选定策略的说明（触发阈值 + 预设 + 论点）。"""
+    sess = get_session(x_wallet)
+    return strategy.get(sess.strategy_id)
 
-@app.post("/api/strategy/apply")
-def api_strategy_apply(x_wallet: str | None = WalletHeader):
-    """把 ABC Alpha v1 预设并入运行参数（CFG + 该用户 filters），并落盘 filters。
-    纪律收紧版（并发回 3 等）；显式触发，不在启动时自动改全局。"""
+@app.get("/api/strategies")
+def api_strategies(x_wallet: str | None = WalletHeader):
+    """全部具名策略 + 当前用户激活的（前端策略选择卡片直接渲染）。"""
+    sess = get_session(x_wallet)
+    return strategy.describe_all(sess.strategy_id)
+
+class StrategyIn(BaseModel):
+    id: str
+
+@app.post("/api/strategy/select")
+def api_strategy_select(sel: StrategyIn, x_wallet: str | None = WalletHeader):
+    """选定策略（每用户独立，落盘）。信号评估/机器人触发即时切换到该策略阈值。"""
     _block_if_public()
     sess = get_session(x_wallet)
     with sess.lock:
-        strategy.apply_to_cfg(CFG, sess.filters)
+        sid = sess.set_strategy(sel.id)
+    st = strategy.get(sid)
+    log("STRATEGY", st["name"], f"выбрана стратегия {st['name']} v{st['version']}", mode=sess.mode)
+    return dict(ok=True, active=sid, strategy=st)
+
+@app.post("/api/strategy/apply")
+def api_strategy_apply(x_wallet: str | None = WalletHeader):
+    """把【当前选定策略】的 preset_filters 并入该用户过滤器并落盘。
+    CFG（全局风控预设）只在默认会话（运营者/单机）时并入，避免一个用户改全局。"""
+    _block_if_public()
+    sess = get_session(x_wallet)
+    st = strategy.get(sess.strategy_id)
+    with sess.lock:
+        sess.filters.update(sanitize_filters(st["preset_filters"]))
         sess.persist_filters()
-        log("STRATEGY", strategy.NAME, f"应用预设 {strategy.NAME} v{strategy.VERSION}", mode=sess.mode)
-    return dict(ok=True, applied=strategy.NAME, version=strategy.VERSION,
-                cfg_preset=strategy.PRESET, filters=sess.filters)
+        if sess.pubkey == DEFAULT_PUBKEY:
+            CFG.update(st["preset"])
+        log("STRATEGY", st["name"], f"применён пресет {st['name']} v{st['version']}", mode=sess.mode)
+    return dict(ok=True, applied=st["name"], version=st["version"],
+                cfg_preset=st["preset"], filters=sess.filters)
 
 @app.get("/api/backtest")
-def api_backtest():
-    """从 trade_decisions.jsonl 复盘：漏斗 + 已实现 PnL/胜率/R + 纸面预期 R。"""
-    return backtest.summary(trig=strategy.TRIGGER)
+def api_backtest(x_wallet: str | None = WalletHeader):
+    """从 trade_decisions.jsonl 复盘：漏斗 + 已实现 PnL/胜率/R + 纸面预期 R（按选定策略阈值）。"""
+    sess = get_session(x_wallet)
+    return backtest.summary(trig=strategy.get(sess.strategy_id)["trigger"])
 
 class BotConfigIn(BaseModel):
     max_new_per_tick: int | None = None

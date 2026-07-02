@@ -607,3 +607,74 @@ class TestBotAPI:
         # у других сессий параметры по умолчанию
         assert client.get("/api/bot").json()["cfg"]["max_new_per_tick"] \
             == appmod.bot.CFG["max_new_per_tick"]
+
+
+# ── Этап 4: реестр стратегий + выбор per-user; sol-релевантные гейты ──
+class TestStrategyRegistry:
+    def test_registry_has_three_named_strategies(self):
+        import strategy as st
+        assert set(st.STRATEGIES) == {"abc_alpha_v1", "abc_sniper_v1", "abc_degen_v1"}
+        assert st.get("nonsense")["id"] == st.DEFAULT_STRATEGY   # fallback, не KeyError
+
+    def test_degen_triggers_where_alpha_does_not(self):
+        import strategy as st
+        f = feat(sm_confluence=1, smart_degen=1)     # всего 1 умный кошелёк
+        assert st.evaluate_for("abc_degen_v1", f).triggered is True    # degen: достаточно 1
+        assert st.evaluate_for("abc_alpha_v1", f).triggered is False   # alpha: нужно ≥2
+        assert st.evaluate_for("abc_sniper_v1", f).triggered is False  # sniper: нужно ≥3
+
+    def test_sniper_requires_higher_buy_ratio(self):
+        import strategy as st
+        f = feat(buy_ratio=0.56, sm_confluence=4)
+        assert st.evaluate_for("abc_alpha_v1", f).triggered is True    # 0.55 порог
+        assert st.evaluate_for("abc_sniper_v1", f).triggered is False  # 0.60 порог
+
+
+class TestStrategyAPI:
+    H_A = {"X-Wallet": "StratWalletAAAA"}
+    H_B = {"X-Wallet": "StratWalletBBBB"}
+
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        return _mu_client(tmp_path, monkeypatch)
+
+    def test_list_and_default_active(self, client):
+        d = client.get("/api/strategies", headers=self.H_A).json()
+        assert d["active"] == "abc_alpha_v1" and len(d["strategies"]) == 3
+
+    def test_select_isolated_and_persistent(self, client):
+        r = client.post("/api/strategy/select", json={"id": "abc_degen_v1"}, headers=self.H_A)
+        assert r.json()["active"] == "abc_degen_v1"
+        assert client.get("/api/strategies", headers=self.H_A).json()["active"] == "abc_degen_v1"
+        assert client.get("/api/strategies", headers=self.H_B).json()["active"] == "abc_alpha_v1"
+        appmod.SESSIONS.pop("StratWalletAAAA")    # «рестарт» → чтение с диска
+        assert client.get("/api/strategies", headers=self.H_A).json()["active"] == "abc_degen_v1"
+
+    def test_select_unknown_falls_back_to_default(self, client):
+        r = client.post("/api/strategy/select", json={"id": "hackz"}, headers=self.H_A)
+        assert r.json()["active"] == "abc_alpha_v1"
+
+    def test_apply_merges_preset_filters_per_user(self, client):
+        client.post("/api/strategy/select", json={"id": "abc_sniper_v1"}, headers=self.H_A)
+        client.post("/api/strategy/apply", headers=self.H_A)
+        flt = client.get("/api/filters", headers=self.H_A).json()["filters"]
+        assert flt["min_liquidity"] == 15000.0 and flt["max_age_min"] == 30.0
+        # других юзеров не задело
+        flt_b = client.get("/api/filters", headers=self.H_B).json()["filters"]
+        assert flt_b["min_liquidity"] == appmod.DEFAULT_FILTERS["min_liquidity"]
+
+
+class TestChainAwareGates:
+    def test_tax_gate_skipped_on_sol(self):
+        f = feat(buy_tax=0.5, sell_tax=0.5)          # запредельные «налоги»
+        ok, _, _ = appmod.hard_gates(f, chain="sol")
+        assert ok is True                             # sol: SPL без налогов — гейт не применяется
+
+    def test_tax_gate_enforced_on_evm(self):
+        f = feat(buy_tax=0.5, sell_tax=0.5)
+        ok, reason, gate = appmod.hard_gates(f, chain="bsc")
+        assert ok is False and gate == 1 and "税" in reason
+
+    def test_tax_gate_default_behavior_unchanged(self):
+        ok, _, _ = appmod.hard_gates(feat(buy_tax=0.5))   # без chain — как раньше
+        assert ok is False
