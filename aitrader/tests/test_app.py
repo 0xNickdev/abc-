@@ -784,3 +784,61 @@ class TestTxEndpoints:
             headers=headers)
         assert r2.status_code == 200 and r2.json()["closed"] is True
         assert client.get("/api/positions", headers=headers).json()["positions"] == []
+
+
+# ── Этап 6: режимы бота N1 (предложения) / N2 (полуавтомат) ──
+class TestBotModes:
+    ADDR = "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    H = {"X-Wallet": "ModeWalletAAAA"}
+
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        return _mu_client(tmp_path, monkeypatch)
+
+    def test_default_mode_is_n2(self, client):
+        assert client.get("/api/bot", headers=self.H).json()["cfg"]["mode"] == "n2"
+
+    def test_mode_validation(self, client):
+        r = client.post("/api/bot/config", json={"mode": "n3"}, headers=self.H)
+        assert r.status_code == 400
+        assert client.post("/api/bot/config", json={"mode": "n1"},
+                           headers=self.H).json()["cfg"]["mode"] == "n1"
+
+    def test_n1_queues_instead_of_trading(self, client):
+        sess = appmod.get_session("ModeWalletAAAA")
+        sess.bot.cfg["mode"] = "n1"
+        res = appmod._bot_buy_fn(sess)("sol", self.ADDR, 0.1)
+        assert res.get("proposed") is True
+        assert sess.positions == []                       # сделки нет
+        props = client.get("/api/bot/proposals", headers=self.H).json()["proposals"]
+        assert len(props) == 1 and props[0]["side"] == "buy"
+        # дубликат того же адреса/стороны не плодится
+        appmod._bot_buy_fn(sess)("sol", self.ADDR, 0.1)
+        assert len(sess.proposals) == 1
+
+    def test_n2_executes_directly(self, client):
+        sess = appmod.get_session("ModeWalletAAAA")
+        sess.bot.cfg["mode"] = "n2"
+        res = appmod._bot_buy_fn(sess)("sol", self.ADDR, 0.1)
+        assert res.get("ok") is True and len(sess.positions) == 1
+
+    def test_approve_executes_and_removes(self, client):
+        sess = appmod.get_session("ModeWalletAAAA")
+        sess.bot.cfg["mode"] = "n1"
+        appmod._bot_buy_fn(sess)("sol", self.ADDR, 0.1)
+        pid = sess.proposals[0]["id"]
+        r = client.post("/api/bot/proposals/act", json={"id": pid, "action": "approve"},
+                        headers=self.H).json()
+        assert r["approved"] is True and len(sess.positions) == 1 and sess.proposals == []
+        # повторный act по тому же id → 404
+        assert client.post("/api/bot/proposals/act", json={"id": pid},
+                           headers=self.H).status_code == 404
+
+    def test_dismiss_removes_without_trading(self, client):
+        sess = appmod.get_session("ModeWalletAAAA")
+        sess.bot.cfg["mode"] = "n1"
+        appmod._bot_sell_fn(sess)(self.ADDR, fraction=1.0, reason="test")
+        pid = sess.proposals[0]["id"]
+        r = client.post("/api/bot/proposals/act", json={"id": pid, "action": "dismiss"},
+                        headers=self.H).json()
+        assert r["dismissed"] is True and sess.proposals == []

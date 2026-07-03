@@ -539,7 +539,9 @@ const I18N={
     bot_save:'保存参数', bot_hint:'自动执行回路：只买【过全部闸门+策略触发】的候选；纸面优先，LIVE 需另行解锁。',
     bot_stats:(t,b,s,bl)=>`轮次 ${t} · 买 ${b} · 卖 ${s} · 风控拦截 ${bl}`,
     bot_f_max_new_per_tick:'每轮最多新开仓', bot_f_poll_s:'轮询间隔(秒)', bot_f_escape_severity_exit:'逃生严重度≥即清仓',
-    bot_f_trail_activate_pct:'浮盈≥启用移动止盈', bot_f_require_abc_trigger:'仅策略触发才建仓',
+    bot_f_trail_activate_pct:'浮盈≥启用移动止盈', bot_f_require_abc_trigger:'仅策略触发才建仓', bot_f_mode:'模式',
+    bot_mode_n1:'N1 · 机器人提议，你点确认', bot_mode_n2:'N2 · 半自动（纸面/LIVE 锁）',
+    bot_props:'待确认提议', prop_ok:'✓ 执行', prop_no:'✗', prop_done:'已执行', prop_gone:'已忽略',
     auth_need_wallet:'请先连接 Phantom 钱包', ph_buy:'用自己钱包买', ph_sell:'钱包卖出', ph_sell_title:'通过 Phantom 签名卖出（非托管）',
     ph_building:'构建交易…', ph_signing:'在 Phantom 里签名…',
     ph_sent:(s,x)=>`${s} 交易已发送 · ${x}…`, ph_fail:m=>`交易失败：${m}`,
@@ -710,7 +712,9 @@ const I18N={
     bot_save:'Save params', bot_hint:'Autonomous loop: buys only candidates passing all gates + strategy trigger; paper-first, LIVE needs separate unlock.',
     bot_stats:(t,b,s,bl)=>`ticks ${t} · buys ${b} · sells ${s} · risk-blocked ${bl}`,
     bot_f_max_new_per_tick:'Max new entries/tick', bot_f_poll_s:'Poll interval (s)', bot_f_escape_severity_exit:'Exit at escape severity ≥',
-    bot_f_trail_activate_pct:'Trailing activates at PnL ≥', bot_f_require_abc_trigger:'Only strategy-triggered entries',
+    bot_f_trail_activate_pct:'Trailing activates at PnL ≥', bot_f_require_abc_trigger:'Only strategy-triggered entries', bot_f_mode:'Mode',
+    bot_mode_n1:'N1 · bot proposes, you confirm', bot_mode_n2:'N2 · semi-auto (paper/LIVE locks)',
+    bot_props:'Pending proposals', prop_ok:'✓ execute', prop_no:'✗', prop_done:'Executed', prop_gone:'Dismissed',
     auth_need_wallet:'Connect Phantom wallet first', ph_buy:'Buy with my wallet', ph_sell:'Wallet sell', ph_sell_title:'Sell via Phantom signature (non-custodial)',
     ph_building:'Building transaction…', ph_signing:'Sign in Phantom…',
     ph_sent:(s,x)=>`${s} tx sent · ${x}…`, ph_fail:m=>`Transaction failed: ${m}`,
@@ -1437,12 +1441,23 @@ async function loadBot(){
   if(source!=='backend'){box.innerHTML='<div class="hint">'+t('pipe_be_off')+'</div>';return;}
   try{
     const d=await (await fetch(API+'/api/bot')).json();
-    const st=d.stats||{},cfg=d.cfg||{};
+    const pr=await (await fetch(API+'/api/bot/proposals')).json();
+    const st=d.stats||{},cfg=d.cfg||{},mode=cfg.mode||'n2';
     box.innerHTML=`
       <div class="botrow">
         <span class="botstate ${d.enabled?'on':''}">${d.enabled?t('bot_on'):t('bot_off')}</span>
         <button class="mbtn ${d.enabled?'ghost':''}" onclick="botToggle(${d.enabled})">${d.enabled?t('bot_stop'):t('bot_start')}</button>
       </div>
+      <div class="botrow">
+        <label><input type="radio" name="botMode" value="n1" ${mode==='n1'?'checked':''} onchange="botSetMode('n1')"> ${t('bot_mode_n1')}</label>
+        <label><input type="radio" name="botMode" value="n2" ${mode==='n2'?'checked':''} onchange="botSetMode('n2')"> ${t('bot_mode_n2')}</label>
+      </div>
+      ${(pr.proposals||[]).length?`<div class="fld"><label>${t('bot_props')}</label>`+(pr.proposals||[]).map(p=>`
+        <div class="botrow" style="font-size:12px">
+          <span>${p.side==='buy'?'🟢':'🔴'} ${p.side.toUpperCase()} ${(p.address||'').slice(0,6)}… ${p.side==='buy'?p.size_sol+' SOL':Math.round(p.fraction*100)+'%'} · ${p.reason||''}</span>
+          <button class="mbtn" onclick="propAct('${p.id}','approve')">${t('prop_ok')}</button>
+          <button class="mbtn ghost" onclick="propAct('${p.id}','dismiss')">${t('prop_no')}</button>
+        </div>`).join('')+'</div>':''}
       <div class="hint">${t('bot_stats',st.ticks||0,st.buys||0,st.sells||0,st.blocked||0)}</div>
       <div class="filterfields">${BOT_FIELDS.map(k=>{
         const v=cfg[k];
@@ -1453,6 +1468,21 @@ async function loadBot(){
       <div class="scbtns"><button class="mbtn ghost" onclick="botSaveCfg()">${t('bot_save')}</button></div>
       <div class="hint">${t('bot_hint')}</div>`;
   }catch(e){box.innerHTML='<div class="hint">'+t('pipe_be_off')+'</div>';}
+}
+async function botSetMode(m){
+  try{
+    const r=await fetch(API+'/api/bot/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:m})});
+    if(!r.ok)throw new Error(await errDetail(r));
+    toast(m==='n1'?t('bot_mode_n1'):t('bot_mode_n2'),'ok');
+  }catch(e){toast(e.message,'err');loadBot();}
+}
+async function propAct(id,action){
+  try{
+    const r=await fetch(API+'/api/bot/proposals/act',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,action})});
+    if(!r.ok)throw new Error(await errDetail(r));
+    toast(action==='approve'?t('prop_done'):t('prop_gone'),'ok');
+    loadBot();scanCycle();
+  }catch(e){toast(e.message,'err');loadBot();}
 }
 async function botToggle(running){
   try{

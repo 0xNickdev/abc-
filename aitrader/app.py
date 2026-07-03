@@ -1049,6 +1049,7 @@ class UserSession:
         self.strategy_id = load_user_strategy(pubkey)   # 选定策略（落盘，重启不丢）
         self.twitter = load_user_twitter(pubkey)        # per-user Twitter KOL（opt-in）
         self.auth_token = None                          # sign-in-with-wallet 会话令牌（内存态）
+        self.proposals: list[dict] = []                 # N1: предложения бота, ждут клика (в памяти)
 
     # ── 市场层委托（保持旧 ST.* 调用兼容；全部走共享 MK）──
     @property
@@ -1785,11 +1786,42 @@ def api_backtest(x_wallet: str | None = WalletHeader):
     return backtest.summary(trig=strategy.get(sess.strategy_id)["trigger"])
 
 class BotConfigIn(BaseModel):
+    mode: str | None = None              # n1 | n2
     max_new_per_tick: int | None = None
     poll_s: float | None = None
     escape_severity_exit: int | None = None
     trail_activate_pct: float | None = None
     require_abc_trigger: bool | None = None
+
+# ── Этап 6: N1 — бот не исполняет, а кладёт предложение в очередь; человек кликает.
+def _propose(sess: UserSession, side: str, chain: str, address: str,
+             size_sol: float = 0.0, fraction: float = 1.0, reason: str = ""):
+    if any(p["address"] == address and p["side"] == side for p in sess.proposals):
+        return                                            # не дублируем, пока висит
+    sess.proposals.append(dict(
+        id=secrets.token_urlsafe(8), ts=time.time(), side=side, chain=chain,
+        address=address, size_sol=round(size_sol, 4), fraction=fraction, reason=reason))
+    del sess.proposals[:-20]                              # кап очереди
+    log("BOT", address[:8], f"N1 предложение: {side} {size_sol or fraction}", mode=sess.mode)
+
+def _bot_buy_fn(sess: UserSession):
+    """buy-колбэк бота: режим читается на каждом вызове — переключение на лету."""
+    def fn(chain, address, size_sol):
+        if sess.bot.cfg.get("mode") == "n1":
+            _propose(sess, "buy", chain, address, size_sol=size_sol, reason="вход по стратегии")
+            return dict(ok=True, proposed=True)
+        return do_buy(chain, address, size_sol, sess)
+    return fn
+
+def _bot_sell_fn(sess: UserSession):
+    def fn(address, fraction=1.0, reason=None):
+        if sess.bot.cfg.get("mode") == "n1":
+            p = next((x for x in sess.positions if x["address"] == address), None)
+            _propose(sess, "sell", (p or {}).get("chain", "sol"), address,
+                     fraction=fraction, reason=reason or "выход по правилам")
+            return dict(ok=True, proposed=True)
+        return do_sell(address, fraction, reason, sess)
+    return fn
 
 @app.get("/api/bot")
 def api_bot(x_wallet: str | None = WalletHeader):
@@ -1808,8 +1840,8 @@ def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader):
     started = sess.bot.start(
         ch,
         screen_fn=lambda c: screen_once(c, sess),
-        buy_fn=lambda c, a, sz: do_buy(c, a, sz, sess),
-        sell_fn=lambda a, fraction=1.0, reason=None: do_sell(a, fraction, reason, sess),
+        buy_fn=_bot_buy_fn(sess),
+        sell_fn=_bot_sell_fn(sess),
         positions_fn=lambda: sess.positions, risk_cfg=CFG, lock=sess.lock,
         halted_fn=lambda: sess.risk.halted or sess.risk.realized_loss_today >= CFG["daily_loss_cap_sol"])
     log("BOT", "ABC", "启动自主回路" if started else "已在运行（忽略重复启动）", mode=sess.mode)
@@ -1830,9 +1862,41 @@ def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader):
     _block_if_public()
     sess = get_session(x_wallet)
     patch = {k: v for k, v in c.model_dump().items() if v is not None}
+    if "mode" in patch and patch["mode"] not in ("n1", "n2"):
+        raise HTTPException(400, "mode: n1 | n2")
     with sess.lock:
         sess.bot.cfg.update(patch)
     return dict(ok=True, cfg=dict(sess.bot.cfg))
+
+@app.get("/api/bot/proposals")
+def api_bot_proposals(x_wallet: str | None = WalletHeader):
+    """Очередь N1-предложений бота (per-user)."""
+    sess = get_session(x_wallet)
+    return dict(proposals=list(sess.proposals))
+
+class ProposalActIn(BaseModel):
+    id: str
+    action: str = "approve"      # approve | dismiss
+
+@app.post("/api/bot/proposals/act")
+def api_bot_proposal_act(a: ProposalActIn, x_wallet: str | None = WalletHeader):
+    """approve → исполнить бумажно/через операторский путь (self-custody кошельки
+    исполняют сами через Phantom и шлют dismiss); dismiss → просто убрать."""
+    _block_if_public()
+    sess = get_session(x_wallet)
+    with sess.lock:
+        prop = next((p for p in sess.proposals if p["id"] == a.id), None)
+        if prop is None:
+            raise HTTPException(404, "предложение не найдено (уже обработано?)")
+        sess.proposals.remove(prop)
+        if a.action != "approve":
+            return dict(ok=True, dismissed=True)
+        if prop["side"] == "buy":
+            res = do_buy(prop["chain"], prop["address"], prop["size_sol"], sess)
+        else:
+            res = do_sell(prop["address"], prop["fraction"],
+                          f"N1 подтверждено · {prop['reason']}", sess)
+        return dict(res, approved=True)
 
 # ── Этап 5: non-custodial исполнение (Jupiter build → Phantom sign) ──
 class TxBuildIn(BaseModel):
@@ -1961,5 +2025,6 @@ def index():
 
 if __name__ == "__main__":
     import uvicorn
-    # 只绑回环：别人填的 key 不会暴露到局域网/公网（公网请走带鉴权/限频的隧道）
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    # По умолчанию только loopback (локальная безопасность). Для деплоя (Railway и т.п.)
+    # платформа задаёт HOST=0.0.0.0 и PORT через env; публичный инстанс — см. DEPLOY.md.
+    uvicorn.run(app, host=os.getenv("HOST", "127.0.0.1"), port=int(os.getenv("PORT", "8000")))

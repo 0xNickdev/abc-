@@ -23,6 +23,7 @@ from dataclasses import dataclass
 
 # 机器人自身的执行参数（与 strategy.PRESET / app.CFG 的风控参数互补，不重复其值）。
 CFG = {
+    "mode": "n2",                 # n1=предлагает, человек подтверждает · n2=исполняет сам (paper/LIVE-замки)
     "max_new_per_tick": 2,        # 每轮最多新开仓数（防一轮梭哈）
     "poll_s": 20.0,               # 自主轮询间隔（秒）
     "escape_severity_exit": 60,   # 逃生严重度 ≥ 此值即清仓离场（比人工 escape_severity 略激进）

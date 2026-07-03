@@ -114,7 +114,7 @@ ruff check .                   # clean
 - [x] 3. Multi-user (session per pubkey)
 - [x] 4. Settings panel + strategy picker
 - [x] 5. Non-custodial execution (Jupiter + Phantom signing) + wallet sign-in + Twitter/KOL
-- [ ] 6. Bot modes: N1 (click-to-confirm) / N2 (semi-auto)
+- [x] 6. Bot modes: N1 (click-to-confirm) / N2 (semi-auto)
 - [ ] 7. N3 autopilot via session keys; hosting; DB; monetization
 
 ## Disclaimer

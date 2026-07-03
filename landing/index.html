@@ -606,7 +606,9 @@ addEventListener('keydown',e=>{if(e.key==='Escape'){closeOb();closeBuy()}});
 set('playbtn','<span style="display:inline-flex;align-items:center;gap:8px">'+ic.play+' See how it works</span>');
 
 /* ── terminal ── */
-const TERMINAL_URL='http://127.0.0.1:8000';
+/* Backend: ?backend=https://... в URL или localStorage abc_backend; по умолчанию локальный */
+const TERMINAL_URL=(new URLSearchParams(location.search).get('backend'))||localStorage.getItem('abc_backend')||'http://127.0.0.1:8000';
+if(new URLSearchParams(location.search).get('backend'))localStorage.setItem('abc_backend',TERMINAL_URL);
 async function launch(){
   try{const c=new AbortController();setTimeout(()=>c.abort(),900);
     const r=await fetch(TERMINAL_URL+'/api/status',{signal:c.signal});
@@ -656,7 +658,7 @@ async function doBuy(){
   if(amt<=0)return; btn.textContent='Confirming…';btn.disabled=true;
   let msg='';
   try{
-    const r=await fetch('http://127.0.0.1:8000/api/buy',{method:'POST',headers:{'Content-Type':'application/json'},
+    const r=await fetch(TERMINAL_URL+'/api/buy',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({address:curTok.addr,size_sol:amt,chain:'sol'})});
     const j=await r.json(); if(!r.ok)throw new Error(j.detail||'error'); msg=j.status||'order placed';
   }catch(e){ msg='simulated (demo — terminal backend offline)'; }
