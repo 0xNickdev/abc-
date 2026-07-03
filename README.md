@@ -1,23 +1,124 @@
 <div align="center">
 
-<img src="static/gmgn-api-demos.png" alt="GMGN API Demos" />
+# abc. — AI-терминал для мемкоинов Solana
 
-[![X](https://img.shields.io/badge/Follow-%40gmgnai-black?logo=x&logoColor=white)](https://x.com/gmgnai) [![Telegram](https://img.shields.io/badge/Telegram-gmgnagentapi-2CA5E0?logo=telegram&logoColor=white)](https://t.me/gmgnagentapi) [![Discord](https://img.shields.io/badge/Discord-gmgnai-5865F2?logo=discord&logoColor=white)](https://discord.gg/gmgnai)
+**Скрининг → скоринг → LLM-судья → человек (или бот) нажимает кнопку.**
+Non-custodial: приватный ключ никогда не покидает твой Phantom.
 
-English | [简体中文](README.zh.md)
+Русский | код и комментарии — en/zh
 
 </div>
 
-# About Demos
-
-Community-contributed demos built with the GMGN OpenAPI, provided for reference and learning only. Security is not guaranteed. Use any trading functions at your own risk.
-
-## Demos
-
-| Demo | Description | Demo | Screenshot |
-|---|---|---|---|
-| [aitrader](aitrader/) | Local memecoin screening + one-click trading dashboard built on GMGN Skills/MCP: deterministic rules cast wide → scoring cuts hard → LLM only explains survivors → you press to trade. See [aitrader/README.md](aitrader/README.md) to run it locally. | https://gmgnai.github.io/skillmarket-demos/aitrader/ | <img src="static/aitrader_en.png" alt="aitrader screenshot" width="360"> |
-
 ---
 
-Maintainers & contributors — repo layout, how to add a demo, the auto-sync hook, and GitHub Pages setup are in [CONTRIBUTING.md](CONTRIBUTING.md).
+## Что это
+
+**abc.** — локальный торговый терминал для мемкоинов (Solana, pump.fun и др.), построенный поверх GMGN OpenAPI. Он не «сигналит в телеграм», а прогоняет каждый токен из хот-листа через воронку жёстких проверок и отдаёт тебе короткий список кандидатов с объяснением, почему каждый прошёл. Покупка — либо вручную в один клик, либо автономным ботом (по умолчанию всё **бумажное**, реальные деньги включаются отдельными замками).
+
+### Воронка скрининга
+
+```
+Хот-лист GMGN (100 токенов)
+  → Жёсткие гейты          отсев скама: mint/freeze authority, bundler%,
+                           dev-холд, top10-концентрация, чёрные списки
+  → Настраиваемые фильтры  ликвидность, объём, mcap, возраст, снайперы,
+                           wash-trading (свои значения у каждого юзера)
+  → Скоринг               моментум 5m/1h, перевес покупок, оборот,
+                           консенсус умных денег — сортировка, отсечка
+  → LLM-судья             объясняет только выживших (Claude или
+                           бесплатная эвристика), «золотая собака vs хайп»
+  → Твоё решение          кнопка Buy / автономный бот
+```
+
+### Ключевые фичи
+
+- **Мультипользовательность.** Каждый кошелёк (pubkey) — своя сессия: свои фильтры, позиции, режим, стратегия, бот. Рыночный слой общий (ключ оператора), квота не умножается.
+- **Вход подписью кошелька.** Challenge → Phantom `signMessage` → сервер проверяет ed25519-подпись. Секреты и построение транзакций — только после входа.
+- **Non-custodial исполнение.** Сервер строит swap через Jupiter v6, подписываешь и отправляешь **ты в Phantom**. Приватный ключ не покидает браузер ни на каком шаге.
+- **3 именованные стратегии** — выбор per-user, мгновенное переключение:
+
+  | Стратегия | Стиль | Порог входа |
+  |---|---|---|
+  | ABC Alpha v1 | сбалансированная | ≥2 умных кошелька, окно 0–45 мин |
+  | ABC Sniper | консервативная | ≥3 кошелька, покупки ≥60%, стоп короче, фьюз после 2 убытков |
+  | ABC Degen | агрессивная | достаточно 1 кошелька, окно до 90 мин, цели до 8x |
+
+- **Автономный бот** (paper-first). Покупает только кандидатов «прошёл все гейты + триггер стратегии»; выходы: жёсткий стоп → escape-сигналы → трейлинг → TP-лестница; дисциплина: лимит новых входов за тик, фьюз по серии убытков, дневной лимит потерь.
+- **Smart-money сигнал** (не копитрейд): приватный список отслеживаемых кошельков — совпадение подсвечивается ★ в таблице с именами в тултипе; KOL из данных GMGN — 👑.
+- **Twitter/KOL opt-in.** Каждый юзер подключает **свой** Bearer-токен Twitter API v2 (вкладка KOL/𝕏): кнопка в окне покупки показывает свежие упоминания контракта и топ-авторов. Свой токен = своя квота; хранится на сервере с chmod 600, наружу не отдаётся.
+- **Solana-корректные проверки.** У SPL-токенов нет налогов на перевод — tax-гейты применяются только к EVM-чейнам. «Honeypot» Соланы — это несданная freeze authority: подсвечивается красным `FREEZE!`.
+- **Флайвил обратной связи.** Каждое решение пишется в `trade_decisions.jsonl`; `backtest.py` считает реализованный PnL/винрейт/R по собственной истории — стратегии проверяются на своих же данных.
+- **Защита от prompt-injection.** LLM никогда не видит сырые названия токенов — только санитизированный символ + числовые фичи.
+
+## Быстрый старт
+
+```bash
+cd aitrader
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+python app.py            # → http://127.0.0.1:8000
+```
+
+Без ключей работает демо-режим (mock-данные) — можно тыкать всё. Реальные данные:
+
+```bash
+# ~/.config/gmgn/.env
+GMGN_API_KEY=...         # ключ GMGN OpenAPI (данные рынка)
+```
+
+Реальный LLM-судья (опционально, иначе бесплатная эвристика):
+
+```bash
+GMGN_LLM_PROVIDER=claude ANTHROPIC_API_KEY=... python app.py
+```
+
+Пошаговая инструкция «для чайников»: [aitrader/КАК_ЗАПУСТИТЬ.md](aitrader/КАК_ЗАПУСТИТЬ.md). Дизайн продукта и роадмап: [aitrader/ДИЗАЙН_ПРОДУКТА.md](aitrader/ДИЗАЙН_ПРОДУКТА.md). Технические детали: [aitrader/README.md](aitrader/README.md) (en/zh).
+
+## Безопасность (замки)
+
+Реальные деньги выключены **тремя независимыми замками** — снимать осознанно:
+
+1. `ENABLE_LIVE_TRADING=1` — env-переменная, без неё любой режим = SHADOW (бумага);
+2. Режим LIVE — переключается вручную в UI, после рестарта всегда SHADOW;
+3. Non-custodial путь: каждая транзакция строится сервером, но **подтверждаешь её ты в Phantom** — молча ничего не уходит.
+
+Плюс: сервер слушает только `127.0.0.1`; ключи оператора — в `~/.config/gmgn/.env` (вне репо); секреты юзеров (Twitter) — chmod 600 и никогда не отдаются в API; операторская панель ключей видна только при `ABC_ADMIN=1`.
+
+## Архитектура
+
+```
+aitrader/
+├── app.py          FastAPI: воронка, гейты, сессии, риск, auth, все эндпоинты
+├── strategy.py     реестр стратегий (триггеры входа + пресеты дисциплины)
+├── bot.py          автономный цикл (DI, per-user, paper-first)
+├── execution.py    Jupiter v6: построение неподписанных swap-tx
+├── kol.py          Twitter API v2: упоминания контракта (кэш 5 мин)
+├── wallets.py      приватный smart-money список (сигнал, не копитрейд)
+├── backtest.py     воронка + реализованный PnL из собственного журнала
+├── static/         терминал (один HTML, без сборки; web3.js для Phantom)
+└── tests/          89 тестов: гейты, риск, стратегии, мультиюзер, auth, tx
+```
+
+Состояние юзеров — файлы `outputs/users/<pubkey>/` (в git не попадают). Хот-лист кэшируется на чейн — десять вкладок не сжигают квоту. Лендинг — в [landing/](landing/).
+
+## Тесты
+
+```bash
+cd aitrader && . .venv/bin/activate
+python -m pytest tests/ -q     # 89 passed
+ruff check .                   # чисто
+```
+
+## Роадмап
+
+- [x] 1. Ключи оператора — серверные, скрыты от юзеров
+- [x] 2. Connect Wallet (Phantom)
+- [x] 3. Мультипользовательность (сессия на pubkey)
+- [x] 4. Панель настроек + выбор стратегий
+- [x] 5. Non-custodial исполнение (Jupiter + подпись Phantom) + вход подписью + Twitter/KOL
+- [ ] 6. Режимы бота: N1 (подтверждение кликом) / N2 (полуавтомат)
+- [ ] 7. N3 автопилот через session keys; деплой; БД; монетизация
+
+## Дисклеймер
+
+Экспериментальный софт для исследований. Мемкоины — экстремально рискованный актив: можно потерять всё. Ничто здесь не является инвестиционной рекомендацией. Используешь на свой страх и риск.

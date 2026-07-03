@@ -5,3 +5,4 @@ outputs/*.jsonl
 outputs/*.log
 outputs/*.json
 .DS_Store
+outputs/users/
