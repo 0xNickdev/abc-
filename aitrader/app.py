@@ -51,6 +51,7 @@ import backtest  # 纸面/SHADOW 回测复盘（已实现 PnL/胜率/R）
 import bot  # 自主执行回路（量化机器人，纸面优先）
 import execution  # non-custodial：服务器只构建 tx，签名在浏览器（Phantom）
 import kol  # Twitter/X KOL 信号（per-user opt-in）
+import sessionwallet  # N3: session-кошелёк с ограниченным балансом (этап 7)
 import strategy  # ABC Alpha v1：具名策略预设 + 入场信号评估
 import wallets  # 私有 smart-money 跟踪钱包（信号，非跟单）
 
@@ -196,6 +197,8 @@ def default_trending_cmd(chain: str = "sol") -> str:
             f"--direction desc --limit 100 --chain {chain} --raw")
 DEFAULT_TRENDING_CMD = default_trending_cmd("sol")   # 兼容旧引用
 DEFAULT_POLL_S = 5.6
+# Минимальный интервал /api/run на юзера (защита квоты оператора на публичном инстансе)
+RUN_MIN_INTERVAL_S = float(os.getenv("RUN_MIN_INTERVAL_S", "1.5"))
 # 同链 trending 短缓存：TTL 内多个 tab/请求复用同一次 cli 结果（同链多开不放大配额）。
 TRENDING_CACHE_TTL = 3.0
 
@@ -1050,6 +1053,11 @@ class UserSession:
         self.twitter = load_user_twitter(pubkey)        # per-user Twitter KOL（opt-in）
         self.auth_token = None                          # sign-in-with-wallet 会话令牌（内存态）
         self.proposals: list[dict] = []                 # N1: предложения бота, ждут клика (в памяти)
+        self.last_run = 0.0                             # rate-limit /api/run (monotonic)
+
+    def session_key_path(self) -> pathlib.Path:
+        d = OUT_DIR if self._default else _user_dir(self.pubkey)
+        return d / "session_key.json"
 
     # ── 市场层委托（保持旧 ST.* 调用兼容；全部走共享 MK）──
     @property
@@ -1700,6 +1708,12 @@ def api_run(r: RunIn, x_wallet: str | None = WalletHeader):
         return JSONResponse(data)
     ch = valid_chain(r.chain)
     sess = get_session(x_wallet)
+    # Rate-limit per-user: /api/run дёргает CLI/квоту оператора — не даём молотить чаще
+    # RUN_MIN_INTERVAL_S (сек). UI опрашивает раз в ~5.6s, честным юзерам не мешает.
+    now = time.monotonic()
+    if now - sess.last_run < RUN_MIN_INTERVAL_S:
+        raise HTTPException(429, "слишком часто — подожди пару секунд")
+    sess.last_run = now
     with sess.lock:
         try:
             return JSONResponse(screen_once(ch, sess))
@@ -1804,22 +1818,67 @@ def _propose(sess: UserSession, side: str, chain: str, address: str,
     del sess.proposals[:-20]                              # кап очереди
     log("BOT", address[:8], f"N1 предложение: {side} {size_sol or fraction}", mode=sess.mode)
 
+def _n3_execute(sess: UserSession, side: str, chain: str, address: str,
+                size_sol: float = 0.0, fraction: float = 1.0, reason: str | None = None) -> dict:
+    """N3-автопилот: реальное исполнение session-кошельком (только sol). Заперто
+    ENABLE_LIVE_TRADING: пока замок закрыт — обычный бумажный учёт (обкатка без денег)."""
+    if LIVE_TRADING_DISABLED or chain != "sol":
+        if side == "buy":
+            return do_buy(chain, address, size_sol, sess)
+        return do_sell(address, fraction, reason, sess)
+    kp = sessionwallet.keypair_for(sess.session_key_path())
+    spk = str(kp.pubkey())
+    if side == "buy":
+        size_sol = min(size_sol, CFG["max_per_trade_sol"])
+        built = execution.build_buy(spk, address, size_sol)
+        sig = sessionwallet.sign_and_send(built["tx"], kp)
+        g = MK.adapter_for("sol")
+        try:
+            info = g.token_info(address); price = g.token_price(address)
+            symbol = sanitize(info.get("symbol", ""))
+        except Exception:
+            symbol, price = address[:6], 0.0
+        sess.positions.append(dict(
+            symbol=symbol, address=address, size_sol=round(size_sol, 4), pnl=0.0,
+            cycles=0, entry=dict(honeypot=False, renounced_mint=True,
+                                 renounced_freeze=True, burn_ratio=0.0, top10=0.0),
+            chain="sol", entry_price=price, cur_price=price,
+            token_amount=built.get("out_amount", 0), self_custody=True, session=True,
+            wallet_tx=sig))
+        sess.save_positions()
+        log("BUY", symbol, f"N3 session-кошелёк {size_sol} SOL · tx {sig[:16]}…",
+            dict(size_sol=size_sol, chain="sol", session=True), mode="LIVE")
+        return dict(ok=True, status=f"N3 отправлено · {sig[:16]}…", filled=True, symbol=symbol)
+    p = next((x for x in sess.positions if x["address"] == address), None)
+    built = execution.build_sell(spk, address, fraction,
+                                 token_amount=int((p or {}).get("token_amount", 0)))
+    sig = sessionwallet.sign_and_send(built["tx"], kp)
+    return do_sell(address, fraction, f"N3 · tx {sig[:16]}… · {reason or ''}", sess)
+
 def _bot_buy_fn(sess: UserSession):
     """buy-колбэк бота: режим читается на каждом вызове — переключение на лету."""
     def fn(chain, address, size_sol):
-        if sess.bot.cfg.get("mode") == "n1":
+        mode = sess.bot.cfg.get("mode")
+        if mode == "n1":
             _propose(sess, "buy", chain, address, size_sol=size_sol, reason="вход по стратегии")
             return dict(ok=True, proposed=True)
+        if mode == "n3":
+            return _n3_execute(sess, "buy", chain, address, size_sol=size_sol)
         return do_buy(chain, address, size_sol, sess)
     return fn
 
 def _bot_sell_fn(sess: UserSession):
     def fn(address, fraction=1.0, reason=None):
-        if sess.bot.cfg.get("mode") == "n1":
+        mode = sess.bot.cfg.get("mode")
+        if mode == "n1":
             p = next((x for x in sess.positions if x["address"] == address), None)
             _propose(sess, "sell", (p or {}).get("chain", "sol"), address,
                      fraction=fraction, reason=reason or "выход по правилам")
             return dict(ok=True, proposed=True)
+        if mode == "n3":
+            p = next((x for x in sess.positions if x["address"] == address), None)
+            return _n3_execute(sess, "sell", (p or {}).get("chain", "sol"), address,
+                               fraction=fraction, reason=reason)
         return do_sell(address, fraction, reason, sess)
     return fn
 
@@ -1862,8 +1921,8 @@ def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader):
     _block_if_public()
     sess = get_session(x_wallet)
     patch = {k: v for k, v in c.model_dump().items() if v is not None}
-    if "mode" in patch and patch["mode"] not in ("n1", "n2"):
-        raise HTTPException(400, "mode: n1 | n2")
+    if "mode" in patch and patch["mode"] not in ("n1", "n2", "n3"):
+        raise HTTPException(400, "mode: n1 | n2 | n3")
     with sess.lock:
         sess.bot.cfg.update(patch)
     return dict(ok=True, cfg=dict(sess.bot.cfg))
@@ -1976,6 +2035,42 @@ def api_tx_confirm(c: TxConfirmIn, x_wallet: str | None = WalletHeader,
             return dict(ok=True, symbol=symbol)
         # sell: учёт как при бумажном do_sell, но с реальным хэшем в журнале
         return do_sell(c.address, fraction=c.fraction, reason=f"PHANTOM {tag}", s=sess)
+
+# ── Этап 7: session-кошелёк для N3 (ключ на сервере, риск = его баланс) ──
+@app.get("/api/session-wallet")
+def api_session_wallet(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
+    """Показать (создав при первом обращении) session-кошелёк юзера + баланс."""
+    sess = get_session(x_wallet)
+    require_auth(sess, x_auth)
+    kp = sessionwallet.keypair_for(sess.session_key_path())
+    pk = str(kp.pubkey())
+    try:
+        bal = sessionwallet.balance_sol(pk)
+    except Exception:
+        bal = None                      # RPC недоступен — адрес всё равно показываем
+    return dict(ok=True, pubkey=pk, balance_sol=bal,
+                live_unlocked=not LIVE_TRADING_DISABLED)
+
+class WithdrawIn(BaseModel):
+    to: str = ""                        # пусто → на основной кошелёк сессии (pubkey)
+
+@app.post("/api/session-wallet/withdraw")
+def api_session_wallet_withdraw(w: WithdrawIn, x_wallet: str | None = WalletHeader,
+                                x_auth: str | None = AuthHeader):
+    """Вернуть остаток SOL с session-кошелька (по умолчанию — на основной кошелёк юзера)."""
+    _block_if_public()
+    sess = get_session(x_wallet)
+    require_auth(sess, x_auth)
+    to = (w.to or "").strip() or sess.pubkey
+    if to == DEFAULT_PUBKEY:
+        raise HTTPException(400, "укажи адрес получателя (локальная сессия без кошелька)")
+    kp = sessionwallet.keypair_for(sess.session_key_path())
+    try:
+        sig = sessionwallet.withdraw_all(kp, to)
+    except Exception as e:
+        raise HTTPException(502, f"вывод: {e}")
+    log("WITHDRAW", to[:8], f"session-кошелёк → {to[:8]}… · tx {sig[:16]}…", mode=sess.mode)
+    return dict(ok=True, tx=sig, to=to)
 
 # ── Twitter/X KOL: per-user opt-in (свой Bearer-токен, свои лимиты) ──
 class TwitterCfgIn(BaseModel):

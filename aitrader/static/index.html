@@ -541,7 +541,11 @@ const I18N={
     bot_f_max_new_per_tick:'每轮最多新开仓', bot_f_poll_s:'轮询间隔(秒)', bot_f_escape_severity_exit:'逃生严重度≥即清仓',
     bot_f_trail_activate_pct:'浮盈≥启用移动止盈', bot_f_require_abc_trigger:'仅策略触发才建仓', bot_f_mode:'模式',
     bot_mode_n1:'N1 · 机器人提议，你点确认', bot_mode_n2:'N2 · 半自动（纸面/LIVE 锁）',
+    bot_mode_n3:'N3 · 自动驾驶（session 钱包）',
     bot_props:'待确认提议', prop_ok:'✓ 执行', prop_no:'✗', prop_done:'已执行', prop_gone:'已忽略',
+    sw_show:'session 钱包', sw_addr:'地址', sw_bal:'余额', sw_withdraw:'↩ 提回', sw_withdrawn:'已提回主钱包',
+    sw_paper:'（LIVE 锁未开 → 仍是纸面）',
+    sw_hint:'给该地址充值你愿意托付给机器人的小额 SOL；风险以此余额为上限。密钥在服务器（chmod 600），随时可提回。',
     auth_need_wallet:'请先连接 Phantom 钱包', ph_buy:'用自己钱包买', ph_sell:'钱包卖出', ph_sell_title:'通过 Phantom 签名卖出（非托管）',
     ph_building:'构建交易…', ph_signing:'在 Phantom 里签名…',
     ph_sent:(s,x)=>`${s} 交易已发送 · ${x}…`, ph_fail:m=>`交易失败：${m}`,
@@ -714,7 +718,11 @@ const I18N={
     bot_f_max_new_per_tick:'Max new entries/tick', bot_f_poll_s:'Poll interval (s)', bot_f_escape_severity_exit:'Exit at escape severity ≥',
     bot_f_trail_activate_pct:'Trailing activates at PnL ≥', bot_f_require_abc_trigger:'Only strategy-triggered entries', bot_f_mode:'Mode',
     bot_mode_n1:'N1 · bot proposes, you confirm', bot_mode_n2:'N2 · semi-auto (paper/LIVE locks)',
+    bot_mode_n3:'N3 · autopilot (session wallet)',
     bot_props:'Pending proposals', prop_ok:'✓ execute', prop_no:'✗', prop_done:'Executed', prop_gone:'Dismissed',
+    sw_show:'session wallet', sw_addr:'address', sw_bal:'balance', sw_withdraw:'↩ withdraw', sw_withdrawn:'Withdrawn to main wallet',
+    sw_paper:'(LIVE lock closed → still paper)',
+    sw_hint:'Fund this address with the small amount of SOL you trust the bot with; risk is capped by this balance. Key lives on the server (chmod 600); withdraw anytime.',
     auth_need_wallet:'Connect Phantom wallet first', ph_buy:'Buy with my wallet', ph_sell:'Wallet sell', ph_sell_title:'Sell via Phantom signature (non-custodial)',
     ph_building:'Building transaction…', ph_signing:'Sign in Phantom…',
     ph_sent:(s,x)=>`${s} tx sent · ${x}…`, ph_fail:m=>`Transaction failed: ${m}`,
@@ -1451,7 +1459,9 @@ async function loadBot(){
       <div class="botrow">
         <label><input type="radio" name="botMode" value="n1" ${mode==='n1'?'checked':''} onchange="botSetMode('n1')"> ${t('bot_mode_n1')}</label>
         <label><input type="radio" name="botMode" value="n2" ${mode==='n2'?'checked':''} onchange="botSetMode('n2')"> ${t('bot_mode_n2')}</label>
+        <label><input type="radio" name="botMode" value="n3" ${mode==='n3'?'checked':''} onchange="botSetMode('n3')"> ${t('bot_mode_n3')}</label>
       </div>
+      ${mode==='n3'?`<div class="fld"><button class="mbtn ghost" onclick="sessionWalletInfo()">${t('sw_show')}</button><div class="hint" id="swInfo"></div></div>`:''}
       ${(pr.proposals||[]).length?`<div class="fld"><label>${t('bot_props')}</label>`+(pr.proposals||[]).map(p=>`
         <div class="botrow" style="font-size:12px">
           <span>${p.side==='buy'?'🟢':'🔴'} ${p.side.toUpperCase()} ${(p.address||'').slice(0,6)}… ${p.side==='buy'?p.size_sol+' SOL':Math.round(p.fraction*100)+'%'} · ${p.reason||''}</span>
@@ -1483,6 +1493,29 @@ async function propAct(id,action){
     toast(action==='approve'?t('prop_done'):t('prop_gone'),'ok');
     loadBot();scanCycle();
   }catch(e){toast(e.message,'err');loadBot();}
+}
+/* ── N3: session-кошелёк (ключ на сервере, риск = его баланс) ── */
+async function sessionWalletInfo(){
+  const box=document.getElementById('swInfo');box.textContent='…';
+  try{
+    const doF=walletPubkey?authedFetch:fetch;
+    const r=await doF(API+'/api/session-wallet');
+    if(!r.ok)throw new Error(await errDetail(r));
+    const d=await r.json();
+    box.innerHTML=`${t('sw_addr')}: <span class="tk" style="cursor:pointer" onclick="navigator.clipboard.writeText('${d.pubkey}');toast('copied','ok')">${d.pubkey.slice(0,8)}…${d.pubkey.slice(-6)}</span>
+      · ${t('sw_bal')}: <b>${d.balance_sol===null?'?':d.balance_sol+' SOL'}</b>
+      ${d.live_unlocked?'':' · '+t('sw_paper')}
+      <button class="mbtn ghost" style="margin-left:8px" onclick="sessionWithdraw()">${t('sw_withdraw')}</button>
+      <div>${t('sw_hint')}</div>`;
+  }catch(e){box.textContent=e.message;}
+}
+async function sessionWithdraw(){
+  try{
+    const doF=walletPubkey?authedFetch:fetch;
+    const r=await doF(API+'/api/session-wallet/withdraw',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({to:''})});
+    if(!r.ok)throw new Error(await errDetail(r));
+    toast(t('sw_withdrawn'),'ok');sessionWalletInfo();
+  }catch(e){toast(e.message,'err');}
 }
 async function botToggle(running){
   try{

@@ -94,7 +94,8 @@ aitrader/
 ├── wallets.py      private smart-money list (signal, not copy-trading)
 ├── backtest.py     funnel + realized PnL from the local decision journal
 ├── static/         the terminal (single HTML, no build step; web3.js for Phantom)
-└── tests/          89 tests: gates, risk, strategies, multi-user, auth, tx
+├── sessionwallet.py N3: session keypair, signing, withdraw (solders)
+└── tests/          101 tests: gates, risk, strategies, multi-user, auth, tx, N3
 ```
 
 Per-user state lives in `outputs/users/<pubkey>/` (git-ignored). The trending list is cached per chain — ten open tabs won't burn the quota. Landing page lives in [landing/](landing/).
@@ -103,7 +104,7 @@ Per-user state lives in `outputs/users/<pubkey>/` (git-ignored). The trending li
 
 ```bash
 cd aitrader && . .venv/bin/activate
-python -m pytest tests/ -q     # 89 passed
+python -m pytest tests/ -q     # 101 passed
 ruff check .                   # clean
 ```
 
@@ -115,7 +116,8 @@ ruff check .                   # clean
 - [x] 4. Settings panel + strategy picker
 - [x] 5. Non-custodial execution (Jupiter + Phantom signing) + wallet sign-in + Twitter/KOL
 - [x] 6. Bot modes: N1 (click-to-confirm) / N2 (semi-auto)
-- [ ] 7. N3 autopilot via session keys; hosting; DB; monetization
+- [x] 7. N3 autopilot via a session wallet (server-held key, risk capped by its balance) + per-user rate limit
+- [ ] Backlog: DB instead of files, monetization, hosting hardening
 
 ## Disclaimer
 

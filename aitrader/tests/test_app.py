@@ -799,7 +799,7 @@ class TestBotModes:
         assert client.get("/api/bot", headers=self.H).json()["cfg"]["mode"] == "n2"
 
     def test_mode_validation(self, client):
-        r = client.post("/api/bot/config", json={"mode": "n3"}, headers=self.H)
+        r = client.post("/api/bot/config", json={"mode": "n9"}, headers=self.H)
         assert r.status_code == 400
         assert client.post("/api/bot/config", json={"mode": "n1"},
                            headers=self.H).json()["cfg"]["mode"] == "n1"
@@ -842,3 +842,71 @@ class TestBotModes:
         r = client.post("/api/bot/proposals/act", json={"id": pid, "action": "dismiss"},
                         headers=self.H).json()
         assert r["dismissed"] is True and sess.proposals == []
+
+
+# ── Этап 7: N3 session-кошелёк + rate-limit ──
+class TestSessionWallet:
+    H = {"X-Wallet": "N3WalletAAAA"}
+
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        return _mu_client(tmp_path, monkeypatch)
+
+    def test_wallet_requires_auth_then_created_and_persistent(self, client, monkeypatch):
+        assert client.get("/api/session-wallet", headers=self.H).status_code == 401
+        monkeypatch.setattr(appmod.sessionwallet, "balance_sol", lambda pk: 0.5)
+        pk, headers = _wallet_auth(client)
+        d = client.get("/api/session-wallet", headers=headers).json()
+        assert d["balance_sol"] == 0.5 and len(d["pubkey"]) > 30
+        # повторный вызов — тот же ключ (persist на диск)
+        d2 = client.get("/api/session-wallet", headers=headers).json()
+        assert d2["pubkey"] == d["pubkey"]
+        assert (appmod.USERS_DIR / pk / "session_key.json").exists()
+
+    def test_withdraw_mocked(self, client, monkeypatch):
+        _, headers = _wallet_auth(client)
+        monkeypatch.setattr(appmod.sessionwallet, "withdraw_all", lambda kp, to: "TXSIG123")
+        d = client.post("/api/session-wallet/withdraw", json={"to": ""}, headers=headers).json()
+        assert d["tx"] == "TXSIG123" and d["to"] == headers["X-Wallet"]
+
+    def test_n3_paper_while_lock_closed(self, client):
+        sess = appmod.get_session("N3WalletAAAA")
+        sess.bot.cfg["mode"] = "n3"
+        # LIVE_TRADING_DISABLED=True (дефолт) → бумажный do_buy, сеть не трогаем
+        res = appmod._bot_buy_fn(sess)("sol",
+              "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", 0.1)
+        assert res["ok"] is True and len(sess.positions) == 1
+        assert "SHADOW" in res["status"]
+
+    def test_n3_live_signs_and_records(self, client, monkeypatch, tmp_path):
+        sess = appmod.get_session("N3WalletBBBB")
+        sess.bot.cfg["mode"] = "n3"
+        monkeypatch.setattr(appmod, "LIVE_TRADING_DISABLED", False)
+        monkeypatch.setattr(appmod.execution, "build_buy",
+                            lambda pk, ca, sz, sl=100: dict(tx="dGVzdA==", out_amount=555))
+        monkeypatch.setattr(appmod.sessionwallet, "sign_and_send",
+                            lambda tx, kp: "N3TXSIG")
+        res = appmod._bot_buy_fn(sess)("sol",
+              "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", 0.1)
+        assert res["filled"] is True
+        p = sess.positions[-1]
+        assert p["session"] is True and p["wallet_tx"] == "N3TXSIG" and p["token_amount"] == 555
+
+    def test_mode_n3_accepted_by_config(self, client):
+        assert client.post("/api/bot/config", json={"mode": "n3"},
+                           headers=self.H).json()["cfg"]["mode"] == "n3"
+
+
+class TestRunRateLimit:
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        return _mu_client(tmp_path, monkeypatch)
+
+    def test_second_rapid_run_429(self, client, monkeypatch):
+        monkeypatch.setattr(appmod, "RUN_MIN_INTERVAL_S", 60.0)
+        h = {"X-Wallet": "RateWallet1"}
+        assert client.post("/api/run", json={"chain": "sol"}, headers=h).status_code == 200
+        assert client.post("/api/run", json={"chain": "sol"}, headers=h).status_code == 429
+        # другой юзер — своя квота
+        assert client.post("/api/run", json={"chain": "sol"},
+                           headers={"X-Wallet": "RateWallet2"}).status_code == 200
