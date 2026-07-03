@@ -591,10 +591,8 @@ function render(){
 }
 async function auth(p){
   state.auth=p;
-  if(p==='phantom'){
-    try{ const r=await window.solana.connect(); state.wallet=r.publicKey.toString(); }
-    catch(e){ const ph=document.getElementById('phs'); if(ph){ph.textContent='Phantom not found — install it at phantom.app';ph.style.color='var(--violet2)';} return; }
-  }
+  // Phantom подключается ОДИН раз — в самом терминале (это другой домен, Phantom
+  // всё равно спросит там заново). Здесь кошелёк не трогаем, чтобы не коннектить дважды.
   step=1; render();
 }
 function next(){ if(step<2){step++;render()} else {closeOb();launch()} }

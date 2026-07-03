@@ -318,7 +318,7 @@ td{padding:5px 10px;vertical-align:middle}
       <div class="pill mode clk" id="modePillWrap" onclick="toggleMode()" data-i18n-title="mode_toggle_title"><span class="dot" id="modeDot" style="background:var(--amber)"></span><div><span class="k">MODE</span><span class="v" id="modePill">模拟盘</span></div></div>
       <div class="seg2"><button id="srcDemo" class="on" onclick="setSource('demo')">DEMO</button><button id="srcBe" onclick="setSource('backend')" data-i18n="src_backend">本地后端</button></div>
       <div class="wbtn" id="walletBtn" onclick="onWalletClick()" data-i18n-title="wallet_title"><span class="wdot"></span><span id="walletLbl" data-i18n="wallet_connect">Connect Wallet</span></div>
-      <div class="langbtn" id="langBtn" data-i18n-title="lang_title" onclick="switchLang()">中文</div>
+      <div class="langbtn" id="langBtn" style="display:none" onclick="switchLang()">EN</div>
       <div class="gear" id="gearBtn" data-i18n-title="gear_title"></div>
     </div>
   </div>
@@ -805,15 +805,11 @@ const I18N={
     toast_connected:(l)=>`Connected to local backend (${l})`,
   }
 };
-function detectLang(){
-  const saved=localStorage.getItem('aitrader_lang');
-  if(saved==='zh'||saved==='en')return saved;
-  const nav=(navigator.language||navigator.userLanguage||'').toLowerCase();
-  return nav.indexOf('zh')===0?'zh':'en';   // 简体/繁体(zh-*) → 中文；其他 → 英文
-}
+function detectLang(){ return 'en'; }   // UI фиксирован на английском (кроме имён токенов)
 let lang=detectLang();
 const APP_VERSION='v0.0.1';   // 显示在副标题，方便排查问题；改动前端时一并 bump
-function t(k,...a){const d=I18N[lang]||I18N.zh;let s=d[k];if(s===undefined)s=I18N.zh[k];if(s===undefined)return k;return typeof s==='function'?s(...a):s;}
+// англ. в приоритете; на всякий случай fallback к en, а не zh
+function t(k,...a){const d=I18N.en;let s=d[k];if(s===undefined)s=(I18N.zh||{})[k];if(s===undefined)return k;return typeof s==='function'?s(...a):s;}
 
 /* ── icons ── */
 const I={
