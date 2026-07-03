@@ -910,3 +910,44 @@ class TestRunRateLimit:
         # другой юзер — своя квота
         assert client.post("/api/run", json={"chain": "sol"},
                            headers={"X-Wallet": "RateWallet2"}).status_code == 200
+
+
+# ── Реальные данные без ключей: DexAdapter (GeckoTerminal + Solana RPC) ──
+class TestDexAdapter:
+    def _gt_pool(self, mint="MintAAAA111", name="DOG / SOL"):
+        return {"attributes": {
+            "name": name, "base_token_price_usd": "0.002", "market_cap_usd": "150000",
+            "fdv_usd": "160000", "reserve_in_usd": "40000",
+            "volume_usd": {"h1": "90000"},
+            "price_change_percentage": {"m5": "4.2", "h1": "35.0"},
+            "transactions": {"h1": {"buys": 600, "sells": 400}},
+            "pool_created_at": "2026-07-03T10:00:00Z"},
+            "relationships": {"base_token": {"data": {"id": f"solana_{mint}"}}}}
+
+    def test_trending_maps_rows_and_authorities(self, monkeypatch):
+        import dexadapter as dx
+
+        class R:
+            status_code = 200
+            def __init__(self, j): self._j = j
+            def raise_for_status(self): pass
+            def json(self): return self._j
+        monkeypatch.setattr(dx.httpx, "get", lambda *a, **k: R({"data": [self._gt_pool()]}))
+        monkeypatch.setattr(dx.httpx, "post", lambda *a, **k: R([{
+            "id": 0, "result": {"value": {"data": {"parsed": {"info":
+                {"mintAuthority": None, "freezeAuthority": "SomeAuth"}}}}}}]))
+        rows = dx.DexAdapter().market_trending()
+        assert len(rows) == 1
+        r = rows[0]
+        assert r["address"] == "MintAAAA111" and r["symbol"] == "DOG"
+        assert r["liquidity"] == 40000.0 and r["buys"] == 600
+        assert r["renounced_mint"] == 1 and r["renounced_freeze_account"] == 0
+        # smart-money полей у источника нет → нули + флаг
+        assert r["smart_degen_count"] == 0 and dx.DexAdapter.provides_consensus is False
+
+    def test_consensus_gate_skipped_for_dex_source(self):
+        f = feat(smart_degen=0, renowned=0, sm_confluence=0)
+        ok, _, gate = appmod.hard_gates(f, chain="sol", require_consensus=False)
+        assert ok is True                       # без consensus-данных гейт 2 не применяется
+        ok2, _, gate2 = appmod.hard_gates(f, chain="sol", require_consensus=True)
+        assert ok2 is False and gate2 == 2      # обычный источник — как раньше

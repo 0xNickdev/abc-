@@ -6,7 +6,8 @@
 
 1. https://railway.app → **New Project → Deploy from GitHub repo** → `0xNickdev/abc-`.
 2. В **Variables** задай:
-   - `HOST=0.0.0.0` (обязательно; без неё сервер слушает только loopback)
+   - `DATA_SOURCE=dex` — **реальные данные без ключей** (тренды GeckoTerminal + метрики DexScreener + mint/freeze через Solana RPC); без неё будут мок-данные;
+   - `SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=<твой ключ>` — свой RPC (Helius) вместо перегруженного публичного: надёжные проверки authority, балансы, отправка tx;
    - `PUBLIC_DEMO=1` — **рекомендуется для публичного инстанса**: read-only демо, все записи (buy/config/bot) отключены;
    - либо полноценный режим: `GMGN_API_KEY=...` (без него — mock-данные), опционально `GMGN_LLM_PROVIDER=claude` + `ANTHROPIC_API_KEY`.
    - `ENABLE_LIVE_TRADING` **не задавать** (замок реальных денег остаётся закрытым).

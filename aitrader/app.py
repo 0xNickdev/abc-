@@ -49,6 +49,7 @@ from pydantic import BaseModel
 
 import backtest  # 纸面/SHADOW 回测复盘（已实现 PnL/胜率/R）
 import bot  # 自主执行回路（量化机器人，纸面优先）
+import dexadapter  # реальные данные без ключей (GeckoTerminal + Solana RPC), DATA_SOURCE=dex
 import execution  # non-custodial：服务器只构建 tx，签名在浏览器（Phantom）
 import kol  # Twitter/X KOL 信号（per-user opt-in）
 import sessionwallet  # N3: session-кошелёк с ограниченным балансом (этап 7)
@@ -170,6 +171,11 @@ LIVE_TRADING_DISABLED = os.getenv("ENABLE_LIVE_TRADING", "").strip().lower() not
 #   3) 持仓不对外（用户选定：公开页只展示筛选列表，不广播本机真实持仓）。
 # 仍只绑 127.0.0.1，公网暴露请走带鉴权/限频的隧道（cloudflared / ngrok）在外层完成。
 PUBLIC_DEMO = os.getenv("PUBLIC_DEMO", "").strip().lower() in ("1", "true", "yes", "on")
+
+# Источник рыночных данных: "dex" = бесплатный реальный (GeckoTerminal + Solana RPC,
+# только sol; без smart-money полей — консенсус-гейт пропускается). Пусто = GMGN при
+# наличии ключа+gmgn-cli, иначе Mock. На Railway ставь DATA_SOURCE=dex.
+DATA_SOURCE = os.getenv("DATA_SOURCE", "").strip().lower()
 
 # 管理员/运营模式：只有运营者（你）需要从 UI 写凭据(API/LLM key)。外部交易者不应看到凭据面板，
 # 也无权写 .env —— 他们的密钥(钱包)走 non-custodial（浏览器侧），运营密钥在服务器 .env 自动加载。
@@ -711,7 +717,8 @@ class FeatureExtractor:
 # 4. 确定性硬门槛（先跑、便宜、无情）——返回 (ok, reason, gate_idx)
 #    gate_idx 与前端漏斗对齐：1=避雷 2=共识 3=ML排序 4=LLM
 # ──────────────────────────────────────────────────────────────────────────
-def hard_gates(f: TokenFeatures, flt: dict | None = None, chain: str | None = None):
+def hard_gates(f: TokenFeatures, flt: dict | None = None, chain: str | None = None,
+               require_consensus: bool = True):
     """chain 传入时按链裁剪不适用的闸门：sol(SPL) 没有转账税机制（Token-2022 转账费极罕见，
     pump.fun 系全是标准 SPL），故 sol 跳过税闸；EVM 链照常。honeypot 布尔仍保留（数据驱动，
     sol 上真正的"卖不掉"= freeze 权未弃，由 require_renounced_freeze / 逃生监控覆盖）。"""
@@ -755,8 +762,10 @@ def hard_gates(f: TokenFeatures, flt: dict | None = None, chain: str | None = No
         return False, f"REJECT 避雷：dev 持仓 {f.dev_hold:.0%} > {CFG['max_dev_holding_pct']:.0%}", 1
     if f.top10 > CFG["max_top10_concentration"]:
         return False, f"REJECT 避雷：top10 {f.top10:.0%} 集中", 1
-    # gate 2 共识：smart_degen + renowned KOL 计数
-    if f.sm_confluence < CFG["min_smart_money_confluence"]:
+    # gate 2 共识：smart_degen + renowned KOL 计数。
+    # Источники без smart-money полей (DATA_SOURCE=dex) не режем этим гейтом —
+    # иначе честные нули убили бы весь реальный список (require_consensus=False).
+    if require_consensus and f.sm_confluence < CFG["min_smart_money_confluence"]:
         return False, (f"REJECT 共识：聪明钱+KOL {f.sm_confluence} "
                        f"(degen {f.smart_degen}/KOL {f.renowned}) < {CFG['min_smart_money_confluence']}"), 2
     return True, "ok", 0
@@ -984,6 +993,7 @@ class MarketLayer:
         self.live = False             # 是否已配 key（决定按链建 Live 还是 Mock 适配器）
         self._adapters: dict[str, GMGNAdapter] = {}
         self._mock = MockGMGN()
+        self._dex = dexadapter.DexAdapter() if DATA_SOURCE == "dex" else None
         self._trending_cache: dict[str, tuple] = {}
         self.trending_cmds: dict[str, str] = load_trending_cmds()
         env = load_env()
@@ -996,10 +1006,13 @@ class MarketLayer:
 
     @property
     def is_live_adapter(self) -> bool:
-        return self.live
+        return self.live or self._dex is not None
 
     def adapter_for(self, chain: str) -> GMGNAdapter:
         if not self.live:
+            # DATA_SOURCE=dex: реальные бесплатные данные (только sol); прочие цепи → Mock
+            if self._dex is not None and chain == "sol":
+                return self._dex
             return self._mock
         a = self._adapters.get(chain)
         if a is None:
@@ -1179,7 +1192,8 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
             continue
         f = fx.build_from_row(t)                          # STEP 2 尽调（直接用 trending 行字段）
         f.tracked_hits, f.tracked_names = _tracked_for(f, g)   # 私有 smart-money 共识信号
-        ok, reason, gate_idx = hard_gates(f, s.filters, chain)  # STEP 3 确定性硬门槛（按链裁剪）
+        ok, reason, gate_idx = hard_gates(f, s.filters, chain,   # STEP 3 硬门槛（по链 + по источнику）
+                                          require_consensus=getattr(g, "provides_consensus", True))
         if not ok:
             decisions.append(_reject(f, reason, gate_idx, None))
             continue
