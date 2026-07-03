@@ -1047,3 +1047,29 @@ class TestDeepSeekJudge:
         monkeypatch.setattr(appmod.httpx, "post", lambda *a, **k: called.__setitem__("n", 1))
         appmod.LLMJudge().judge(feat())
         assert called["n"] == 0                                   # сеть не трогали
+
+
+# ── PnL-календарь (per-user дневной реализованный PnL) ──
+class TestPnlCalendar:
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        return _mu_client(tmp_path, monkeypatch)
+
+    def test_per_user_daily_aggregation(self, client, monkeypatch):
+        import datetime as dt
+        appmod.log("SELL", "A", "x", dict(pnl=0.2, size_sol=0.1), pubkey="local")   # +0.02
+        appmod.log("SELL", "B", "x", dict(pnl=-0.5, size_sol=0.1), pubkey="local")  # -0.05
+        appmod.log("SELL", "C", "x", dict(pnl=0.3, size_sol=0.1), pubkey="WX")       # чужой
+        m = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
+        d = client.get(f"/api/pnl/calendar?month={m}").json()   # local
+        assert d["total"]["trades"] == 2 and d["winrate"] == 0.5
+        assert abs(d["total"]["pnl"] - (-0.03)) < 1e-9
+        dx = client.get(f"/api/pnl/calendar?month={m}", headers={"X-Wallet": "WX"}).json()
+        assert dx["total"]["trades"] == 1 and dx["total"]["pnl"] == 0.03
+
+    def test_bad_month_rejected(self, client):
+        assert client.get("/api/pnl/calendar?month=2026").status_code == 400
+
+    def test_empty_month_is_current(self, client):
+        d = client.get("/api/pnl/calendar").json()
+        assert "days" in d and "total" in d and len(d["month"]) == 7

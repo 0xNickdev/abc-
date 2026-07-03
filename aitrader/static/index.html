@@ -319,6 +319,7 @@ td{padding:5px 10px;vertical-align:middle}
       <div class="seg2"><button id="srcDemo" class="on" onclick="setSource('demo')">DEMO</button><button id="srcBe" onclick="setSource('backend')" data-i18n="src_backend">本地后端</button></div>
       <div class="wbtn" id="walletBtn" onclick="onWalletClick()" data-i18n-title="wallet_title"><span class="wdot"></span><span id="walletLbl" data-i18n="wallet_connect">Connect Wallet</span></div>
       <div class="langbtn" id="langBtn" style="display:none" onclick="switchLang()">EN</div>
+      <div class="wbtn" id="pnlBtn" onclick="openPnl()" title="PnL Calendar" style="cursor:pointer">📅 <span id="pnlBtnVal" style="font-weight:700">PnL</span></div>
       <div class="gear" id="gearBtn" data-i18n-title="gear_title"></div>
     </div>
   </div>
@@ -390,6 +391,24 @@ td{padding:5px 10px;vertical-align:middle}
 .botstate{font-size:12px;color:var(--dim2,#9aa)}.botstate.on{color:var(--lime,#9f6)}
 .trkb{color:var(--violet,#b18cff);font-weight:700;cursor:help}
 .kolb{font-size:11px}
+/* PnL-календарь */
+.pnlbar{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.pnlnav{padding:2px 12px;font-size:16px;line-height:1}
+.pnlmonth{font-size:15px;font-weight:700;color:var(--paper,#fff);min-width:150px}
+.pnltot{margin-left:auto;font-size:13px;color:var(--dim2,#9aa)}
+.pnlgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}
+.pnlhcell{text-align:center;font-size:10px;color:var(--dim2,#9aa);padding:2px 0;font-weight:600}
+.pnlcell{aspect-ratio:1;border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:4px 5px;display:flex;flex-direction:column;background:rgba(255,255,255,.02);min-height:48px}
+.pnlcell.empty{border:none;background:none}
+.pnlcell .pnld{font-size:11px;color:var(--dim2,#9aa)}
+.pnlcell .pnlv{font-size:11px;font-weight:700;margin-top:auto}
+.pnlcell .pnlt{font-size:9px;color:var(--dim2,#9aa)}
+.pnlcell.win{background:rgba(155,232,107,.13);border-color:rgba(155,232,107,.35)}
+.pnlcell.win .pnlv{color:var(--lime,#9be86b)}
+.pnlcell.loss{background:rgba(232,137,107,.13);border-color:rgba(232,137,107,.35)}
+.pnlcell.loss .pnlv{color:var(--clay,#e8896b)}
+.pnlcell.today{outline:2px solid var(--violet,#8b5cf6);outline-offset:-1px}
+.pnltot .win{color:var(--lime,#9be86b);font-weight:700}.pnltot .loss{color:var(--clay,#e8896b);font-weight:700}
 </style>
 <div class="scrim" id="pipeScrim">
   <div class="modal">
@@ -436,6 +455,22 @@ td{padding:5px 10px;vertical-align:middle}
   </div>
 </div>
 
+<div class="scrim" id="pnlScrim">
+  <div class="modal" style="width:560px">
+    <h2><span>📅 PnL Calendar</span><span class="x" onclick="closePnl()">×</span></h2>
+    <div class="mbody">
+      <div class="pnlbar">
+        <button class="mbtn ghost pnlnav" onclick="pnlMonth(-1)">‹</button>
+        <span id="pnlMonthLbl" class="pnlmonth">—</span>
+        <button class="mbtn ghost pnlnav" onclick="pnlMonth(1)">›</button>
+        <span class="pnltot" id="pnlTot"></span>
+      </div>
+      <div class="pnlgrid" id="pnlHead"></div>
+      <div class="pnlgrid" id="pnlDays"></div>
+      <div class="hint" id="pnlNote" style="margin-top:10px"></div>
+    </div>
+  </div>
+</div>
 <div class="scrim" id="confirmScrim">
   <div class="modal" style="width:420px">
     <h2><span id="confirmTitle" data-i18n="confirm_title">确认</span><span class="x" onclick="closeConfirm()">×</span></h2>
@@ -1246,6 +1281,45 @@ function setSource(s){
 }
 
 /* ── config modal ── */
+/* ── PnL-календарь (per-user дневной реализованный PnL) ── */
+let pnlYM=null;   // {y,m} текущий показываемый месяц
+function _ym(d){return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0');}
+function openPnl(){pnlYM=null;document.getElementById('pnlScrim').classList.add('on');loadPnl();}
+function closePnl(){document.getElementById('pnlScrim').classList.remove('on');}
+function pnlMonth(delta){
+  const [y,m]=(pnlYM||_ym(new Date())).split('-').map(Number);
+  const d=new Date(Date.UTC(y,m-1+delta,1));pnlYM=_ym(d);loadPnl();
+}
+function _fmtSol(v){const s=v>=0?'+':'';return s+(Math.abs(v)>=1?v.toFixed(2):v.toFixed(3))+' ◎';}
+async function loadPnl(){
+  const ym=pnlYM||_ym(new Date());
+  document.getElementById('pnlMonthLbl').textContent=new Date(ym+'-01T00:00:00Z').toLocaleString('en',{month:'long',year:'numeric',timeZone:'UTC'});
+  const head=document.getElementById('pnlHead');head.innerHTML=['M','T','W','T','F','S','S'].map(d=>`<div class="pnlhcell">${d}</div>`).join('');
+  const box=document.getElementById('pnlDays');box.innerHTML='<div class="hint" style="grid-column:1/8;padding:20px;text-align:center">…</div>';
+  let data;
+  try{
+    if(source!=='backend'){box.innerHTML='<div class="hint" style="grid-column:1/8;padding:20px;text-align:center">Connect to backend to see real PnL</div>';document.getElementById('pnlTot').textContent='';return;}
+    const r=await fetch(API+'/api/pnl/calendar?month='+ym);if(!r.ok)throw 0;data=await r.json();
+  }catch(e){box.innerHTML='<div class="hint" style="grid-column:1/8;padding:20px;text-align:center">backend offline</div>';return;}
+  const [Y,Mo]=ym.split('-').map(Number);
+  const first=new Date(Date.UTC(Y,Mo-1,1));let lead=(first.getUTCDay()+6)%7;   // пн=0
+  const dim=new Date(Date.UTC(Y,Mo,0)).getUTCDate();
+  const today=_ym(new Date())===ym?new Date().getUTCDate():-1;
+  let cells='';
+  for(let i=0;i<lead;i++)cells+='<div class="pnlcell empty"></div>';
+  for(let d=1;d<=dim;d++){
+    const key=`${ym}-${String(d).padStart(2,'0')}`;const c=data.days[key];
+    const cls=c?(c.pnl>0?'win':c.pnl<0?'loss':'flat'):'none';
+    const val=c?`<span class="pnlv">${_fmtSol(c.pnl)}</span><span class="pnlt">${c.trades}т</span>`:'';
+    cells+=`<div class="pnlcell ${cls} ${d===today?'today':''}"><span class="pnld">${d}</span>${val}</div>`;
+  }
+  box.innerHTML=cells;
+  const t=data.total;const cls=t.pnl>0?'win':t.pnl<0?'loss':'';
+  document.getElementById('pnlTot').innerHTML=`<span class="${cls}">${_fmtSol(t.pnl)}</span> · ${t.trades} trades · ${Math.round(data.winrate*100)}% win`;
+  document.getElementById('pnlNote').textContent=t.trades?'':'No closed trades this month yet — the bot is paper-trading; sells will appear here.';
+  // мини-значение на кнопке в шапке = PnL текущего месяца
+  if(_ym(new Date())===ym){const b=document.getElementById('pnlBtnVal');if(b){b.textContent=_fmtSol(t.pnl);b.className='';b.style.color=t.pnl>0?'var(--lime)':t.pnl<0?'var(--clay)':'';}}
+}
 function openCfg(){document.getElementById('cfgScrim').classList.add('on');}
 function closeCfg(){document.getElementById('cfgScrim').classList.remove('on');}
 document.getElementById('gearBtn').onclick=openCfg;
@@ -1328,6 +1402,7 @@ function dismissOnBackdrop(id,fn){
   el.addEventListener('click',e=>{if(e.target===el&&downSelf)fn();downSelf=false;});
 }
 dismissOnBackdrop('cfgScrim',closeCfg);
+dismissOnBackdrop('pnlScrim',closePnl);
 
 /* ── 筛选设置弹窗（热榜命令 + 轮询间隔）── */
 async function openPipe(){

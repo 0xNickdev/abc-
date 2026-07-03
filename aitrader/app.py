@@ -1201,12 +1201,41 @@ def valid_chain(ch: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────
 # 10. 日志（私有 ground truth；反馈飞轮的原料）
 # ──────────────────────────────────────────────────────────────────────────
-def log(action: str, symbol: str, reason: str, extra: dict | None = None, mode: str | None = None):
+def log(action: str, symbol: str, reason: str, extra: dict | None = None,
+        mode: str | None = None, pubkey: str | None = None):
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     rec = dict(ts=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
-               action=action, symbol=symbol, reason=reason, mode=(mode or ST.mode), **(extra or {}))
+               action=action, symbol=symbol, reason=reason, mode=(mode or ST.mode),
+               pubkey=(pubkey or DEFAULT_PUBKEY), **(extra or {}))
     with LOG_PATH.open("a") as fh:
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+def pnl_calendar(pubkey: str, month: str) -> dict:
+    """Дневной реализованный PnL (SOL) за месяц YYYY-MM для одного пользователя.
+    Источник — SELL-записи журнала: реализованный SOL ≈ pnl(доля) × size_sol(этой продажи)."""
+    pk = (pubkey or "").strip() or DEFAULT_PUBKEY
+    days: dict[str, dict] = {}
+    tot = dict(pnl=0.0, trades=0, wins=0)
+    if LOG_PATH.exists():
+        for line in LOG_PATH.read_text().splitlines():
+            try:
+                r = json.loads(line)
+            except Exception:
+                continue
+            if r.get("action") != "SELL" or not r.get("ts", "").startswith(month):
+                continue
+            # старые записи без pubkey считаем принадлежащими default-сессии (local)
+            if r.get("pubkey", DEFAULT_PUBKEY) != pk:
+                continue
+            d = r["ts"][:10]
+            sol = float(r.get("pnl", 0.0)) * float(r.get("size_sol", 0.0))
+            cell = days.setdefault(d, dict(pnl=0.0, trades=0, wins=0))
+            cell["pnl"] = round(cell["pnl"] + sol, 6); cell["trades"] += 1
+            tot["pnl"] = round(tot["pnl"] + sol, 6); tot["trades"] += 1
+            if sol > 0:
+                cell["wins"] += 1; tot["wins"] += 1
+    return dict(month=month, days=days, total=tot,
+                winrate=round(tot["wins"] / tot["trades"], 3) if tot["trades"] else 0.0)
 
 # ──────────────────────────────────────────────────────────────────────────
 # 11. 筛选流水线（核心：确定性先筛 → 评分 → LLM 只判幸存者 → 产候选，不执行）
@@ -1540,14 +1569,15 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
             s.risk.consec_losses = 0
         log("SELL", p["symbol"], f"{s.mode} 平仓 PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=p.get("size_sol", 0.0), address=p.get("address"), fraction=1.0),
-            mode=s.mode)
+            mode=s.mode, pubkey=s.pubkey)
         s.positions.pop(idx)
     else:
         if pnl < 0:                                  # 分批离场若为亏损也按比例入账当日亏损
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * sold_sol, 4)
         p["size_sol"] = round(p["size_sol"] - sold_sol, 6)
         log("SELL", p["symbol"], f"{s.mode} 分批 {pct}% PnL {pnl:+.1%}{tag}",
-            dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac), mode=s.mode)
+            dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac),
+            mode=s.mode, pubkey=s.pubkey)
     s.save_positions()
     return dict(ok=True, symbol=p["symbol"], fraction=frac, closed=full)
 
@@ -1905,6 +1935,15 @@ def api_backtest(x_wallet: str | None = WalletHeader):
     """从 trade_decisions.jsonl 复盘：漏斗 + 已实现 PnL/胜率/R + 纸面预期 R（按选定策略阈值）。"""
     sess = get_session(x_wallet)
     return backtest.summary(trig=strategy.get(sess.strategy_id)["trigger"])
+
+@app.get("/api/pnl/calendar")
+def api_pnl_calendar(month: str = "", x_wallet: str | None = WalletHeader):
+    """Календарь дневного реализованного PnL за месяц (per-user). month=YYYY-MM (пусто=текущий)."""
+    sess = get_session(x_wallet)
+    m = month.strip() or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
+    if len(m) != 7 or m[4] != "-":
+        raise HTTPException(400, "month формат YYYY-MM")
+    return pnl_calendar(sess.pubkey, m)
 
 class BotConfigIn(BaseModel):
     mode: str | None = None              # n1 | n2
