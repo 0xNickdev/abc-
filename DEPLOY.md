@@ -10,6 +10,7 @@
    - `SOLANA_RPC_URL=https://mainnet.helius-rpc.com/?api-key=<твой ключ>` — свой RPC (Helius) вместо перегруженного публичного: надёжные проверки authority, балансы, отправка tx;
    - `PUBLIC_DEMO=1` — **рекомендуется для публичного инстанса**: read-only демо, все записи (buy/config/bot) отключены;
    - либо полноценный режим: `GMGN_API_KEY=...` (без него — mock-данные), опционально `GMGN_LLM_PROVIDER=claude` + `ANTHROPIC_API_KEY`.
+   - **LLM-судья через DeepSeek** (дёшево, рекомендуется): `GMGN_LLM_PROVIDER=deepseek` + `DEEPSEEK_API_KEY=sk-...` (модель по умолч. `deepseek-chat`; свой эндпоинт — `LLM_BASE_URL`). Без этого судья работает на бесплатной эвристике.
    - `ENABLE_LIVE_TRADING` **не задавать** (замок реальных денег остаётся закрытым).
 3. Settings → **Generate Domain** → получишь `https://<app>.up.railway.app`.
 

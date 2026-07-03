@@ -1,5 +1,7 @@
 """单元测试：覆盖确定性核心（避雷/过滤器闸门、评分、风控、消毒、逃生、仓位）。
 全部针对纯函数/内存状态，不依赖网络与 gmgn-cli；落盘相关用 tmp 隔离。"""
+import json
+
 import pytest
 
 import app as appmod
@@ -1005,3 +1007,43 @@ class TestKolRating:
         k.record_calls("CA1", [dict(username="alpha", followers=1)], 1.0)
         k.record_calls("CA1", [dict(username="alpha", followers=1)], 1.5)
         assert {x["username"]: x for x in k.rating()}["alpha"]["calls"] == 1
+
+
+# ── DeepSeek / OpenAI-совместимый LLM-судья ──
+class TestDeepSeekJudge:
+    def test_dispatch_and_parse(self, monkeypatch):
+        monkeypatch.setattr(appmod, "LLM_PROVIDER", "deepseek")
+        monkeypatch.setattr(appmod, "LLM_API_KEY", "sk-test")
+
+        class R:
+            def raise_for_status(self): pass
+            def json(self): return {"choices": [{"message": {"content": json.dumps({
+                "verdict": "pass", "conviction": 0.82, "crowdedness": "early",
+                "red_flags": [], "thesis": "buying dominates, smart money in"})}}]}
+        captured = {}
+        def fake_post(url, **kw):
+            captured["url"] = url; captured["json"] = kw.get("json"); return R()
+        monkeypatch.setattr(appmod.httpx, "post", fake_post)
+        v = appmod.LLMJudge().judge(feat(chg_5m=0.1, chg_1h=0.4, buy_ratio=0.7))
+        assert v.verdict == "pass" and v.conviction == 0.82 and v.crowdedness == "early"
+        assert captured["url"].endswith("/chat/completions")
+        # только消毒 features идут наружу — сырое имя токена не улетает
+        sent = json.dumps(captured["json"])
+        assert "symbol_raw" not in sent and "address" not in sent
+
+    def test_network_error_falls_back_to_heuristic(self, monkeypatch):
+        monkeypatch.setattr(appmod, "LLM_PROVIDER", "deepseek")
+        monkeypatch.setattr(appmod, "LLM_API_KEY", "sk-test")
+        def boom(*a, **k): raise RuntimeError("timeout")
+        monkeypatch.setattr(appmod.httpx, "post", boom)
+        v = appmod.LLMJudge().judge(feat(chg_5m=0.1, chg_1h=0.4, buy_ratio=0.7))
+        assert v.verdict in ("pass", "watch", "reject")          # эвристика отработала
+        assert any("heuristic" in x for x in v.red_flags)
+
+    def test_no_key_uses_heuristic(self, monkeypatch):
+        monkeypatch.setattr(appmod, "LLM_PROVIDER", "deepseek")
+        monkeypatch.setattr(appmod, "LLM_API_KEY", "")
+        called = {"n": 0}
+        monkeypatch.setattr(appmod.httpx, "post", lambda *a, **k: called.__setitem__("n", 1))
+        appmod.LLMJudge().judge(feat())
+        assert called["n"] == 0                                   # сеть не трогали
