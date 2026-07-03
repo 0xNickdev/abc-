@@ -332,7 +332,7 @@ td{padding:5px 10px;vertical-align:middle}
         <div class="body">
           <table>
             <thead><tr>
-              <th><span data-i18n="th_token">TOKEN</span> <span class="tokf" id="tokFilter"></span></th><th data-i18n="th_pipe">规则→排序→LLM</th><th data-i18n="th_safe">安全</th><th>BUND</th><th>DEV</th><th>T10</th><th data-i18n="th_smart">聪明钱/KOL</th><th data-i18n="th_timing">时机</th><th>LLM</th><th data-i18n="th_pri">优先级</th><th data-i18n="th_dec">决策</th>
+              <th><span data-i18n="th_token">TOKEN</span> <span class="tokf" id="tokFilter"></span></th><th data-i18n="th_pipe">规则→排序→LLM</th><th data-i18n="th_safe">安全</th><th>BUND</th><th>DEV</th><th>T10</th><th>MCAP</th><th data-i18n="th_smart">聪明钱/KOL</th><th data-i18n="th_timing">时机</th><th>LLM</th><th data-i18n="th_pri">优先级</th><th data-i18n="th_dec">决策</th>
             </tr></thead>
             <tbody id="rows"></tbody>
           </table>
@@ -988,7 +988,7 @@ function normalize(data){
       hp:!!f.honeypot,ren:(f.renounced!==undefined?!!f.renounced:!!f.renounced_mint),
       frz:(f.renounced_freeze!==undefined?!!f.renounced_freeze:true),
       trk:f.tracked_hits||0,trkn:f.tracked_names||[],
-      bund:f.bundler||0,dev:f.dev_hold||0,top10:f.top10||0,
+      bund:f.bundler||0,dev:f.dev_hold||0,top10:f.top10||0,mc:f.mcap||0,liq:f.liquidity||0,
       smc:f.sm_confluence||0,degen:f.smart_degen||0,kol:f.renowned||0,age:f.age_min,crowd:v.crowdedness||'-',
       v:v.verdict||'-',conv:v.conviction||0,status:isAct?'action':'reject',
       warn:!!dec.risk_warn,size:dec.size_sol||0,died:deriveDied(dec.action,dec.reason),
@@ -1062,9 +1062,9 @@ function renderRows(){
   const box=document.getElementById('rows');
   if(!rows.length){
     if(loadingScreen){
-      box.innerHTML=Array.from({length:6},()=>'<tr class="skelrow"><td colspan="11"><div class="skel-bar"></div></td></tr>').join('');
+      box.innerHTML=Array.from({length:6},()=>'<tr class="skelrow"><td colspan="12"><div class="skel-bar"></div></td></tr>').join('');
     }else{
-      box.innerHTML='<tr><td colspan="11" style="padding:26px;text-align:center;color:var(--dim2)">'+(onlyHeld?t('empty_onlyheld'):t('empty_none'))+'</td></tr>';
+      box.innerHTML='<tr><td colspan="12" style="padding:26px;text-align:center;color:var(--dim2)">'+(onlyHeld?t('empty_onlyheld'):t('empty_none'))+'</td></tr>';
     }
     return;
   }
@@ -1090,6 +1090,7 @@ function renderRows(){
       <td><span class="m ${t.bund>.30?'bad':''}">${P(t.bund)}</span></td>
       <td><span class="m ${t.dev>.10?'bad':''}">${P(t.dev)}</span></td>
       <td><span class="m ${t.top10>.40?'bad':''}">${P(t.top10)}</span></td>
+      <td><span class="m has-tip" data-tip="Liq ${fmtCap(t.liq)}">${fmtCap(t.mc)}</span></td>
       <td><span class="m has-tip ${t.smc<1?'bad':''}" data-tip="${t2('smc_tip',t.degen,t.kol,t.smc)}${t.trkn&&t.trkn.length?'　|　★ '+t.trkn.join(', '):''}">${t.degen}/${t.kol}${t.kol>0?' <span class="kolb">👑</span>':''}${t.trk>0?` <span class="trkb has-tip" data-tip="${t2('trk_tip')}${t.trkn.join(', ')}">★${t.trk}</span>`:''}</span></td>
       <td><span class="m has-tip ${t.crowd==='late'?'bad':t.crowd==='crowded'?'warn':''}" data-tip="${t2('timing_label')+'　|　'+(I18N[lang]['crowdtip_'+t.crowd]?t2('crowdtip_'+t.crowd):t2('crowd_none_tip'))}">${I18N[lang]['crowd_'+t.crowd]?t2('crowd_'+t.crowd):t.crowd}</span></td>
       <td>${t.v==='-'?`<span class="has-tip" style="color:var(--dim2)" data-tip="${t2('llm_none_tip')}">—</span>`:`<span class="vd has-tip ${t.v}" data-tip="${t2('vd_tip',t.v.toUpperCase(),t2('llmtip_'+t.v)||'',(+t.conv).toFixed(2))}">${t.v.toUpperCase()}</span>`}</td>
@@ -1099,6 +1100,7 @@ function renderRows(){
   document.querySelectorAll('#rows tr').forEach(r=>r.onclick=()=>{const i=+r.dataset.i;sel=(sel===i?-1:i);renderRows();renderDetail();});
 }
 /* renderRows 内部把行对象命名为 t（沿用旧代码），与取词函数 t() 撞名，故行内取词改用别名 t2 = 全局 t */
+function fmtCap(v){v=+v||0;return v>=1e6?'$'+(v/1e6).toFixed(1)+'M':v>=1e3?'$'+(v/1e3).toFixed(0)+'k':'$'+v.toFixed(0);}
 const t2=(k,...a)=>I18N[lang]&&typeof (I18N[lang][k])==='function'?I18N[lang][k](...a):(I18N[lang]&&I18N[lang][k]!==undefined?I18N[lang][k]:t(k,...a));
 function renderDetail(){
   const r=(sel>=0?T[sel]:null); if(!r){document.getElementById('detail').innerHTML='';return;}
