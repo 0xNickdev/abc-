@@ -951,3 +951,57 @@ class TestDexAdapter:
         assert ok is True                       # без consensus-данных гейт 2 не применяется
         ok2, _, gate2 = appmod.hard_gates(f, chain="sol", require_consensus=True)
         assert ok2 is False and gate2 == 2      # обычный источник — как раньше
+
+
+# ── Идеи 1/2/4/5: рейтинг KOL, скорость холдеров, rug в features, умный размер ──
+class TestSmartSizing:
+    def test_conviction_scales_and_liquidity_cuts(self):
+        base = appmod.position_size()
+        assert appmod.position_size(conviction=0.95, liquidity=500_000) >= base
+        assert appmod.position_size(conviction=0.6, liquidity=5_000) < base   # тонкая ликвидность
+        # никогда не выше жёсткого капа
+        assert appmod.position_size(conviction=0.99, liquidity=9e9) <= appmod.CFG["max_per_trade_sol"]
+
+    def test_thin_liquidity_halves(self):
+        full = appmod.position_size(conviction=0.7, liquidity=100_000)
+        thin = appmod.position_size(conviction=0.7, liquidity=9_000)
+        assert abs(thin - full * 0.5) < 1e-3   # с учётом округления до 4 знаков
+
+
+class TestHolderVelocity:
+    def test_velocity_from_two_scans(self):
+        appmod._HOLDERS_LAST.clear()
+        assert appmod._holder_velocity("ADDR1", 100) == 0.0        # первый скан — базы нет
+        ts, cnt = appmod._HOLDERS_LAST["ADDR1"]
+        appmod._HOLDERS_LAST["ADDR1"] = (ts - 60.0, cnt)           # сдвинем базу на минуту назад
+        assert appmod._holder_velocity("ADDR1", 140) == 40.0       # +40 держателей/мин
+
+    def test_zero_count_ignored(self):
+        assert appmod._holder_velocity("ADDR2", 0) == 0.0
+
+    def test_feat_exposes_rug_and_holders(self):
+        d = appmod._feat(feat(rug_ratio=0.4, holder_count=500, holder_velocity=12.5))
+        assert d["rug_ratio"] == 0.4 and d["holder_count"] == 500 and d["holder_velocity"] == 12.5
+
+
+class TestKolRating:
+    @pytest.fixture(autouse=True)
+    def _tmp_calls(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(appmod.kol, "CALLS_PATH", tmp_path / "kol_calls.json")
+        monkeypatch.setattr(appmod.kol, "_calls_mem", None)
+
+    def test_record_update_rating_flow(self):
+        k = appmod.kol
+        k.record_calls("CA1", [dict(username="alpha", followers=10_000)], price=1.0)
+        k.record_calls("CA2", [dict(username="alpha", followers=10_000),
+                               dict(username="beta", followers=500)], price=2.0)
+        k.update_prices({"CA1": 2.0, "CA2": 2.2})    # CA1 сделал 2x (win), CA2 только 1.1x
+        r = {x["username"]: x for x in k.rating()}
+        assert r["alpha"]["calls"] == 2 and r["alpha"]["winrate"] == 0.5
+        assert r["beta"]["calls"] == 1 and r["beta"]["winrate"] == 0.0
+
+    def test_no_duplicate_calls_same_author(self):
+        k = appmod.kol
+        k.record_calls("CA1", [dict(username="alpha", followers=1)], 1.0)
+        k.record_calls("CA1", [dict(username="alpha", followers=1)], 1.5)
+        assert {x["username"]: x for x in k.rating()}["alpha"]["calls"] == 1

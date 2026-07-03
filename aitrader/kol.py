@@ -58,3 +58,81 @@ def mentions(ca: str, bearer: str) -> dict:
     payload = dict(ok=True, count=len(tweets), authors=authors[:5], cached=False)
     _cache[key] = (time.monotonic(), payload)
     return payload
+
+
+# ── Рейтинг KOL'ов: колл = найденное упоминание CA; win = пик ≥1.5x от цены колла ──
+import json  # noqa: E402
+import pathlib  # noqa: E402
+
+CALLS_PATH = pathlib.Path(__file__).resolve().parent / "outputs" / "kol_calls.json"
+WIN_X = 1.5
+_calls_mem: dict | None = None
+
+
+def _calls() -> dict:
+    global _calls_mem
+    if _calls_mem is None:
+        try:
+            _calls_mem = json.loads(CALLS_PATH.read_text())
+        except Exception:
+            _calls_mem = {}
+    return _calls_mem
+
+
+def _save_calls():
+    try:
+        CALLS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CALLS_PATH.write_text(json.dumps(_calls(), ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def record_calls(ca: str, authors: list, price: float):
+    """Зафиксировать коллы: автор × токен × цена в момент обнаружения (не дублируем)."""
+    d = _calls()
+    rec = d.setdefault(ca, dict(price0=price or 0.0, peak=price or 0.0,
+                                ts=time.time(), authors=[]))
+    known = {a["username"] for a in rec["authors"]}
+    for a in authors:
+        u = a.get("username")
+        if u and u not in known:
+            rec["authors"].append(dict(username=u, followers=a.get("followers", 0),
+                                       price=price or 0.0, ts=time.time()))
+            known.add(u)
+    _save_calls()
+
+
+def update_prices(prices: dict):
+    """Подтянуть пики цен по токенам из очередного скана (для winrate коллов)."""
+    d = _calls()
+    changed = False
+    for ca, p in prices.items():
+        r = d.get(ca)
+        if r and p and p > r.get("peak", 0.0):
+            r["peak"] = p
+            changed = True
+    if changed:
+        _save_calls()
+
+
+def rating() -> list:
+    """Пер-автор: сколько коллов, доля ≥1.5x (winrate), медианный пик-множитель."""
+    by: dict[str, dict] = {}
+    for r in _calls().values():
+        for a in r["authors"]:
+            p0 = a.get("price") or r.get("price0") or 0.0
+            mult = (r.get("peak", 0.0) / p0) if p0 > 0 else 0.0
+            st = by.setdefault(a["username"], dict(username=a["username"],
+                                                   calls=0, wins=0, mults=[]))
+            st["calls"] += 1
+            st["mults"].append(round(mult, 2))
+            if mult >= WIN_X:
+                st["wins"] += 1
+    out = []
+    for st in by.values():
+        m = sorted(st["mults"])
+        out.append(dict(username=st["username"], calls=st["calls"],
+                        winrate=round(st["wins"] / st["calls"], 2) if st["calls"] else 0.0,
+                        median_x=m[len(m) // 2] if m else 0.0))
+    out.sort(key=lambda x: (-x["winrate"], -x["calls"]))
+    return out

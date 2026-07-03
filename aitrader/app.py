@@ -676,6 +676,8 @@ class TokenFeatures:
     sm_confluence: int = 0   # = smart_degen + renowned
     tracked_hits: int = 0            # 我方私有跟踪钱包在场数量（smart-money 信号）
     tracked_names: list = field(default_factory=list)
+    holder_count: int = 0            # держатели (из trending)
+    holder_velocity: float = 0.0     # прирост держателей/мин между сканами (ранний органический сигнал)
 
 class FeatureExtractor:
     """trending 一行已含几乎全部尽调字段，直接据此建特征（省掉逐个 info/security/holders）。"""
@@ -710,6 +712,7 @@ class FeatureExtractor:
             rug_ratio=_f(row.get("rug_ratio")),
             bundler=_f(row.get("bundler_rate")),
             dev_hold=_f(row.get("dev_team_hold_rate")),
+            holder_count=int(_f(row.get("holder_count"))),
             top10=_f(row.get("top_10_holder_rate")),
             smart_degen=degen, renowned=renowned,
             sniper_count=int(_f(row.get("sniper_count"))),
@@ -793,6 +796,7 @@ def priority_score(f: TokenFeatures, conv: float, crowd: str) -> int:
     if f.chg_1h <= CFG["momentum_reject_chg1h"]:        # 阴跌沉底
         s *= 0.4
     s += min(18, f.tracked_hits * 7)                    # 私有 smart-money 在场 → 强加成
+    s += min(10, max(0.0, f.holder_velocity) * 0.25)    # органический набор держателей (▲40/мин → максимум)
     return max(0, min(99, round(s)))
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -938,10 +942,16 @@ def assess_escape(cur_sec: dict, entry: dict):
 # ──────────────────────────────────────────────────────────────────────────
 # 8. 仓位计算（固定分数法；数字由代码定，LLM 永不出数字）
 # ──────────────────────────────────────────────────────────────────────────
-def position_size() -> float:
+def position_size(conviction: float | None = None, liquidity: float | None = None) -> float:
+    """Размер = базовый риск, масштабированный уверенностью LLM и тиром ликвидности:
+    в тонкую монету нельзя входить полным размером — сам себе двигаешь цену на входе/выходе."""
     risk_sol = CFG["equity_sol"] * CFG["risk_per_trade"]
     size = min(risk_sol / CFG["hard_stop_pct"], CFG["max_per_trade_sol"])
-    return round(size, 4)
+    if conviction is not None:       # 0.6 → x0.8 … 0.95+ → x1.25
+        size *= max(0.5, min(1.25, 0.8 + (conviction - 0.6) * 1.3))
+    if liquidity is not None:        # тиры ликвидности: <$10k → x0.5, <$30k → x0.75
+        size *= 0.5 if liquidity < 10_000 else (0.75 if liquidity < 30_000 else 1.0)
+    return round(min(size, CFG["max_per_trade_sol"]), 4)
 
 def exit_plan() -> dict:
     tp = [f"+{int(g*100)}%→卖{int(p*100)}%" for g, p in CFG["tp_ladder"]]
@@ -1179,6 +1189,21 @@ def _tracked_for(f: TokenFeatures, g: GMGNAdapter):
         return n, names
     return 0, []
 
+_HOLDERS_LAST: dict[str, tuple[float, int]] = {}   # addr -> (monotonic_ts, holder_count)
+
+def _holder_velocity(addr: str, count: int) -> float:
+    """Держатели/мин между сканами — ранний сигнал органического набора (раньше цены)."""
+    if count <= 0:
+        return 0.0
+    now = time.monotonic()
+    prev = _HOLDERS_LAST.get(addr)
+    _HOLDERS_LAST[addr] = (now, count)
+    if len(_HOLDERS_LAST) > 2000:                     # кап памяти
+        _HOLDERS_LAST.pop(next(iter(_HOLDERS_LAST)))
+    if not prev or now - prev[0] < 1.0:
+        return 0.0
+    return round((count - prev[1]) / ((now - prev[0]) / 60.0), 1)
+
 def screen_once(chain: str, s: UserSession | None = None) -> dict:
     s = s or ST                       # 会话（多用户：每 pubkey 自己的过滤器/持仓/风控）
     g = s.adapter_for(chain)          # 市场层共享（运营者 key），与会话无关
@@ -1194,6 +1219,7 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
         if not t.get("address"):
             continue
         f = fx.build_from_row(t)                          # STEP 2 尽调（直接用 trending 行字段）
+        f.holder_velocity = _holder_velocity(f.address, f.holder_count)
         f.tracked_hits, f.tracked_names = _tracked_for(f, g)   # 私有 smart-money 共识信号
         ok, reason, gate_idx = hard_gates(f, s.filters, chain,   # STEP 3 硬门槛（по链 + по источнику）
                                           require_consensus=getattr(g, "provides_consensus", True))
@@ -1223,7 +1249,7 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
         if v.conviction < CFG["min_llm_conviction"]:
             decisions.append(_reject(f, f"REJECT LLM：置信度 {v.conviction} 偏低", 4, v))
             continue
-        size = position_size()
+        size = position_size(v.conviction, f.liquidity)
         # 组合风控不在此阻断，只标 risk_warn（人在环：提示而非硬拦）
         allow, rnote = s.risk.gate(size, n_pos, exposure)
         pri = priority_score(f, v.conviction, v.crowdedness)
@@ -1238,6 +1264,11 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
         log("SCREEN", f.symbol_safe, "通过闸门 · 待决策",
             dict(size_sol=size, priority=pri, risk_warn=(not allow),
                  features=_feat(f), abc=abc))
+
+    try:      # рейтинг KOL: обновить пики цен по токенам скана (для winrate коллов)
+        kol.update_prices({t["address"]: _f(t.get("price")) for t in candidates if t.get("address")})
+    except Exception:
+        pass
 
     # 持仓逃生监控（与筛选同一轮跑）；把本轮热榜行喂进去，持仓在榜则零额外 cli
     rows_by_addr = {t["address"]: t for t in candidates if t.get("address")}
@@ -1279,7 +1310,9 @@ def _feat(f):
                 bundler=round(f.bundler, 2), dev_hold=round(f.dev_hold, 2), top10=round(f.top10, 2),
                 smart_degen=f.smart_degen, renowned=f.renowned, sm_confluence=f.sm_confluence,
                 tracked_hits=f.tracked_hits, tracked_names=f.tracked_names,
-                sniper_count=f.sniper_count, chg_1h=round(f.chg_1h, 3), chg_5m=round(f.chg_5m, 3),
+                sniper_count=f.sniper_count, rug_ratio=round(f.rug_ratio, 3),
+                holder_count=f.holder_count, holder_velocity=f.holder_velocity,
+                chg_1h=round(f.chg_1h, 3), chg_5m=round(f.chg_5m, 3),
                 buy_ratio=round(f.buy_ratio, 2), turnover=round(f.turnover, 2),
                 liquidity=f.liquidity, mcap=f.mcap, age_min=round(f.age_min, 1))
 
@@ -2120,9 +2153,26 @@ def api_kol_check(address: str, x_wallet: str | None = WalletHeader):
     if not (sess.twitter.get("enabled") and sess.twitter.get("bearer")):
         raise HTTPException(400, "Twitter не подключён — включи во вкладке KOL/X настроек")
     try:
-        return kol.mentions(address.strip(), sess.twitter["bearer"])
+        res = kol.mentions(address.strip(), sess.twitter["bearer"])
     except Exception as e:
         raise HTTPException(502, f"Twitter API: {e}")
+    if res.get("ok") and res.get("authors"):
+        try:
+            price = MK.adapter_for("sol").token_price(address.strip())
+        except Exception:
+            price = 0.0
+        kol.record_calls(address.strip(), res["authors"], price)
+        stats = {r["username"]: r for r in kol.rating()}
+        for a in res["authors"]:
+            st = stats.get(a["username"])
+            if st and st["calls"] > 1:
+                a.update(calls=st["calls"], winrate=st["winrate"], median_x=st["median_x"])
+    return res
+
+@app.get("/api/kol/rating")
+def api_kol_rating():
+    """Накопленный рейтинг KOL'ов: колл = упоминание CA; win = пик ≥1.5x от цены колла."""
+    return dict(rating=kol.rating())
 
 # 静态前端（同源，避免 CORS）。把上一版 dashboard 存为 static/index.html
 if STATIC_DIR.exists():
