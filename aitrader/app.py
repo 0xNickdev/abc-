@@ -25,6 +25,7 @@ app.py — GMGN AI Trader 本地后端 (FastAPI)
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import datetime
 import hashlib
 import json
@@ -1281,8 +1282,14 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
     # STEP 5 LLM 只对幸存者解释；STEP 6 仓位由代码算；产出候选（不执行）
     n_pos = len(s.positions)
     exposure = s.exposure()
-    for sc, f in to_llm:
-        v = judge.judge(f)
+    # 真实 LLM（DeepSeek/Claude）是网络调用：并发判所有幸存者，避免逐个串行把一轮扫描
+    # 拖到几十秒（启发式很快，并发也无害）。判分/风控/日志仍按原顺序处理。
+    if len(to_llm) > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            verdicts = list(ex.map(lambda pair: judge.judge(pair[1]), to_llm))
+    else:
+        verdicts = [judge.judge(f) for _, f in to_llm]
+    for (sc, f), v in zip(to_llm, verdicts):
         if v.verdict != "pass":
             decisions.append(_reject(f, f"REJECT LLM：{v.verdict}（{v.crowdedness}）", 4, v))
             continue
