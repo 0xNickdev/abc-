@@ -306,15 +306,8 @@ td{padding:5px 10px;vertical-align:middle}
     <div class="bar-r">
       <div class="clock" id="clock">--:--:--</div>
       <div class="pill"><span class="dot live"></span><div><span class="k">MCP</span><span class="v" id="mcpPill" style="color:var(--amber)">DEMO</span></div></div>
-      <div class="pill chainpill" id="chainPillWrap" data-i18n-title="chain_title"><div><span class="k">CHAIN</span><span class="v" id="chainPill">SOL</span></div><span class="caret">▾</span>
-        <div class="chainmenu" id="chainMenu">
-          <div data-ch="sol" onclick="switchChain('sol')">SOL</div>
-          <div data-ch="bsc" onclick="switchChain('bsc')">BSC</div>
-          <div data-ch="base" onclick="switchChain('base')">Base</div>
-          <div data-ch="eth" onclick="switchChain('eth')">ETH</div>
-        </div>
-      </div>
-      <div class="pill"><div><span class="k">P50 LAT</span><span class="v" id="lat">182ms</span></div></div>
+      <!-- селектор чейна убран: продукт SOL-only (curChain фиксирован 'sol') -->
+      <div class="pill" style="display:none"><div><span class="k">P50 LAT</span><span class="v" id="lat">182ms</span></div></div>
       <div class="pill mode clk" id="modePillWrap" onclick="toggleMode()" data-i18n-title="mode_toggle_title"><span class="dot" id="modeDot" style="background:var(--amber)"></span><div><span class="k">MODE</span><span class="v" id="modePill">模拟盘</span></div></div>
       <div class="seg2"><button id="srcDemo" class="on" onclick="setSource('demo')">DEMO</button><button id="srcBe" onclick="setSource('backend')" data-i18n="src_backend">本地后端</button></div>
       <div class="wbtn" id="walletBtn" onclick="onWalletClick()" data-i18n-title="wallet_title"><span class="wdot"></span><span id="walletLbl" data-i18n="wallet_connect">Connect Wallet</span></div>
@@ -333,7 +326,7 @@ td{padding:5px 10px;vertical-align:middle}
         <div class="body">
           <table>
             <thead><tr>
-              <th><span data-i18n="th_token">TOKEN</span> <span class="tokf" id="tokFilter"></span></th><th data-i18n="th_pipe">规则→排序→LLM</th><th data-i18n="th_safe">安全</th><th>BUND</th><th>DEV</th><th>T10</th><th>MCAP</th><th data-i18n="th_smart">聪明钱/KOL</th><th data-i18n="th_timing">时机</th><th>LLM</th><th data-i18n="th_pri">优先级</th><th data-i18n="th_dec">决策</th>
+              <th><span data-i18n="th_token">TOKEN</span> <span class="tokf" id="tokFilter"></span></th><th data-i18n="th_pipe">规则→排序→LLM</th><th data-i18n="th_safe">安全</th><th>MCAP</th><th data-i18n="th_smart">聪明钱/KOL</th><th data-i18n="th_timing">时机</th><th>LLM</th><th data-i18n="th_pri">优先级</th><th data-i18n="th_dec">决策</th>
             </tr></thead>
             <tbody id="rows"></tbody>
           </table>
@@ -909,7 +902,7 @@ function switchChain(ch){
   curChain=ch;
   sessionStorage.setItem('aitrader_chain',ch);   // 本 tab 的链（多 tab 互不干扰）
   localStorage.setItem('aitrader_chain',ch);     // 顺便更新「新 tab 默认链」
-  document.getElementById('chainPill').textContent=CHAIN_LABEL[ch];
+  {const _cp=document.getElementById('chainPill');if(_cp)_cp.textContent=CHAIN_LABEL[ch];}
   buyAmount=loadBuyAmt(ch);
   const ai=document.getElementById('amtInput');if(ai)ai.value=buyAmount;
   updateAmtUnit();
@@ -1055,8 +1048,8 @@ document.getElementById('ic-pipecog').innerHTML=svg('cog');
 document.getElementById('pipeGear').onclick=openPipe;
 document.getElementById('tokFilter').innerHTML=svg('siren');
 document.getElementById('tokFilter').onclick=toggleOnlyHeld;
-document.getElementById('chainPillWrap').onclick=e=>{e.stopPropagation();if(e.target.closest('#chainMenu'))return;toggleChainMenu();};
-document.addEventListener('click',e=>{if(!e.target.closest('#chainPillWrap'))closeChainMenu();});
+/* селектор чейна удалён (SOL-only) — обёртки на случай старых вызовов */
+(function(){const w=document.getElementById('chainPillWrap');if(w){w.onclick=e=>{e.stopPropagation();if(e.target.closest('#chainMenu'))return;toggleChainMenu();};document.addEventListener('click',e=>{if(!e.target.closest('#chainPillWrap'))closeChainMenu();});}})();
 
 /* ── KPI ── */
 let cycles=1;
@@ -1093,9 +1086,9 @@ function renderRows(){
   const box=document.getElementById('rows');
   if(!rows.length){
     if(loadingScreen){
-      box.innerHTML=Array.from({length:6},()=>'<tr class="skelrow"><td colspan="12"><div class="skel-bar"></div></td></tr>').join('');
+      box.innerHTML=Array.from({length:6},()=>'<tr class="skelrow"><td colspan="9"><div class="skel-bar"></div></td></tr>').join('');
     }else{
-      box.innerHTML='<tr><td colspan="12" style="padding:26px;text-align:center;color:var(--dim2)">'+(onlyHeld?t('empty_onlyheld'):t('empty_none'))+'</td></tr>';
+      box.innerHTML='<tr><td colspan="9" style="padding:26px;text-align:center;color:var(--dim2)">'+(onlyHeld?t('empty_onlyheld'):t('empty_none'))+'</td></tr>';
     }
     return;
   }
@@ -1117,11 +1110,8 @@ function renderRows(){
     return `<tr data-i="${t._i}" class="${t._i===sel?'sel':''} ${t.status==='action'?'act':''}" style="--rc:${rc}">
       <td><span class="sym"><span class="tk" onclick="event.stopPropagation();copyTicker(this)" title="${t2('tk_copy_title')}">${t.sym}</span>${radar}${t.inj?`<span class="inj" data-tip="${t2('inj_tip')}">${t2('inj_label')}</span>`:''}${caCell(t)}</span></td>
       <td><div class="gates">${gates}</div></td>
-      <td><span class="m has-tip ${t.hp||!t.frz?'bad':!t.ren?'warn':''}" data-tip="${t2('safe_tip')}${t.rug>0.2?`　|　⚠ RUG-история дева: `+P(t.rug):``}">${t.hp?t2('safe_honeypot'):!t.frz?t2('safe_freeze'):t.ren?t2('safe_renounced'):t2('safe_not_renounced')}</span></td>
-      <td><span class="m ${t.bund>.30?'bad':''}">${P(t.bund)}</span></td>
-      <td><span class="m ${t.dev>.10?'bad':''}">${P(t.dev)}</span></td>
-      <td><span class="m ${t.top10>.40?'bad':''}">${P(t.top10)}</span></td>
-      <td><span class="m has-tip" data-tip="Liq ${fmtCap(t.liq)}${t.hv?`　|　холдеры ▲${t.hv}/мин`:``}">${fmtCap(t.mc)}${t.hv>=10?` <span style="color:var(--lime)">▲</span>`:``}</span></td>
+      <td><span class="m has-tip ${t.hp||!t.frz?'bad':(!t.ren||t.bund>.30||t.dev>.10||t.top10>.40)?'warn':''}" data-tip="${t2('safe_tip')}　|　Bundler ${P(t.bund)} · Dev ${P(t.dev)} · Top10 ${P(t.top10)}${t.rug>0.2?`　|　⚠ dev rug history `+P(t.rug):``}">${t.hp?t2('safe_honeypot'):!t.frz?t2('safe_freeze'):t.ren?t2('safe_renounced'):t2('safe_not_renounced')}</span></td>
+      <td><span class="m has-tip" data-tip="Liq ${fmtCap(t.liq)}${t.hv?`　|　holders ▲${t.hv}/min`:``}">${fmtCap(t.mc)}${t.hv>=10?` <span style="color:var(--lime)">▲</span>`:``}</span></td>
       <td><span class="m has-tip ${t.smc<1?'bad':''}" data-tip="${t2('smc_tip',t.degen,t.kol,t.smc)}${t.trkn&&t.trkn.length?'　|　★ '+t.trkn.join(', '):''}">${t.degen}/${t.kol}${t.kol>0?' <span class="kolb">👑</span>':''}${t.trk>0?` <span class="trkb has-tip" data-tip="${t2('trk_tip')}${t.trkn.join(', ')}">★${t.trk}</span>`:''}</span></td>
       <td><span class="m has-tip ${t.crowd==='late'?'bad':t.crowd==='crowded'?'warn':''}" data-tip="${t2('timing_label')+'　|　'+(I18N[lang]['crowdtip_'+t.crowd]?t2('crowdtip_'+t.crowd):t2('crowd_none_tip'))}">${I18N[lang]['crowd_'+t.crowd]?t2('crowd_'+t.crowd):t.crowd}</span></td>
       <td>${t.v==='-'?`<span class="has-tip" style="color:var(--dim2)" data-tip="${t2('llm_none_tip')}">—</span>`:`<span class="vd has-tip ${t.v}" data-tip="${t2('vd_tip',t.v.toUpperCase(),t2('llmtip_'+t.v)||'',(+t.conv).toFixed(2))}">${t.v.toUpperCase()}</span>`}</td>
@@ -1923,7 +1913,7 @@ async function autoConnect(){
   // localStorage 只作「新 tab 的默认链」种子。
   const savedChain=sessionStorage.getItem('aitrader_chain')||localStorage.getItem('aitrader_chain')||'sol';
   curChain=savedChain;
-  document.getElementById('chainPill').textContent=CHAIN_LABEL[curChain]||'SOL';
+  {const _cp=document.getElementById('chainPill');if(_cp)_cp.textContent=CHAIN_LABEL[curChain]||'SOL';}
   buyAmount=loadBuyAmt(curChain);
   const ai=document.getElementById('amtInput');if(ai)ai.value=buyAmount;
   updateAmtUnit();
@@ -1935,7 +1925,7 @@ async function autoConnect(){
       // 公开只读演示：后端定时广播真实筛选缓存。锁定 UI 为只读，链跟随后端。
       document.body.classList.add('publicro');
       document.getElementById('publicBar').classList.add('on');
-      if(d.chain&&d.chain!==curChain){curChain=d.chain;document.getElementById('chainPill').textContent=CHAIN_LABEL[curChain]||'SOL';}
+      if(d.chain&&d.chain!==curChain){curChain=d.chain;{const _cp=document.getElementById('chainPill');if(_cp)_cp.textContent=CHAIN_LABEL[curChain]||'SOL';}}
       setSource('backend');
       return;
     }
