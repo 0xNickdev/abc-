@@ -59,7 +59,9 @@ import wallets  # 私有 smart-money 跟踪钱包（信号，非跟单）
 random.seed(7)
 HERE = pathlib.Path(__file__).resolve().parent
 STATIC_DIR = HERE / "static"
-OUT_DIR = HERE / "outputs"
+# OUT_DIR можно вынести на постоянный диск (Railway Volume): ABC_DATA_DIR=/data →
+# журнал/позиции/фильтры переживут перезапуск контейнера (эфемерная ФС иначе стирает).
+OUT_DIR = pathlib.Path(os.getenv("ABC_DATA_DIR").strip()) if os.getenv("ABC_DATA_DIR", "").strip() else HERE / "outputs"
 LOG_PATH = OUT_DIR / "trade_decisions.jsonl"
 POSITIONS_PATH = OUT_DIR / "positions.json"   # 持仓落盘：reload/重启不丢，与筛选榜完全独立
 TRENDING_CMDS_PATH = OUT_DIR / "trending_cmds.json"   # 按链热榜命令落盘：用户改过即持久，重启/刷新不回默认
@@ -1524,6 +1526,16 @@ async def _lifespan(_app: FastAPI):
     # 公开演示模式：启动后台守护线程定时刷新真实筛选缓存（仅此线程触发 CLI）。
     if PUBLIC_DEMO:
         threading.Thread(target=_public_broadcast_loop, daemon=True).start()
+    # Автозапуск бота после рестарта контейнера: BOT_AUTOSTART=n2|n3 (default-сессия).
+    # Вместе с ABC_DATA_DIR (Volume) даёт непрерывный бумажный прогон, переживающий перезапуски.
+    _auto = os.getenv("BOT_AUTOSTART", "").strip().lower()
+    if _auto in ("n1", "n2", "n3"):
+        ST.bot.cfg["mode"] = _auto
+        ST.bot.start("sol", screen_fn=lambda c: screen_once(c, ST),
+                     buy_fn=_bot_buy_fn(ST), sell_fn=_bot_sell_fn(ST),
+                     positions_fn=lambda: ST.positions, risk_cfg=CFG, lock=ST.lock,
+                     halted_fn=lambda: ST.risk.halted or ST.risk.realized_loss_today >= CFG["daily_loss_cap_sol"])
+        log("BOT", "ABC", f"автозапуск режим {_auto} (BOT_AUTOSTART)", mode=ST.mode)
     yield
 
 app = FastAPI(title="GMGN AI Trader (local)", lifespan=_lifespan)
