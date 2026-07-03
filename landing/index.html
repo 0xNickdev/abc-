@@ -606,11 +606,12 @@ addEventListener('keydown',e=>{if(e.key==='Escape'){closeOb();closeBuy()}});
 set('playbtn','<span style="display:inline-flex;align-items:center;gap:8px">'+ic.play+' See how it works</span>');
 
 /* ── terminal ── */
-/* Backend: ?backend=https://... в URL или localStorage abc_backend; по умолчанию локальный */
-const TERMINAL_URL=(new URLSearchParams(location.search).get('backend'))||localStorage.getItem('abc_backend')||'http://127.0.0.1:8000';
+/* Backend: ?backend=https://... в URL или localStorage abc_backend; по умолчанию — прод (Railway).
+   Локальная разработка: открой лендинг с ?backend=http://127.0.0.1:8000 */
+const TERMINAL_URL=(new URLSearchParams(location.search).get('backend'))||localStorage.getItem('abc_backend')||'https://web-production-69924.up.railway.app';
 if(new URLSearchParams(location.search).get('backend'))localStorage.setItem('abc_backend',TERMINAL_URL);
 async function launch(){
-  try{const c=new AbortController();setTimeout(()=>c.abort(),900);
+  try{const c=new AbortController();setTimeout(()=>c.abort(),3500);   // Railway может холодно стартовать
     const r=await fetch(TERMINAL_URL+'/api/status',{signal:c.signal});
     if(r.ok){location.href=TERMINAL_URL;return;}   // real engine up → go to live terminal
   }catch(e){}
