@@ -970,14 +970,14 @@ def assess_escape(cur_sec: dict, entry: dict):
     """
     sev, sigs = 0, []
     if cur_sec.get("honeypot") and not entry.get("honeypot"):
-        sev += 60; sigs.append(("honeypot 标记新触发 ← 逃生信号", True))
+        sev += 60; sigs.append(("Honeypot flag newly triggered — escape signal", True))
     if entry.get("renounced_mint") and not cur_sec.get("renounced_mint"):
-        sev += 55; sigs.append(("增发权疑似找回（可砸盘）← 逃生信号", True))
+        sev += 55; sigs.append(("Mint authority possibly reclaimed (dump risk) — escape signal", True))
     # top10 跨源（建仓 token security vs 监控 trending 行）有波动，阈值放宽到 +15% 减少误报
     if cur_sec.get("top10", 0) > entry.get("top10", 0) + 0.15:
-        sev += 22; sigs.append((f"top10 集中度升至 {cur_sec.get('top10',0):.0%}", cur_sec.get("top10",0) > 0.5))
+        sev += 22; sigs.append((f"Top-10 concentration rose to {cur_sec.get('top10',0):.0%}", cur_sec.get("top10",0) > 0.5))
     if not sigs:
-        sigs.append(("持仓正常监控中", False))
+        sigs.append(("Position stable — monitoring", False))
     return min(100, sev), sigs
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1333,7 +1333,7 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
         abc["strategy"] = strategy.get(s.strategy_id)["name"]
         decisions.append(dict(
             decision=dict(symbol=f.symbol_safe, address=f.address, action="ACTION",
-                          reason="通过全部闸门 · 待决策", size_sol=size, risk_warn=(not allow),
+                          reason="Passed all gates · your call", size_sol=size, risk_warn=(not allow),
                           verdict=asdict(v), features=_feat(f), priority=pri, abc=abc),
             exec=exit_plan()))
         # 落特征快照 + abc 信号，喂回测纸面复盘（backtest.paper 读 features）；保持反馈飞轮闭环。
@@ -1430,7 +1430,7 @@ def monitor_positions(chain: str, rows_by_addr: dict | None = None,
                 except Exception as e:
                     out.append(dict(symbol=p["symbol"], address=p["address"], size_sol=p["size_sol"],
                                     pnl=p.get("pnl", 0), severity=0,
-                                    signals=[dict(t=f"监控查询失败：{e}", hot=False)]))
+                                    signals=[dict(t=f"Monitor query failed: {e}", hot=False)]))
                     continue
             severity, sigs = assess_escape(cur_sec, p["entry"])
             ep = p.get("entry_price", 0.0)
@@ -1521,10 +1521,10 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         if status in ("failed", "expired"):          # 明确未成交 → 不记仓、回清晰错误
             log("BUY_FAIL", symbol, f"swap {status} {h}")
             raise HTTPException(502, f"链上买入未成交（{status}）" + (f" · {h}" if h else ""))
-        status_msg = ("已成交" if filled else "已提交·待确认") + (f" · {h}" if h else "")
+        status_msg = ("Filled" if filled else "Submitted · pending") + (f" · {h}" if h else "")
     else:
         filled = False
-        status_msg = "SHADOW（未真实发送，需切 LIVE + 配签名密钥）"
+        status_msg = "SHADOW (not sent on-chain — switch to LIVE + signing key)"
 
     s.positions.append(dict(symbol=symbol, address=address, size_sol=round(size_sol, 4),
                             pnl=0.0, cycles=0, entry=entry, chain=chain,
