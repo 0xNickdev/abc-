@@ -516,6 +516,7 @@ def _mu_client(tmp_path, monkeypatch):
     """Изолированный клиент: все пути на tmp, реестр сессий чистый, ST пересоздан."""
     from fastapi.testclient import TestClient
     monkeypatch.setattr(appmod, "PUBLIC_DEMO", False)
+    monkeypatch.setattr(appmod, "OUT_DIR", tmp_path)
     monkeypatch.setattr(appmod, "FILTERS_PATH", tmp_path / "filters.json")
     monkeypatch.setattr(appmod, "POSITIONS_PATH", tmp_path / "positions.json")
     monkeypatch.setattr(appmod, "LOG_PATH", tmp_path / "trade_decisions.jsonl")
@@ -678,3 +679,108 @@ class TestChainAwareGates:
     def test_tax_gate_default_behavior_unchanged(self):
         ok, _, _ = appmod.hard_gates(feat(buy_tax=0.5))   # без chain — как раньше
         assert ok is False
+
+
+# ── Этап 5: вход подписью кошелька, non-custodial tx, Twitter/KOL ──
+def _wallet_auth(client):
+    """Сгенерировать ed25519-ключ, пройти challenge/verify → (pubkey, headers)."""
+    import base64 as b64
+
+    import base58
+    from nacl.signing import SigningKey
+    sk = SigningKey.generate()
+    pk = base58.b58encode(bytes(sk.verify_key)).decode()
+    msg = client.post("/api/auth/challenge", json={"pubkey": pk}).json()["message"]
+    sig = b64.b64encode(sk.sign(msg.encode()).signature).decode()
+    tok = client.post("/api/auth/verify", json={"pubkey": pk, "signature": sig}).json()["token"]
+    return pk, {"X-Wallet": pk, "X-Auth": tok}
+
+
+class TestWalletAuth:
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        return _mu_client(tmp_path, monkeypatch)
+
+    def test_challenge_verify_issues_token(self, client):
+        pk, headers = _wallet_auth(client)
+        assert headers["X-Auth"]
+        # nonce одноразовый: повторный verify с той же подписью → 400
+        import base64 as b64
+        r = client.post("/api/auth/verify", json={"pubkey": pk,
+                        "signature": b64.b64encode(b"x" * 64).decode()})
+        assert r.status_code == 400
+
+    def test_bad_signature_rejected(self, client):
+        import base64 as b64
+
+        import base58
+        from nacl.signing import SigningKey
+        pk = base58.b58encode(bytes(SigningKey.generate().verify_key)).decode()
+        client.post("/api/auth/challenge", json={"pubkey": pk})
+        r = client.post("/api/auth/verify", json={"pubkey": pk,
+                        "signature": b64.b64encode(b"y" * 64).decode()})
+        assert r.status_code == 401
+
+    def test_twitter_secret_requires_auth_for_wallet(self, client):
+        r = client.post("/api/twitter/config", json={"enabled": True, "bearer": "T"},
+                        headers={"X-Wallet": "SomeRandomPk"})
+        assert r.status_code == 401                      # без входа подписью — нельзя
+        _, headers = _wallet_auth(client)
+        r2 = client.post("/api/twitter/config", json={"enabled": True, "bearer": "T"},
+                         headers=headers)
+        assert r2.status_code == 200 and r2.json()["has_key"] is True
+
+    def test_twitter_local_session_and_key_hidden(self, client):
+        assert client.post("/api/twitter/config",
+                           json={"enabled": True, "bearer": "tok123"}).status_code == 200
+        g = client.get("/api/twitter/config").json()
+        assert g == {"enabled": True, "has_key": True}   # сам bearer наружу не уходит
+
+    def test_kol_check_needs_enabled_then_uses_module(self, client, monkeypatch):
+        assert client.get("/api/kol/check?address=CA1").status_code == 400
+        client.post("/api/twitter/config", json={"enabled": True, "bearer": "tok"})
+        monkeypatch.setattr(appmod.kol, "mentions",
+                            lambda ca, bearer: dict(ok=True, count=2, authors=[], cached=False))
+        d = client.get("/api/kol/check?address=CA1").json()
+        assert d["ok"] is True and d["count"] == 2
+
+
+class TestTxEndpoints:
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        return _mu_client(tmp_path, monkeypatch)
+
+    def test_build_requires_wallet_then_auth(self, client):
+        r = client.post("/api/tx/build", json={"address": "A", "side": "buy", "size_sol": 0.1})
+        assert r.status_code == 400                       # локальная сессия — только с кошельком
+        r = client.post("/api/tx/build", json={"address": "A", "side": "buy", "size_sol": 0.1},
+                        headers={"X-Wallet": "PkNoAuth"})
+        assert r.status_code == 401                       # кошелёк без входа подписью
+
+    def test_build_buy_capped_and_returns_tx(self, client, monkeypatch):
+        _, headers = _wallet_auth(client)
+        r = client.post("/api/tx/build", json={"address": "A", "side": "buy", "size_sol": 99},
+                        headers=headers)
+        assert r.status_code == 400                       # больше max_per_trade_sol
+        monkeypatch.setattr(appmod.execution, "build_buy",
+                            lambda pk, ca, sz, sl: dict(tx="dGVzdA==", out_amount=777,
+                                                        price_impact=0.01))
+        d = client.post("/api/tx/build", json={"address": "A", "side": "buy", "size_sol": 0.1},
+                        headers=headers).json()
+        assert d["tx"] == "dGVzdA==" and d["out_amount"] == 777
+
+    def test_confirm_buy_then_sell_roundtrip(self, client):
+        pk, headers = _wallet_auth(client)
+        addr = "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        r = client.post("/api/tx/confirm", json={
+            "address": addr, "side": "buy", "size_sol": 0.1,
+            "token_amount": 777, "signature": "SIGSIGSIG", "symbol": "CLEANCAT"},
+            headers=headers)
+        assert r.status_code == 200
+        pos = client.get("/api/positions", headers=headers).json()["positions"]
+        assert len(pos) == 1 and pos[0]["self_custody"] is True
+        r2 = client.post("/api/tx/confirm", json={
+            "address": addr, "side": "sell", "fraction": 1.0, "signature": "SIG2"},
+            headers=headers)
+        assert r2.status_code == 200 and r2.json()["closed"] is True
+        assert client.get("/api/positions", headers=headers).json()["positions"] == []

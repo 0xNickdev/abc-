@@ -24,6 +24,7 @@ app.py — GMGN AI Trader 本地后端 (FastAPI)
 
 from __future__ import annotations
 
+import base64
 import datetime
 import hashlib
 import json
@@ -32,6 +33,7 @@ import os
 import pathlib
 import random
 import re
+import secrets
 import shlex
 import subprocess
 import threading
@@ -47,6 +49,8 @@ from pydantic import BaseModel
 
 import backtest  # 纸面/SHADOW 回测复盘（已实现 PnL/胜率/R）
 import bot  # 自主执行回路（量化机器人，纸面优先）
+import execution  # non-custodial：服务器只构建 tx，签名在浏览器（Phantom）
+import kol  # Twitter/X KOL 信号（per-user opt-in）
 import strategy  # ABC Alpha v1：具名策略预设 + 入场信号评估
 import wallets  # 私有 smart-money 跟踪钱包（信号，非跟单）
 
@@ -354,6 +358,31 @@ def save_user_strategy(pubkey: str, sid: str):
     try:
         p = _strategy_path(pubkey); p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(dict(id=sid)))
+    except Exception:
+        pass
+
+def _twitter_path(pubkey: str) -> pathlib.Path:
+    if pubkey == DEFAULT_PUBKEY:
+        return OUT_DIR / "twitter.json"
+    return _user_dir(pubkey) / "twitter.json"
+
+def load_user_twitter(pubkey: str) -> dict:
+    p = _twitter_path(pubkey)
+    if p.exists():
+        try:
+            d = json.loads(p.read_text())
+            if isinstance(d, dict):
+                return dict(enabled=bool(d.get("enabled")), bearer=str(d.get("bearer", "")))
+        except Exception:
+            pass
+    return dict(enabled=False, bearer="")
+
+def save_user_twitter(pubkey: str, cfg: dict):
+    try:
+        p = _twitter_path(pubkey); p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(dict(enabled=bool(cfg.get("enabled")),
+                                     bearer=str(cfg.get("bearer", "")))))
+        os.chmod(p, 0o600)      # токен — секрет юзера: только владелец файла
     except Exception:
         pass
 
@@ -1018,6 +1047,8 @@ class UserSession:
         self.filters = load_filters() if self._default else load_user_filters(pubkey)
         self.positions = load_positions() if self._default else load_user_positions(pubkey)
         self.strategy_id = load_user_strategy(pubkey)   # 选定策略（落盘，重启不丢）
+        self.twitter = load_user_twitter(pubkey)        # per-user Twitter KOL（opt-in）
+        self.auth_token = None                          # sign-in-with-wallet 会话令牌（内存态）
 
     # ── 市场层委托（保持旧 ST.* 调用兼容；全部走共享 MK）──
     @property
@@ -1283,6 +1314,7 @@ def monitor_positions(chain: str, rows_by_addr: dict | None = None,
         out.append(dict(symbol=p["symbol"], address=p["address"], size_sol=p["size_sol"],
                         pnl=p.get("pnl", 0), entry_price=p.get("entry_price", 0.0),
                         cur_price=p.get("cur_price", 0.0), severity=severity,
+                        self_custody=p.get("self_custody", False),
                         signals=[dict(t=s[0], hot=s[1]) for s in sigs]))
     return out
 
@@ -1381,7 +1413,8 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
     frac = max(0.0, min(1.0, float(fraction)))
     full = frac >= 0.999
     pct = 100 if full else max(1, int(round(frac * 100)))
-    if s.mode == "LIVE" and not LIVE_TRADING_DISABLED:
+    # self_custody-позиции исполняются в Phantom (см. /api/tx/*) — GMGN-swap оператора не трогаем
+    if s.mode == "LIVE" and not LIVE_TRADING_DISABLED and not p.get("self_custody"):
         g = s.adapter_for(pchain)
         # 清仓：input=持仓币(非 currency，可用 percent)，output=该链原生币，percent 按比例。
         try:
@@ -1481,8 +1514,61 @@ def _block_if_not_admin():
         raise HTTPException(403, "凭据由服务器管理，用户无需也无权配置")
 
 # 多用户：前端连上钱包后在每个请求带 X-Wallet: <pubkey>；不带 → 默认会话(local)。
-# ⚠️ 仅为「状态分区」，非鉴权（见 UserSession 注释）；签名鉴权随 Stage 5 一起加。
+# 读接口仍只按 pubkey 分区；【секреты и построение tx】дополнительно требуют X-Auth —
+# токен, выданный после проверки ed25519-подписи кошелька (sign-in-with-wallet, ниже).
 WalletHeader = Header(default=None, alias="X-Wallet")
+AuthHeader = Header(default=None, alias="X-Auth")
+
+# ── Sign-in-with-wallet: challenge → браузер подписывает (Phantom signMessage) →
+#    сервер проверяет ed25519-подпись против pubkey → выдаёт токен сессии (в памяти).
+AUTH_CHALLENGE_TTL = 300.0
+_auth_challenges: dict[str, tuple[str, float]] = {}   # pubkey -> (nonce, monotonic_deadline)
+
+def _auth_message(pubkey: str, nonce: str) -> str:
+    return f"ABC terminal sign-in\nwallet: {pubkey}\nnonce: {nonce}"
+
+def require_auth(sess: UserSession, x_auth: str | None):
+    """Секреты/деньги: локальная сессия (без кошелька, 127.0.0.1) не требует токена;
+    сессия кошелька — только с валидным X-Auth (иначе любой, кто знает pubkey, читал бы чужое)."""
+    if sess.pubkey == DEFAULT_PUBKEY:
+        return
+    if not x_auth or x_auth != sess.auth_token:
+        raise HTTPException(401, "нужен вход подписью кошелька (X-Auth)")
+
+class AuthChallengeIn(BaseModel):
+    pubkey: str
+
+class AuthVerifyIn(BaseModel):
+    pubkey: str
+    signature: str      # base64 от 64-байтовой ed25519-подписи сообщения challenge
+
+@app.post("/api/auth/challenge")
+def api_auth_challenge(a: AuthChallengeIn):
+    pk = (a.pubkey or "").strip()
+    if not pk:
+        raise HTTPException(400, "пустой pubkey")
+    nonce = secrets.token_urlsafe(24)
+    _auth_challenges[pk] = (nonce, time.monotonic() + AUTH_CHALLENGE_TTL)
+    return dict(ok=True, message=_auth_message(pk, nonce))
+
+@app.post("/api/auth/verify")
+def api_auth_verify(a: AuthVerifyIn):
+    import base58  # локальный импорт: криптозависимости нужны только auth
+    from nacl.exceptions import BadSignatureError
+    from nacl.signing import VerifyKey
+    pk = (a.pubkey or "").strip()
+    ch = _auth_challenges.get(pk)
+    if not ch or time.monotonic() > ch[1]:
+        raise HTTPException(400, "challenge не найден или истёк — запроси заново")
+    try:
+        VerifyKey(base58.b58decode(pk)).verify(
+            _auth_message(pk, ch[0]).encode(), base64.b64decode(a.signature))
+    except (BadSignatureError, ValueError, TypeError):
+        raise HTTPException(401, "подпись не сошлась")
+    _auth_challenges.pop(pk, None)      # одноразовый nonce
+    sess = get_session(pk)
+    sess.auth_token = secrets.token_urlsafe(32)
+    return dict(ok=True, token=sess.auth_token)
 
 @app.get("/api/status")
 def api_status(x_wallet: str | None = WalletHeader):
@@ -1747,6 +1833,120 @@ def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader):
     with sess.lock:
         sess.bot.cfg.update(patch)
     return dict(ok=True, cfg=dict(sess.bot.cfg))
+
+# ── Этап 5: non-custodial исполнение (Jupiter build → Phantom sign) ──
+class TxBuildIn(BaseModel):
+    address: str
+    side: str = "buy"            # buy | sell
+    size_sol: float = 0.0        # для buy
+    fraction: float = 1.0        # для sell
+    slippage_bps: int = 100
+
+class TxConfirmIn(BaseModel):
+    address: str
+    side: str = "buy"
+    size_sol: float = 0.0
+    fraction: float = 1.0        # для sell
+    token_amount: int = 0        # сырой объём токена из quote (для будущей продажи)
+    signature: str = ""          # tx-хэш из Phantom
+    symbol: str = ""
+
+@app.post("/api/tx/build")
+def api_tx_build(r: TxBuildIn, x_wallet: str | None = WalletHeader,
+                 x_auth: str | None = AuthHeader):
+    """Построить неподписанную swap-tx (Jupiter). Только для сессии кошелька + после auth.
+    Сервер зажимает размер и слиппедж; подписывает и отправляет — сам юзер в Phantom."""
+    _block_if_public()
+    sess = get_session(x_wallet)
+    if sess.pubkey == DEFAULT_PUBKEY:
+        raise HTTPException(400, "подключи кошелёк (Phantom) — локальная сессия не строит tx")
+    require_auth(sess, x_auth)
+    slippage = max(10, min(500, int(r.slippage_bps)))     # 0.1%..5%
+    try:
+        if r.side == "buy":
+            if not (0 < r.size_sol <= CFG["max_per_trade_sol"]):
+                raise HTTPException(400, f"размер 0–{CFG['max_per_trade_sol']} SOL")
+            out = execution.build_buy(sess.pubkey, r.address, r.size_sol, slippage)
+        else:
+            pos = next((p for p in sess.positions if p["address"] == r.address), None)
+            out = execution.build_sell(sess.pubkey, r.address, r.fraction,
+                                       token_amount=int((pos or {}).get("token_amount", 0)),
+                                       slippage_bps=slippage)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"построение tx: {e}")
+    return dict(ok=True, side=r.side, **out)
+
+@app.post("/api/tx/confirm")
+def api_tx_confirm(c: TxConfirmIn, x_wallet: str | None = WalletHeader,
+                   x_auth: str | None = AuthHeader):
+    """Записать исполненную в Phantom сделку в позиции/риск/журнал (деньги уже ушли on-chain,
+    поэтому риск-гейт здесь не блокирует — он отработал на этапе build/UI)."""
+    _block_if_public()
+    sess = get_session(x_wallet)
+    if sess.pubkey == DEFAULT_PUBKEY:
+        raise HTTPException(400, "подключи кошелёк")
+    require_auth(sess, x_auth)
+    tag = f"tx {c.signature[:16]}…" if c.signature else "tx ?"
+    with sess.lock:
+        if c.side == "buy":
+            g = MK.adapter_for("sol")
+            try:
+                info = g.token_info(c.address); sec = g.token_security(c.address)
+                symbol = sanitize(info.get("symbol", "")); price = g.token_price(c.address)
+            except Exception:
+                symbol, sec, price = sanitize(c.symbol or c.address[:6]), {}, 0.0
+            entry = dict(honeypot=sec.get("honeypot", False),
+                         renounced_mint=sec.get("renounced_mint", True),
+                         renounced_freeze=sec.get("renounced_freeze", True),
+                         burn_ratio=sec.get("burn_ratio", 0.0), top10=sec.get("top10", 0.0))
+            sess.positions.append(dict(
+                symbol=symbol, address=c.address, size_sol=round(c.size_sol, 4),
+                pnl=0.0, cycles=0, entry=entry, chain="sol", entry_price=price,
+                cur_price=price, token_amount=int(c.token_amount), self_custody=True,
+                wallet_tx=c.signature))
+            sess.save_positions()
+            log("BUY", symbol, f"PHANTOM исполнено {c.size_sol} SOL · {tag}",
+                dict(size_sol=c.size_sol, chain="sol", self_custody=True), mode="LIVE")
+            return dict(ok=True, symbol=symbol)
+        # sell: учёт как при бумажном do_sell, но с реальным хэшем в журнале
+        return do_sell(c.address, fraction=c.fraction, reason=f"PHANTOM {tag}", s=sess)
+
+# ── Twitter/X KOL: per-user opt-in (свой Bearer-токен, свои лимиты) ──
+class TwitterCfgIn(BaseModel):
+    enabled: bool = False
+    bearer: str = ""             # пусто = не менять сохранённый
+
+@app.get("/api/twitter/config")
+def api_twitter_get(x_wallet: str | None = WalletHeader):
+    sess = get_session(x_wallet)
+    return dict(enabled=sess.twitter.get("enabled", False),
+                has_key=bool(sess.twitter.get("bearer")))   # сам токен наружу не отдаём
+
+@app.post("/api/twitter/config")
+def api_twitter_set(cfg: TwitterCfgIn, x_wallet: str | None = WalletHeader,
+                    x_auth: str | None = AuthHeader):
+    _block_if_public()
+    sess = get_session(x_wallet)
+    require_auth(sess, x_auth)      # секрет юзера: писать только после входа подписью
+    with sess.lock:
+        sess.twitter["enabled"] = bool(cfg.enabled)
+        if cfg.bearer.strip():
+            sess.twitter["bearer"] = cfg.bearer.strip()
+        save_user_twitter(sess.pubkey, sess.twitter)
+    return dict(ok=True, enabled=sess.twitter["enabled"], has_key=bool(sess.twitter["bearer"]))
+
+@app.get("/api/kol/check")
+def api_kol_check(address: str, x_wallet: str | None = WalletHeader):
+    """Свежие упоминания CA в X + топ-авторы. Только по кнопке (квота юзера), кэш 5 мин."""
+    sess = get_session(x_wallet)
+    if not (sess.twitter.get("enabled") and sess.twitter.get("bearer")):
+        raise HTTPException(400, "Twitter не подключён — включи во вкладке KOL/X настроек")
+    try:
+        return kol.mentions(address.strip(), sess.twitter["bearer"])
+    except Exception as e:
+        raise HTTPException(502, f"Twitter API: {e}")
 
 # 静态前端（同源，避免 CORS）。把上一版 dashboard 存为 static/index.html
 if STATIC_DIR.exists():

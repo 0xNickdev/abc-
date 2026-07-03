@@ -293,6 +293,8 @@ td{padding:5px 10px;vertical-align:middle}
 <div class="grain"></div>
 <div class="app">
 
+  <!-- web3.js только для десериализации/подписи tx в Phantom (этап 5, non-custodial) -->
+  <script src="https://unpkg.com/@solana/web3.js@1.95.8/lib/index.iife.min.js"></script>
   <div class="demobar" id="demoBar" data-i18n="demobar"></div>
   <div class="demobar publicbar" id="publicBar" data-i18n="publicbar"></div>
 
@@ -398,6 +400,7 @@ td{padding:5px 10px;vertical-align:middle}
         <button class="mtab" data-tab="filters" onclick="pipeTab('filters')" data-i18n="tab_filters">过滤器</button>
         <button class="mtab" data-tab="strategy" onclick="pipeTab('strategy')" data-i18n="tab_strategy">策略</button>
         <button class="mtab" data-tab="bot" onclick="pipeTab('bot')" data-i18n="tab_bot">机器人</button>
+        <button class="mtab" data-tab="kol" onclick="pipeTab('kol')" data-i18n="tab_kol">KOL/𝕏</button>
       </div>
       <div class="tabpane on" id="tab_scan">
       <div class="fld"><label data-i18n="pipe_cmd_label">GMGN-CLI 热榜命令</label><textarea id="trendCmd" rows="3" placeholder="gmgn-cli market trending ..." autocomplete="off" spellcheck="false"></textarea><div class="hint" data-i18n="pipe_cmd_hint">每轮扫描执行的完整命令；须以 <code>gmgn-cli market trending</code> 开头，自动补 <code>--raw</code>。改 --limit / --interval / --order-by / --filter / --chain 即可。</div></div>
@@ -408,6 +411,7 @@ td{padding:5px 10px;vertical-align:middle}
       </div>
       <div class="tabpane" id="tab_strategy"><div id="stratCards"></div></div>
       <div class="tabpane" id="tab_bot"><div id="botPane"></div></div>
+      <div class="tabpane" id="tab_kol"><div id="kolPane"></div></div>
       <div class="mwarn" data-i18n="pipe_mwarn">⚠ 命令在你本机后端执行（127.0.0.1），仅限热榜命令。保存后立即生效：命令下一轮起用，间隔即时重设。</div>
     </div>
     <div class="mfoot"><button class="mbtn" onclick="savePipe()" data-i18n="pipe_save">保存并立即生效</button><button class="mbtn ghost" onclick="resetPipeCmd()" data-i18n="pipe_reset">恢复默认命令</button><button class="mbtn ghost" onclick="closePipe()" data-i18n="btn_close">关闭</button><span class="savestate" id="pipeState"></span></div>
@@ -426,8 +430,9 @@ td{padding:5px 10px;vertical-align:middle}
       <div class="exitplan" id="buyExit"></div>
       <div class="mwarn" id="buyRiskWarn" style="display:none"></div>
       <div class="mwarn" id="buyModeNote"></div>
+      <div class="fld" id="kolWrap" style="display:none"><button class="mbtn ghost" onclick="kolCheck()" id="kolBtn">𝕏</button><div class="hint" id="kolRes"></div></div>
     </div>
-    <div class="mfoot"><button class="mbtn" id="buyConfirm" onclick="doBuy()" data-i18n="buy_confirm">确认买入</button><button class="mbtn ghost" onclick="closeBuy()" data-i18n="btn_cancel">取消</button><span class="savestate" id="buyState"></span></div>
+    <div class="mfoot"><button class="mbtn" id="buyConfirm" onclick="doBuy()" data-i18n="buy_confirm">确认买入</button><button class="mbtn" id="buyPhantom" onclick="phantomBuy()" style="display:none">⚡ Phantom</button><button class="mbtn ghost" onclick="closeBuy()" data-i18n="btn_cancel">取消</button><span class="savestate" id="buyState"></span></div>
   </div>
 </div>
 
@@ -535,6 +540,13 @@ const I18N={
     bot_stats:(t,b,s,bl)=>`轮次 ${t} · 买 ${b} · 卖 ${s} · 风控拦截 ${bl}`,
     bot_f_max_new_per_tick:'每轮最多新开仓', bot_f_poll_s:'轮询间隔(秒)', bot_f_escape_severity_exit:'逃生严重度≥即清仓',
     bot_f_trail_activate_pct:'浮盈≥启用移动止盈', bot_f_require_abc_trigger:'仅策略触发才建仓',
+    auth_need_wallet:'请先连接 Phantom 钱包', ph_buy:'用自己钱包买', ph_sell:'钱包卖出', ph_sell_title:'通过 Phantom 签名卖出（非托管）',
+    ph_building:'构建交易…', ph_signing:'在 Phantom 里签名…',
+    ph_sent:(s,x)=>`${s} 交易已发送 · ${x}…`, ph_fail:m=>`交易失败：${m}`,
+    tab_kol:'KOL/𝕏', tw_enable:'启用 Twitter KOL 信号（用你自己的 API token）',
+    tw_key_saved:'已保存（留空则不变）', tw_save:'保存', tw_saved:'Twitter 设置已保存',
+    tw_hint:'各用户各自的 token · 各自的配额。需要支持 recent search 的套餐（Basic 及以上）。токен хранится только на этом сервере (chmod 600)。',
+    kol_btn:'查 KOL 提及', kol_res:n=>`${n} 条提及 · 大V：`, kol_none:'最近没有提及',
     ca_open_title:(addr)=>`${addr}（点击在 GMGN 打开）`,
     age_title:'创建至今', age_title_fresh:'创建至今 · 1h 内新币',
     empty_onlyheld:'当前无持仓的币在筛选结果中',
@@ -699,6 +711,13 @@ const I18N={
     bot_stats:(t,b,s,bl)=>`ticks ${t} · buys ${b} · sells ${s} · risk-blocked ${bl}`,
     bot_f_max_new_per_tick:'Max new entries/tick', bot_f_poll_s:'Poll interval (s)', bot_f_escape_severity_exit:'Exit at escape severity ≥',
     bot_f_trail_activate_pct:'Trailing activates at PnL ≥', bot_f_require_abc_trigger:'Only strategy-triggered entries',
+    auth_need_wallet:'Connect Phantom wallet first', ph_buy:'Buy with my wallet', ph_sell:'Wallet sell', ph_sell_title:'Sell via Phantom signature (non-custodial)',
+    ph_building:'Building transaction…', ph_signing:'Sign in Phantom…',
+    ph_sent:(s,x)=>`${s} tx sent · ${x}…`, ph_fail:m=>`Transaction failed: ${m}`,
+    tab_kol:'KOL/𝕏', tw_enable:'Enable Twitter KOL signal (your own API token)',
+    tw_key_saved:'saved (leave empty to keep)', tw_save:'Save', tw_saved:'Twitter settings saved',
+    tw_hint:'Each user brings their own token & quota. Needs a tier with recent search (Basic+). Token is stored only on this server (chmod 600).',
+    kol_btn:'check KOL mentions', kol_res:n=>`${n} mentions · top authors: `, kol_none:'no recent mentions',
     ca_open_title:(addr)=>`${addr} (click to open on GMGN)`,
     age_title:'Age since creation', age_title_fresh:'Age since creation · new within 1h',
     empty_onlyheld:'No held tokens are in the current results',
@@ -970,6 +989,7 @@ function normalize(data){
   const risk={open:p.open_positions??1,openMax:p.max_concurrent??2,expo:p.total_exposure??0,expoMax:p.max_total_exposure??1,
     loss:p.realized_loss_today??0,lossMax:p.daily_loss_cap??0.5,consec:p.consec_losses??0,consecMax:p.kill_switch_consec??3,killed:p.kill_switch??false};
   const positions=(data.positions||[]).map(q=>({sym:q.symbol||q.sym,addr:(q.address||'').slice(0,8)+'…',address:q.address,
+    selfc:!!q.self_custody,
     size:q.size_sol||q.size||0,pnl:q.pnl||0,severity:q.severity||0,escaping:(q.severity||0)>=70,
     price:q.cur_price||0,entryPrice:q.entry_price||0,
     sigs:(q.signals||[]).map(s=>typeof s==='string'?{t:s,hot:false}:s)}));
@@ -1103,6 +1123,7 @@ function renderPositions(){
     return `<div class="pos ${acls}">
       <div class="top"><div><span class="ps">${p.sym}</span>${caCell(p)}${p.price?`<small class="px">${t('pos_price',fmtPrice(p.price),fmtPrice(p.entryPrice))}</small>`:''}</div>
         <span class="pnl ${p.pnl>=0?'up':'dn'}">${p.pnl>=0?'+':''}${(p.pnl*100).toFixed(1)}%</span>
+        ${p.selfc?`<button class="escbtn" title="${t('ph_sell_title')}" onclick="phantomSell(${i})">⚡ ${t('ph_sell')}</button>`:''}
         <button class="escbtn" onclick="escape_(${i})">${svg('door')}${p.escaping?t('escbtn_now'):t('escbtn')}</button>
         <button class="xbtn" title="${t('unmon_btn_title')}" onclick="unmonitor_(${i})">×</button></div>
       <div class="sev"><div class="b"><i class="${hot?'hot':''}" style="width:${p.severity}%"></i></div><span class="lv" style="${hot?'color:var(--clay)':''}">${sevLevel(p.severity)} ${p.severity}</span></div>
@@ -1227,13 +1248,44 @@ let walletPubkey=null;
 const _rawFetch=window.fetch.bind(window);
 window.fetch=function(url,opts){
   if(walletPubkey&&typeof url==='string'&&url.indexOf(API+'/api/')===0){
-    opts=opts||{};opts.headers=Object.assign({},opts.headers||{},{'X-Wallet':walletPubkey});
+    opts=opts||{};const h={'X-Wallet':walletPubkey};
+    if(authToken)h['X-Auth']=authToken;
+    opts.headers=Object.assign({},opts.headers||{},h);
   }
   return _rawFetch(url,opts);
 };
+/* ── sign-in-with-wallet: challenge → Phantom signMessage → токен сессии.
+   Токен в localStorage per-pubkey; после рестарта бэкенда протухает → авторетрай на 401. */
+let authToken=null;
+function loadAuthToken(){authToken=walletPubkey?(localStorage.getItem('abc_auth_'+walletPubkey)||null):null;}
+async function ensureAuth(){
+  if(!walletPubkey)throw new Error(t('auth_need_wallet'));
+  if(authToken)return authToken;
+  const c=await fetch(API+'/api/auth/challenge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pubkey:walletPubkey})});
+  if(!c.ok)throw new Error(await errDetail(c));
+  const msg=(await c.json()).message;
+  const sig=await _provider().signMessage(new TextEncoder().encode(msg),'utf8');
+  const bytes=sig.signature||sig;
+  const b64=btoa(String.fromCharCode.apply(null,Array.from(bytes)));
+  const v=await fetch(API+'/api/auth/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({pubkey:walletPubkey,signature:b64})});
+  if(!v.ok)throw new Error(await errDetail(v));
+  authToken=(await v.json()).token;
+  localStorage.setItem('abc_auth_'+walletPubkey,authToken);
+  return authToken;
+}
+async function authedFetch(url,opts){
+  await ensureAuth();
+  let r=await fetch(url,opts);
+  if(r.status===401){  // токен протух (рестарт бэкенда) → перевход подписью и повтор
+    authToken=null;localStorage.removeItem('abc_auth_'+walletPubkey);
+    await ensureAuth();r=await fetch(url,opts);
+  }
+  return r;
+}
 function _provider(){const p=window.phantom&&window.phantom.solana;if(p&&p.isPhantom)return p;if(window.solana&&window.solana.isPhantom)return window.solana;return null;}
 function _short(a){return a.slice(0,4)+'…'+a.slice(-4);}
 function renderWallet(){
+  loadAuthToken();   // токен привязан к pubkey — обновляем при каждой смене кошелька
   const btn=document.getElementById('walletBtn'),lbl=document.getElementById('walletLbl');if(!btn)return;
   if(walletPubkey){btn.classList.add('on');lbl.textContent=_short(walletPubkey);btn.title=t('wallet_disconnect')+' · '+walletPubkey;}
   else{btn.classList.remove('on');lbl.textContent=t('wallet_connect');btn.title=t('wallet_title');}
@@ -1278,7 +1330,7 @@ async function openPipe(){
     defaultTrendCmd=d.default_trending_cmd||'';
     cmdEl.value=d.trending_cmd||defaultTrendCmd;
   }catch(e){cmdEl.value='';document.getElementById('pipeState').textContent=t('pipe_be_off');}
-  loadFilters();loadStrategies();loadBot();
+  loadFilters();loadStrategies();loadBot();loadTwitter();
   document.getElementById('pipeScrim').classList.add('on');
 }
 function closePipe(){document.getElementById('pipeScrim').classList.remove('on');}
@@ -1410,6 +1462,31 @@ async function botToggle(running){
     loadBot();
   }catch(e){toast(e.message,'err');}
 }
+/* ── вкладка KOL/𝕏: свой Bearer-токен Twitter API v2 (opt-in, per-user) ── */
+async function loadTwitter(){
+  const box=document.getElementById('kolPane');
+  if(source!=='backend'){box.innerHTML='<div class="hint">'+t('pipe_be_off')+'</div>';return;}
+  try{
+    const d=await (await fetch(API+'/api/twitter/config')).json();
+    box.innerHTML=`
+      <div class="ff bool"><input type="checkbox" id="twEnabled" ${d.enabled?'checked':''}><label for="twEnabled">${t('tw_enable')}</label></div>
+      <div class="fld"><label>Bearer token (Twitter API v2)</label>
+        <input type="password" id="twBearer" placeholder="${d.has_key?t('tw_key_saved'):'AAAA…'}" autocomplete="off">
+        <div class="hint">${t('tw_hint')}</div></div>
+      <div class="scbtns"><button class="mbtn ghost" onclick="twitterSave()">${t('tw_save')}</button></div>`;
+  }catch(e){box.innerHTML='<div class="hint">'+t('pipe_be_off')+'</div>';}
+}
+async function twitterSave(){
+  const body={enabled:document.getElementById('twEnabled').checked,
+              bearer:document.getElementById('twBearer').value.trim()};
+  try{
+    const doF=walletPubkey?authedFetch:fetch;   // секрет юзера: с кошельком — только после входа подписью
+    const r=await doF(API+'/api/twitter/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!r.ok)throw new Error(await errDetail(r));
+    toast(t('tw_saved'),'ok');loadTwitter();
+  }catch(e){toast(e.message,'err');}
+}
+
 async function botSaveCfg(){
   const patch={};
   BOT_FIELDS.forEach(k=>{const el=document.getElementById('bot_'+k);if(!el)return;
@@ -1523,7 +1600,56 @@ function openBuy(i){
   mn.className='mwarn'+(liveMode?' danger':'');
   mn.textContent=liveMode?t('buy_mode_live'):t('buy_mode_shadow');
   document.getElementById('buyState').textContent='';
+  // non-custodial: кнопка Phantom видна только с подключённым кошельком на sol + backend
+  document.getElementById('buyPhantom').style.display=(walletPubkey&&source==='backend'&&curChain==='sol')?'':'none';
+  document.getElementById('buyPhantom').textContent='⚡ '+t('ph_buy');
+  const kw=document.getElementById('kolWrap');
+  kw.style.display=(source==='backend'&&r.address)?'':'none';
+  document.getElementById('kolBtn').textContent='𝕏 '+t('kol_btn');
+  document.getElementById('kolRes').textContent='';
   document.getElementById('buyScrim').classList.add('on');
+}
+/* ── этап 5: покупка своим кошельком (Jupiter build → Phantom sign) ── */
+async function phantomBuy(){
+  const r=T[buyIdx];const size=parseFloat(document.getElementById('buySize').value)||r.size;
+  const bs=document.getElementById('buyState');
+  try{
+    bs.innerHTML='<span class="spin"></span>'+t('ph_building');
+    const b=await authedFetch(API+'/api/tx/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:r.address,side:'buy',size_sol:size})});
+    if(!b.ok)throw new Error(await errDetail(b));
+    const j=await b.json();
+    const vtx=solanaWeb3.VersionedTransaction.deserialize(Uint8Array.from(atob(j.tx),ch=>ch.charCodeAt(0)));
+    bs.innerHTML='<span class="spin"></span>'+t('ph_signing');
+    const res=await _provider().signAndSendTransaction(vtx);
+    const sig=res.signature||res;
+    await authedFetch(API+'/api/tx/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:r.address,side:'buy',size_sol:size,token_amount:j.out_amount||0,signature:String(sig),symbol:r.sym})});
+    toast(t('ph_sent',r.sym,String(sig).slice(0,8)),'ok');closeBuy();scanCycle();
+  }catch(e){bs.textContent='';toast(t('ph_fail',e.message),'err');}
+}
+async function phantomSell(i){
+  const p=POS[i];if(!p)return;
+  try{
+    const b=await authedFetch(API+'/api/tx/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:p.address,side:'sell',fraction:1.0})});
+    if(!b.ok)throw new Error(await errDetail(b));
+    const j=await b.json();
+    const vtx=solanaWeb3.VersionedTransaction.deserialize(Uint8Array.from(atob(j.tx),ch=>ch.charCodeAt(0)));
+    const res=await _provider().signAndSendTransaction(vtx);
+    const sig=res.signature||res;
+    await authedFetch(API+'/api/tx/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:p.address,side:'sell',fraction:1.0,signature:String(sig)})});
+    toast(t('ph_sent',p.sym,String(sig).slice(0,8)),'ok');scanCycle();
+  }catch(e){toast(t('ph_fail',e.message),'err');}
+}
+/* ── KOL/𝕏: свежие упоминания CA (по кнопке, квота юзера) ── */
+async function kolCheck(){
+  const r=T[buyIdx];const box=document.getElementById('kolRes');
+  box.textContent='…';
+  try{
+    const resp=await fetch(API+'/api/kol/check?address='+encodeURIComponent(r.address));
+    if(!resp.ok)throw new Error(await errDetail(resp));
+    const d=await resp.json();
+    if(d.ok===false){box.textContent=d.detail||d.error;return;}
+    box.innerHTML=d.count?t('kol_res',d.count)+' '+d.authors.map(a=>`@${a.username} (${a.followers>=1000?(a.followers/1000).toFixed(0)+'k':a.followers}${a.verified?'✓':''})`).join(', '):t('kol_none');
+  }catch(e){box.textContent=e.message;}
 }
 function closeBuy(){document.getElementById('buyScrim').classList.remove('on');}
 dismissOnBackdrop('buyScrim',closeBuy);
