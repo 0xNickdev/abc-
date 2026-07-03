@@ -225,9 +225,12 @@ def write_env(api_key: str, signing_key: str, chain: str):
         pass
 
 def load_env() -> dict:
+    # Fallback на переменные окружения процесса (Railway/Docker: файла ~/.config/gmgn/.env
+    # нет, ключ приходит через Variables). Файл, если есть, перекрывает окружение.
+    out = {k: os.environ[k] for k in ("GMGN_API_KEY", "GMGN_PRIVATE_KEY", "GMGN_CHAIN")
+           if os.environ.get(k)}
     if not ENV_PATH.exists():
-        return {}
-    out = {}
+        return out
     for line in ENV_PATH.read_text().splitlines():
         if "=" in line and not line.strip().startswith("#"):
             k, v = line.split("=", 1)
