@@ -1290,7 +1290,9 @@ function pnlMonth(delta){
   const [y,m]=(pnlYM||_ym(new Date())).split('-').map(Number);
   const d=new Date(Date.UTC(y,m-1+delta,1));pnlYM=_ym(d);loadPnl();
 }
-function _fmtSol(v){const s=v>=0?'+':'';return s+(Math.abs(v)>=1?v.toFixed(2):v.toFixed(3))+' ◎';}
+/* логотип Solana (три полоски); fill=currentColor → берёт цвет ячейки (зелёный/красный) */
+const SOL_SVG='<svg viewBox="0 0 398 312" width="10" height="9" style="margin-left:2px;vertical-align:baseline"><path fill="currentColor" d="M64 238c2-2 6-4 9-4h317c6 0 9 7 5 11l-63 63c-2 2-6 4-9 4H6c-6 0-9-7-5-11l63-63z"/><path fill="currentColor" d="M64 4c3-2 6-4 10-4h317c6 0 9 7 5 11l-63 63c-2 2-6 4-9 4H6c-6 0-9-7-5-11L64 4z"/><path fill="currentColor" d="M333 120c-2-2-6-4-9-4H7c-6 0-9 7-5 11l63 63c2 2 6 4 9 4h317c6 0 9-7 5-11l-63-63z"/></svg>';
+function _fmtSol(v){const s=v>=0?'+':'';return s+(Math.abs(v)>=1?v.toFixed(2):v.toFixed(3))+SOL_SVG;}
 async function loadPnl(){
   const ym=pnlYM||_ym(new Date());
   document.getElementById('pnlMonthLbl').textContent=new Date(ym+'-01T00:00:00Z').toLocaleString('en',{month:'long',year:'numeric',timeZone:'UTC'});
@@ -1310,15 +1312,17 @@ async function loadPnl(){
   for(let d=1;d<=dim;d++){
     const key=`${ym}-${String(d).padStart(2,'0')}`;const c=data.days[key];
     const cls=c?(c.pnl>0?'win':c.pnl<0?'loss':'flat'):'none';
-    const val=c?`<span class="pnlv">${_fmtSol(c.pnl)}</span><span class="pnlt">${c.trades}т</span>`:'';
+    const val=c?`<span class="pnlv">${_fmtSol(c.pnl)}</span><span class="pnlt">${c.trades} tx</span>`:'';
     cells+=`<div class="pnlcell ${cls} ${d===today?'today':''}"><span class="pnld">${d}</span>${val}</div>`;
   }
   box.innerHTML=cells;
   const t=data.total;const cls=t.pnl>0?'win':t.pnl<0?'loss':'';
   document.getElementById('pnlTot').innerHTML=`<span class="${cls}">${_fmtSol(t.pnl)}</span> · ${t.trades} trades · ${Math.round(data.winrate*100)}% win`;
-  document.getElementById('pnlNote').textContent=t.trades?'':'No closed trades this month yet — the bot is paper-trading; sells will appear here.';
+  document.getElementById('pnlNote').textContent=t.trades
+    ? 'Each cell = total realized SOL that day across all closed trades (not a single token). Paper trades until LIVE is unlocked.'
+    : 'No closed trades this month yet — the bot is paper-trading; closed sells will show here.';
   // мини-значение на кнопке в шапке = PnL текущего месяца
-  if(_ym(new Date())===ym){const b=document.getElementById('pnlBtnVal');if(b){b.textContent=_fmtSol(t.pnl);b.className='';b.style.color=t.pnl>0?'var(--lime)':t.pnl<0?'var(--clay)':'';}}
+  if(_ym(new Date())===ym){const b=document.getElementById('pnlBtnVal');if(b){b.innerHTML=_fmtSol(t.pnl);b.style.color=t.pnl>0?'var(--lime)':t.pnl<0?'var(--clay)':'';}}
 }
 function openCfg(){document.getElementById('cfgScrim').classList.add('on');}
 function closeCfg(){document.getElementById('cfgScrim').classList.remove('on');}
