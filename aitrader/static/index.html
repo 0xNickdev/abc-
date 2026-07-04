@@ -25,7 +25,31 @@ body{font-family:var(--mono);font-size:13px;color:var(--paper);overflow:hidden;
 .card,.kpi,.modal,.demobar,.publicbar{backdrop-filter:blur(22px) saturate(140%);-webkit-backdrop-filter:blur(22px) saturate(140%)}
 .grain{position:fixed;inset:0;pointer-events:none;z-index:90;opacity:.045;mix-blend-mode:overlay;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
-.app{height:100vh;display:flex;flex-direction:column;padding:10px;gap:9px;min-width:1160px}
+.app{height:100vh;display:flex;flex-direction:column;padding:10px;gap:9px;min-width:1160px;margin-left:56px}
+/* ── левый рейл ── */
+.rail{position:fixed;top:0;left:0;bottom:0;width:56px;z-index:80;display:flex;flex-direction:column;
+  background:linear-gradient(180deg,rgba(23,18,50,.92),rgba(13,10,26,.96));border-right:1px solid var(--line);
+  backdrop-filter:blur(10px);transition:width .18s cubic-bezier(.4,0,.2,1);overflow:hidden}
+.rail.open{width:196px;box-shadow:24px 0 60px -20px rgba(0,0,0,.7)}
+.rail-top{display:flex;align-items:center;gap:9px;height:52px;padding:0 15px;flex-shrink:0;border-bottom:1px solid var(--line)}
+.rail-toggle{width:26px;height:26px;flex-shrink:0;cursor:pointer;color:var(--paper2);display:grid;place-items:center;border-radius:7px}
+.rail-toggle:hover{background:rgba(255,255,255,.06);color:var(--paper)}
+.rail-toggle svg{width:19px;height:19px}
+.rail-brand{display:flex;align-items:center;gap:8px;opacity:0;transition:opacity .12s;white-space:nowrap;pointer-events:none}
+.rail.open .rail-brand{opacity:1}
+.rb-mark{width:16px;height:16px;border-radius:5px;background:linear-gradient(135deg,var(--violet),var(--violet2,#b18cff));flex-shrink:0}
+.rb-txt{font-weight:800;font-size:17px;color:var(--paper)}.rb-txt i{color:var(--lime);font-style:normal}
+.rail-items{flex:1;display:flex;flex-direction:column;gap:3px;padding:10px 8px;overflow-y:auto;overflow-x:hidden}
+.rail-foot{padding:10px 8px;border-top:1px solid var(--line)}
+.ritem{display:flex;align-items:center;gap:12px;height:40px;padding:0 11px;border-radius:9px;cursor:pointer;color:var(--dim2,#9aa);position:relative;flex-shrink:0}
+.ritem:hover{background:rgba(255,255,255,.05);color:var(--paper)}
+.ritem.on{background:rgba(139,92,246,.16);color:var(--paper)}
+.ritem.on::before{content:'';position:absolute;left:0;top:9px;bottom:9px;width:3px;border-radius:2px;background:var(--violet2,#b18cff)}
+.ritem svg{width:19px;height:19px;flex-shrink:0}
+.ritem .rlbl{opacity:0;transition:opacity .12s;white-space:nowrap;font-size:13px;font-weight:600;pointer-events:none}
+.rail.open .ritem .rlbl{opacity:1}
+.ritem .rbadge{margin-left:auto;font-size:10px;font-weight:700;color:var(--clay);opacity:0;transition:opacity .12s}
+.rail.open .ritem .rbadge{opacity:1}
 .demobar{display:none;flex-shrink:0;background:linear-gradient(90deg,#f0a93b1f,#9a82ff14);border:1px solid #f0a93b55;border-radius:9px;padding:7px 14px;font-size:11.5px;color:var(--amber);text-align:center;letter-spacing:.02em}
 .demobar.on{display:block}
 .demobar b{color:var(--paper)}
@@ -291,6 +315,15 @@ td{padding:5px 10px;vertical-align:middle}
 </head>
 <body>
 <div class="grain"></div>
+<!-- левый рейл-навигатор (свёрнут = иконки, клик по «меню» = разворот с подписями) -->
+<nav class="rail" id="rail">
+  <div class="rail-top">
+    <div class="rail-toggle" id="railToggle" title="Menu"></div>
+    <div class="rail-brand"><span class="rb-mark"></span><span class="rb-txt">abc<i>.</i></span></div>
+  </div>
+  <div class="rail-items" id="railItems"></div>
+  <div class="rail-foot" id="railFoot"></div>
+</nav>
 <div class="app">
 
   <!-- web3.js только для десериализации/подписи tx в Phantom (этап 5, non-custodial) -->
@@ -864,6 +897,14 @@ const I={
   door:'<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
   siren:'<path d="M7 18v-6a5 5 0 0 1 10 0v6"/><path d="M5 21h14"/><path d="M12 2v1"/><path d="M4.6 5.6l.7.7"/><path d="M19.4 5.6l-.7.7"/>',
   cog:'<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  /* кастомные иконки рейла (тонкий штрих, стиль набора) */
+  grid:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  calendar:'<rect x="3" y="4" width="18" height="18" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="16" y1="2" x2="16" y2="6"/>',
+  wallet:'<path d="M20 12V8a2 2 0 0 0-2-2H5a2 2 0 0 1 0-4h13"/><path d="M3 6v12a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-4"/><circle cx="17" cy="14" r="1.4"/>',
+  sliders:'<line x1="4" y1="7" x2="20" y2="7"/><circle cx="9" cy="7" r="2.3"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="15" cy="17" r="2.3"/>',
+  xlogo:'<path d="M4 3l16 18M20 3L4 21"/>',
+  menu:'<line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/>',
+  bag:'<path d="M6 8h12l-1 12a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1L6 8z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/>',
 };
 const svg=(n,c='currentColor')=>`<svg viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${I[n]}</svg>`;
 const fill=n=>`<svg viewBox="0 0 24 24" fill="currentColor" stroke="none">${I[n]}</svg>`;
@@ -1081,6 +1122,12 @@ function renderKpis(flash){
     const alert=d[5];
     return `<div class="kpi ${alert?'alert':''}" style="--ac:${d[2]}"><div class="k">${svg(d[1])}${d[0]}</div>
       <div class="v ${flash?'flash':''}">${d[3]}</div><div class="sub">${d[4]}</div></div>`;}).join('');
+  // живые бейджи на рейле: тревоги побега + число кандидатов
+  if(typeof railBadge==='function'){
+    const esc=POS.filter(p=>p.escaping).length;
+    railBadge('positions',esc?String(esc):'');
+    railBadge('scanner',T.filter(t=>t.status==='action').length||'');
+  }
 }
 
 /* ── pipeline table (sorted: action by priority desc, then reject) ── */
@@ -1925,6 +1972,40 @@ function applyI18n(){
   if(source==='demo'){feed.innerHTML='';logScreen();}   // 重置日志为当前语言
 }
 function switchLang(){lang=(lang==='zh'?'en':'zh');localStorage.setItem('aitrader_lang',lang);applyI18n();renderWallet();}
+
+/* ── левый рейл: единая навигация вместо разбросанных кнопок/модалок ── */
+const RAIL=[
+  {id:'scanner',icon:'grid',label:'Scanner',act:()=>window.scrollTo({top:0,behavior:'smooth'})},
+  {id:'positions',icon:'gauge',label:'Positions',act:()=>{const e=document.getElementById('escCard');if(e)e.scrollIntoView({behavior:'smooth',block:'center'});}},
+  {id:'pnl',icon:'calendar',label:'PnL',act:()=>openPnl()},
+  {id:'bot',icon:'zap',label:'Bot',act:()=>{openPipe();pipeTab('bot');}},
+  {id:'strategy',icon:'brain',label:'Strategy',act:()=>{openPipe();pipeTab('strategy');}},
+  {id:'filters',icon:'sliders',label:'Filters',act:()=>{openPipe();pipeTab('filters');}},
+  {id:'kol',icon:'xlogo',label:'KOL / X',act:()=>{openPipe();pipeTab('kol');}},
+  {id:'wallet',icon:'wallet',label:'Wallet',act:()=>onWalletClick()},
+];
+function renderRail(){
+  const box=document.getElementById('railItems');if(!box)return;
+  box.innerHTML=RAIL.map(r=>`<div class="ritem" data-id="${r.id}" title="${r.label}">${svg(r.icon)}<span class="rlbl">${r.label}</span><span class="rbadge" id="rbadge-${r.id}"></span></div>`).join('');
+  box.querySelectorAll('.ritem').forEach(el=>el.onclick=()=>{
+    const r=RAIL.find(x=>x.id===el.dataset.id);if(!r)return;
+    box.querySelectorAll('.ritem').forEach(n=>n.classList.remove('on'));el.classList.add('on');
+    r.act();
+  });
+  // Settings (admin) в подвале рейла — только для оператора
+  const foot=document.getElementById('railFoot');
+  foot.innerHTML=`<div class="ritem" id="railCfg" title="Settings" style="display:${document.body.classList.contains('admin')?'flex':'none'}">${svg('cog')}<span class="rlbl">Settings</span></div>`;
+  const cfg=document.getElementById('railCfg');if(cfg)cfg.onclick=()=>openCfg();
+}
+function railBadge(id,txt){const b=document.getElementById('rbadge-'+id);if(b)b.textContent=txt||'';}
+(function initRail(){
+  renderRail();
+  const rail=document.getElementById('rail'),tog=document.getElementById('railToggle');
+  tog.innerHTML=svg('menu');
+  tog.onclick=()=>rail.classList.toggle('open');
+  // клик вне рейла — свернуть
+  document.addEventListener('click',e=>{if(rail.classList.contains('open')&&!e.target.closest('#rail'))rail.classList.remove('open');});
+})();
 
 /* ── init ── */
 applyI18n();tick();
