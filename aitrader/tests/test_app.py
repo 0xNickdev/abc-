@@ -1068,7 +1068,7 @@ class TestPnlCalendar:
             assert d["total"]["trades"] == 3
             assert abs(d["total"]["pnl"] - 0.0) < 1e-9      # 0.02-0.05+0.03 = 0
 
-    def test_function_still_filters_per_user(self):
+    def test_function_still_filters_per_user(self, client):   # client → свежий tmp LOG_PATH
         import datetime as dt
         appmod.log("SELL", "A", "x", dict(pnl=0.2, size_sol=0.1), pubkey="local")
         appmod.log("SELL", "C", "x", dict(pnl=0.3, size_sol=0.1), pubkey="WX")
