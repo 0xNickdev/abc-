@@ -25,7 +25,9 @@ body{font-family:var(--mono);font-size:13px;color:var(--paper);overflow:hidden;
 .card,.kpi,.modal,.demobar,.publicbar{backdrop-filter:blur(22px) saturate(140%);-webkit-backdrop-filter:blur(22px) saturate(140%)}
 .grain{position:fixed;inset:0;pointer-events:none;z-index:90;opacity:.045;mix-blend-mode:overlay;
   background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");}
-.app{height:100vh;display:flex;flex-direction:column;padding:10px;gap:9px;min-width:1160px;margin-left:56px}
+.app{height:100vh;display:flex;flex-direction:column;padding:10px;gap:9px;min-width:1160px;margin-left:56px;transition:margin-left .18s cubic-bezier(.4,0,.2,1)}
+body.rail-open .app{margin-left:196px}
+.scrim.view-mode{transition:left .18s cubic-bezier(.4,0,.2,1)}
 /* ── левый рейл ── */
 .rail{position:fixed;top:0;left:0;bottom:0;width:56px;z-index:80;display:flex;flex-direction:column;
   background:linear-gradient(180deg,rgba(23,18,50,.92),rgba(13,10,26,.96));border-right:1px solid var(--line);
@@ -469,6 +471,15 @@ td{padding:5px 10px;vertical-align:middle}
 .pstat .pl{font-size:9px;color:var(--dim2,#9aa);text-transform:uppercase;letter-spacing:.03em}
 .pstat .pv{font-size:13px;font-weight:700;color:var(--paper,#fff)}
 .pstat .pv.win{color:var(--lime,#9be86b)}.pstat .pv.loss{color:var(--clay,#e8896b)}
+.pnlcell.sel{outline:2px solid var(--violet2,#b18cff);outline-offset:-1px}
+#pnlDayDetail{margin-top:10px}
+.daydet-h{font-size:12px;color:var(--dim2,#9aa);margin:6px 0 8px;font-weight:700}
+.daydet-h .win{color:var(--lime,#9be86b)}.daydet-h .loss{color:var(--clay,#e8896b)}
+.daytrade{display:grid;grid-template-columns:1fr auto auto auto;gap:12px;align-items:center;padding:8px 10px;border:1px solid rgba(255,255,255,.06);border-radius:8px;margin-bottom:5px;background:rgba(255,255,255,.02);font-size:13px}
+.daytrade .dt-sym{font-weight:700;color:var(--paper,#fff)}
+.daytrade .dt-ts{color:var(--dim2,#9aa);font-size:11px}
+.daytrade .dt-pct,.daytrade .dt-sol{font-weight:700;text-align:right;font-variant-numeric:tabular-nums}
+.daytrade .win{color:var(--lime,#9be86b)}.daytrade .loss{color:var(--clay,#e8896b)}
 </style>
 <div class="scrim" id="pipeScrim">
   <div class="modal">
@@ -524,6 +535,7 @@ td{padding:5px 10px;vertical-align:middle}
       <div class="pnlgrid" id="pnlDays"></div>
       <div class="pnlstats" id="pnlStats"></div>
       <div class="hint" id="pnlNote" style="margin-top:8px"></div>
+      <div id="pnlDayDetail"></div>
     </div>
   </div>
 </div>
@@ -1369,27 +1381,9 @@ function setSource(s){
 /* ── config modal ── */
 /* ── PnL-календарь (per-user дневной реализованный PnL) ── */
 let pnlYM=null;   // {y,m} текущий показываемый месяц
+let _pnlData=null;   // последний ответ /api/pnl/calendar (дни/детали/статистика — один источник)
 function _ym(d){return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0');}
-function openPnl(){closeAllViews();pnlYM=null;const s=document.getElementById('pnlScrim');s.classList.add('on','view-mode');_placeView(s);loadPnl();loadPnlStats();}
-async function loadPnlStats(){
-  const box=document.getElementById('pnlStats');if(!box)return;
-  if(source!=='backend'){box.innerHTML='';return;}
-  try{
-    const r=await fetch(API+'/api/backtest');if(!r.ok)throw 0;
-    const rz=(await r.json()).realized||{};
-    if(!rz.trades){box.innerHTML='';return;}
-    const pct=v=>(v>=0?'+':'')+Math.round(v*100)+'%';
-    const R=rz.expectancy_R||rz.avg_R||0;
-    const cell=(lbl,val,cls)=>`<div class="pstat"><span class="pl">${lbl}</span><span class="pv ${cls||''}">${val}</span></div>`;
-    box.innerHTML=
-      cell('Trades',rz.trades)+
-      cell('Win rate',Math.round((rz.win_rate||0)*100)+'%')+
-      cell('Avg win',pct(rz.avg_win_pct||0),'win')+
-      cell('Avg loss',pct(rz.avg_loss_pct||0),'loss')+
-      cell('Expectancy',(R>=0?'+':'')+R.toFixed(2)+'R',R>=0?'win':'loss')+
-      cell('Best / Worst',pct(rz.best_pct||0)+' / '+pct(rz.worst_pct||0));
-  }catch(e){box.innerHTML='';}
-}
+function openPnl(){closeAllViews();pnlYM=null;const s=document.getElementById('pnlScrim');s.classList.add('on','view-mode');_placeView(s);loadPnl();}
 function closePnl(){document.getElementById('pnlScrim').classList.remove('on','view-mode');railSelect('scanner');}
 function pnlMonth(delta){
   const [y,m]=(pnlYM||_ym(new Date())).split('-').map(Number);
@@ -1414,20 +1408,46 @@ async function loadPnl(){
   const today=_ym(new Date())===ym?new Date().getUTCDate():-1;
   let cells='';
   for(let i=0;i<lead;i++)cells+='<div class="pnlcell empty"></div>';
+  _pnlData=data;                        // единый источник для дней/детали/статистики
   for(let d=1;d<=dim;d++){
     const key=`${ym}-${String(d).padStart(2,'0')}`;const c=data.days[key];
     const cls=c?(c.pnl>0?'win':c.pnl<0?'loss':'flat'):'none';
     const val=c?`<span class="pnlv">${_fmtSol(c.pnl)}</span><span class="pnlt">${c.trades} tx</span>`:'';
-    cells+=`<div class="pnlcell ${cls} ${d===today?'today':''}"><span class="pnld">${d}</span>${val}</div>`;
+    const clickable=c?`onclick="pnlDay('${key}')" style="cursor:pointer"`:'';
+    cells+=`<div class="pnlcell ${cls} ${d===today?'today':''}" ${clickable}><span class="pnld">${d}</span>${val}</div>`;
   }
   box.innerHTML=cells;
   const t=data.total;const cls=t.pnl>0?'win':t.pnl<0?'loss':'';
   document.getElementById('pnlTot').innerHTML=`<span class="${cls}">${_fmtSol(t.pnl)}</span> · ${t.trades} trades · ${Math.round(data.winrate*100)}% win`;
+  renderPnlStats(data.stats);           // полоса метрик из ТОГО ЖЕ источника (цифры сходятся)
   document.getElementById('pnlNote').textContent=t.trades
-    ? 'Each cell = total realized SOL that day across all closed trades (not a single token). Paper trades until LIVE is unlocked.'
+    ? 'Click any day to see the tokens traded and per-trade PnL. Paper until LIVE is unlocked.'
     : 'No closed trades this month yet — the bot is paper-trading; closed sells will show here.';
-  // мини-значение на кнопке в шапке = PnL текущего месяца
+  document.getElementById('pnlDayDetail').innerHTML='';
   if(_ym(new Date())===ym){const b=document.getElementById('pnlBtnVal');if(b){b.innerHTML=_fmtSol(t.pnl);b.style.color=t.pnl>0?'var(--lime)':t.pnl<0?'var(--clay)':'';}}
+}
+/* детализация дня: какие токены, PnL по каждой сделке */
+function pnlDay(key){
+  const c=_pnlData&&_pnlData.days[key];const box=document.getElementById('pnlDayDetail');if(!box)return;
+  document.querySelectorAll('#pnlDays .pnlcell').forEach(el=>el.classList.remove('sel'));
+  const cell=[...document.querySelectorAll('#pnlDays .pnlcell')].find(el=>el.getAttribute('onclick')&&el.getAttribute('onclick').includes(key));if(cell)cell.classList.add('sel');
+  if(!c||!c.list||!c.list.length){box.innerHTML='';return;}
+  const dt=new Date(key+'T00:00:00Z').toLocaleString('en',{weekday:'long',month:'short',day:'numeric',timeZone:'UTC'});
+  const rows=c.list.slice().sort((a,b)=>b.sol-a.sol).map(x=>`<div class="daytrade">
+    <span class="dt-sym">${x.sym}</span><span class="dt-ts">${x.ts}</span>
+    <span class="dt-pct ${x.pct>=0?'win':'loss'}">${x.pct>=0?'+':''}${(x.pct*100).toFixed(1)}%</span>
+    <span class="dt-sol ${x.sol>=0?'win':'loss'}">${x.sol>=0?'+':''}${x.sol.toFixed(4)}${SOL_SVG}</span></div>`).join('');
+  box.innerHTML=`<div class="daydet-h">${dt} · ${c.trades} trade${c.trades>1?'s':''} · <span class="${c.pnl>=0?'win':'loss'}">${_fmtSol(c.pnl)}</span></div>${rows}`;
+}
+function renderPnlStats(s){
+  const box=document.getElementById('pnlStats');if(!box)return;
+  if(!s||!s.trades){box.innerHTML='';return;}
+  const pct=v=>(v>=0?'+':'')+Math.round(v*100)+'%';
+  const cell=(lbl,val,cls)=>`<div class="pstat"><span class="pl">${lbl}</span><span class="pv ${cls||''}">${val}</span></div>`;
+  box.innerHTML=cell('Trades',s.trades)+cell('Win rate',Math.round((s.win_rate||0)*100)+'%')
+    +cell('Avg win',pct(s.avg_win_pct||0),'win')+cell('Avg loss',pct(s.avg_loss_pct||0),'loss')
+    +cell('Avg / trade',pct(s.avg_pnl_pct||0),(s.avg_pnl_pct||0)>=0?'win':'loss')
+    +cell('Best / Worst',pct(s.best_pct||0)+' / '+pct(s.worst_pct||0));
 }
 function openCfg(){document.getElementById('cfgScrim').classList.add('on');}
 function closeCfg(){document.getElementById('cfgScrim').classList.remove('on');}
@@ -2126,10 +2146,13 @@ function railBadge(id,txt){const b=document.getElementById('rbadge-'+id);if(b)b.
   renderRail();
   const rail=document.getElementById('rail'),tog=document.getElementById('railToggle');
   tog.innerHTML=svg('menu');
-  tog.onclick=()=>rail.classList.toggle('open');
+  const setOpen=(o)=>{rail.classList.toggle('open',o);document.body.classList.toggle('rail-open',o);
+    // открытый view сдвигается вправо синхронно с рейлом (не наслаивается)
+    ['pipeScrim','pnlScrim'].forEach(id=>{const s=document.getElementById(id);if(s&&s.classList.contains('view-mode'))s.style.left=(o?196:56)+'px';});};
+  tog.onclick=(e)=>{e.stopPropagation();setOpen(!rail.classList.contains('open'));};
   const wIc=document.getElementById('walletDrawerIc');if(wIc)wIc.innerHTML=svg('wallet');
   // клик вне рейла — свернуть
-  document.addEventListener('click',e=>{if(rail.classList.contains('open')&&!e.target.closest('#rail'))rail.classList.remove('open');});
+  document.addEventListener('click',e=>{if(rail.classList.contains('open')&&!e.target.closest('#rail'))setOpen(false);});
 })();
 
 /* ── init ── */

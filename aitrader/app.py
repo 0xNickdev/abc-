@@ -1226,6 +1226,7 @@ def pnl_calendar(pubkey: str, month: str) -> dict:
     pk = (pubkey or "").strip() or DEFAULT_PUBKEY
     days: dict[str, dict] = {}
     tot = dict(pnl=0.0, trades=0, wins=0)
+    pcts: list[float] = []            # доли PnL по каждой сделке (для сводной статистики)
     if LOG_PATH.exists():
         for line in LOG_PATH.read_text().splitlines():
             try:
@@ -1238,13 +1239,28 @@ def pnl_calendar(pubkey: str, month: str) -> dict:
             if pk != "*" and r.get("pubkey", DEFAULT_PUBKEY) != pk:
                 continue
             d = r["ts"][:10]
-            sol = float(r.get("pnl", 0.0)) * float(r.get("size_sol", 0.0))
-            cell = days.setdefault(d, dict(pnl=0.0, trades=0, wins=0))
+            pct = float(r.get("pnl", 0.0)); size = float(r.get("size_sol", 0.0))
+            sol = pct * size
+            cell = days.setdefault(d, dict(pnl=0.0, trades=0, wins=0, list=[]))
             cell["pnl"] = round(cell["pnl"] + sol, 6); cell["trades"] += 1
+            # детализация сделки: токен, PnL% и в SOL, время (для клика по дню)
+            cell["list"].append(dict(sym=r.get("symbol", "?"), pct=round(pct, 4),
+                                     sol=round(sol, 6), ts=r.get("ts", "")[11:16]))
             tot["pnl"] = round(tot["pnl"] + sol, 6); tot["trades"] += 1
+            pcts.append(pct)
             if sol > 0:
                 cell["wins"] += 1; tot["wins"] += 1
-    return dict(month=month, days=days, total=tot,
+    wins = [p for p in pcts if p > 0]; losses = [p for p in pcts if p <= 0]
+    stats = dict(
+        trades=tot["trades"],
+        win_rate=round(len(wins) / len(pcts), 3) if pcts else 0.0,
+        avg_win_pct=round(sum(wins) / len(wins), 4) if wins else 0.0,
+        avg_loss_pct=round(sum(losses) / len(losses), 4) if losses else 0.0,
+        avg_pnl_pct=round(sum(pcts) / len(pcts), 4) if pcts else 0.0,
+        best_pct=round(max(pcts), 4) if pcts else 0.0,
+        worst_pct=round(min(pcts), 4) if pcts else 0.0,
+        total_sol=tot["pnl"])
+    return dict(month=month, days=days, total=tot, stats=stats,
                 winrate=round(tot["wins"] / tot["trades"], 3) if tot["trades"] else 0.0)
 
 # ──────────────────────────────────────────────────────────────────────────
