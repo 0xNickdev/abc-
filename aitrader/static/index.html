@@ -1226,6 +1226,9 @@ function renderDetail(){
 function sevLevel(s){return s>=70?t('sev_escape'):s>=50?t('sev_high'):s>=30?t('sev_watch'):t('sev_stable');}
 function renderPositions(){
   const box=document.getElementById('positions');
+  // дедуп по адресу: страхуемся от дублей позиции (scan + /api/positions могут наложиться)
+  const _seen=new Set();
+  POS=POS.filter(p=>{const k=p.address||p.addr||p.sym;if(_seen.has(k))return false;_seen.add(k);return true;});
   const alerts=POS.filter(p=>p.escaping).length;
   document.getElementById('escCnt').textContent=POS.length?t('esc_cnt',POS.length,RISK.openMax,alerts):'';
   if(!POS.length){box.innerHTML=`<div class="posempty">${t('pos_empty')}</div>`;return;}
