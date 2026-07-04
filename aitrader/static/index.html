@@ -89,7 +89,7 @@ body:not(.admin) #gearBtn{display:none !important}
 .pill.mode.clk:hover{border-color:var(--lime)}
 
 /* KPI */
-.kpis{display:grid;grid-template-columns:repeat(7,1fr);gap:11px;flex-shrink:0}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:11px;flex-shrink:0}
 .kpi{border:1px solid var(--line);border-radius:12px;padding:9px 14px;background:linear-gradient(180deg,var(--panel),var(--ink2));position:relative;overflow:hidden}
 .kpi::after{content:'';position:absolute;left:0;right:0;bottom:0;height:2px;background:var(--ac);opacity:.5}
 .kpi.alert{border-color:var(--clay)}.kpi.alert::after{opacity:1;animation:blink 1.2s infinite}
@@ -1062,21 +1062,23 @@ let cycles=1;
 function passG(g){return T.filter(t=>t.died===null||t.died>g).length;}
 function killAt(g){return T.filter(t=>t.died===g).length;}
 function kpiData(){
-  const act=T.filter(t=>t.status==='action').length;
+  // 4 действенные KPI (убраны вечный одометр «scanned» и заглушка «catch rate»;
+  // Today PnL живёт в 📅-календаре, здесь не дублируется).
+  const acts=T.filter(t=>t.status==='action');
   const esc=POS.filter(p=>p.escaping).length;
+  const top=acts.reduce((m,t)=>Math.max(m,+t.pri||0),0);
+  const topCol=top>=80?'var(--lime)':top>=55?'var(--amber)':'var(--dim2)';
   return [
-    [t('kpi_scan'),'scan','var(--teal)',cycles*T.length,t('kpi_sub_scan',cycles)],
-    [t('kpi_safety'),'shield','var(--lime)',passG(1),t('kpi_sub_block',killAt(1))],
-    [t('kpi_consensus'),'users','var(--lime)',passG(2),t('kpi_sub_block',killAt(2))],
-    [t('kpi_pending'),'target','var(--lime)',act,t('kpi_sub_pending')],
-    [t('kpi_pos'),'gauge','var(--lime)',POS.length+'<small>/'+RISK.openMax+'</small>',t('kpi_sub_expo',(+RISK.expo).toFixed(4))],
-    [t('kpi_escape'),'siren','var(--clay)',esc,esc?t('kpi_sub_escape_act'):t('kpi_sub_escape_ok')],
-    [t('kpi_catch'),'target','var(--clay)','100%',t('kpi_catch_sub')],
+    // label, icon, accent, value, sub, alert
+    ['Awaiting you','target','var(--lime)',acts.length,acts.length?'candidates to act on':'none right now',false],
+    ['Positions','gauge','var(--violet)',POS.length+'<small>/'+RISK.openMax+'</small>','exposure '+(+RISK.expo).toFixed(3)+' SOL',false],
+    ['Escape alerts','siren','var(--clay)',esc,esc?'position(s) at risk':'all stable',esc>0],
+    ['Top signal','trend',topCol,acts.length?top:'—',acts.length?'best priority now':'waiting for setups',false],
   ];
 }
 function renderKpis(flash){
-  document.getElementById('kpis').innerHTML=kpiData().map((d,i)=>{
-    const alert=(i===5&&d[3]>0);
+  document.getElementById('kpis').innerHTML=kpiData().map(d=>{
+    const alert=d[5];
     return `<div class="kpi ${alert?'alert':''}" style="--ac:${d[2]}"><div class="k">${svg(d[1])}${d[0]}</div>
       <div class="v ${flash?'flash':''}">${d[3]}</div><div class="sub">${d[4]}</div></div>`;}).join('');
 }
