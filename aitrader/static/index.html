@@ -377,7 +377,7 @@ td{padding:5px 10px;vertical-align:middle}
       <div class="seg2"><button id="srcDemo" class="on" onclick="setSource('demo')">DEMO</button><button id="srcBe" onclick="setSource('backend')" data-i18n="src_backend">本地后端</button></div>
       <div class="wbtn" id="walletBtn" onclick="onWalletClick()" data-i18n-title="wallet_title"><span class="wdot"></span><span id="walletLbl" data-i18n="wallet_connect">Connect Wallet</span></div>
       <div class="langbtn" id="langBtn" style="display:none" onclick="switchLang()">EN</div>
-      <div class="wbtn" id="pnlBtn" onclick="openPnl()" title="PnL Calendar" style="cursor:pointer">📅 <span id="pnlBtnVal" style="font-weight:700">PnL</span></div>
+      <div class="wbtn" id="pnlBtn" onclick="openPnl()" title="PnL Calendar" style="cursor:pointer"><span id="pnlBtnIc" style="display:inline-flex;width:15px;height:15px"></span> <span id="pnlBtnVal" style="font-weight:700">PnL</span></div>
       <div class="gear" id="gearBtn" data-i18n-title="gear_title"></div>
     </div>
   </div>
@@ -2160,6 +2160,17 @@ applyI18n();tick();
 setInterval(tick,1000);
 pollTimer=setInterval(scanCycle,pollMs);
 setInterval(telemetry,2600);
+/* кнопка PnL в шапке: кастомная иконка + авто-обновление, чтобы не отставала от календаря */
+(function(){const ic=document.getElementById('pnlBtnIc');if(ic)ic.innerHTML=svg('calendar');})();
+async function refreshPnlBadge(){
+  if(source!=='backend')return;
+  try{
+    const r=await fetch(API+'/api/pnl/calendar?month='+_ym(new Date()));if(!r.ok)return;
+    const t=(await r.json()).total;const b=document.getElementById('pnlBtnVal');
+    if(b){b.innerHTML=_fmtSol(t.pnl);b.style.color=t.pnl>0?'var(--lime)':t.pnl<0?'var(--clay)':'';}
+  }catch(e){}
+}
+refreshPnlBadge();setInterval(refreshPnlBadge,30000);   // синхрон каждые 30с
 // tab 重新可见时立即补一轮（轮询在隐藏时已自动暂停，见 scanCycle）
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&source==='backend'&&bePolling)scanCycle();});
 
