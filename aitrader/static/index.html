@@ -55,7 +55,7 @@ body:not(.admin) #gearBtn{display:none !important}
 .bar h1 i{color:var(--lime);font-style:normal;margin:0 6px}
 .bar .tag{font-size:10px;color:var(--dim);letter-spacing:.16em;margin-top:4px}
 .bar-r{display:flex;align-items:center;gap:9px}
-.pill{display:flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:9px;padding:7px 11px;background:var(--ink2)}
+.pill{display:flex;align-items:center;gap:7px;border:1px solid var(--line);border-radius:9px;padding:0 11px;height:36px;box-sizing:border-box;background:var(--ink2)}
 .chainpill{position:relative;cursor:pointer}
 .chainpill:hover{border-color:var(--lime)}
 .chainpill .caret{color:var(--dim2);font-size:9px}
@@ -72,8 +72,8 @@ body:not(.admin) #gearBtn{display:none !important}
 .clock{font-family:var(--disp);font-weight:700;font-size:21px;letter-spacing:.02em}
 .mode{color:var(--amber);border-color:#f0a93b44;background:#f0a93b12}.mode .v{color:var(--amber)}
 .kill-pill .v{color:var(--dim2)}.kill-pill.on{border-color:var(--clay)}.kill-pill.on .v{color:var(--clay)}
-.seg2{display:flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--ink2)}
-.seg2 button{background:transparent;border:0;color:var(--dim);font-family:var(--mono);font-size:10px;letter-spacing:.08em;padding:8px 11px;cursor:pointer}
+.seg2{display:flex;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--ink2);height:36px;box-sizing:border-box}
+.seg2 button{background:transparent;border:0;color:var(--dim);font-family:var(--mono);font-size:10px;letter-spacing:.08em;padding:0 11px;cursor:pointer;white-space:nowrap;display:flex;align-items:center}
 .seg2 button.on{background:var(--lime);color:var(--ink);font-weight:700}
 .gear{width:36px;height:36px;border-radius:9px;border:1px solid var(--line);background:var(--ink2);color:var(--paper2);display:grid;place-items:center;cursor:pointer}
 .gear:hover{border-color:var(--lime);color:var(--lime)}.gear svg{width:16px;height:16px}
@@ -675,7 +675,7 @@ const I18N={
     wallet_disconnected_toast:'Wallet disconnected',
     lang_title:'中文 / English',
     chain_title:'Click to switch chain',
-    src_backend:'Local backend',
+    src_backend:'Backend',
     pipe_h3:'Screening Results · Awaiting Your Call',
     scanning:'◢ Scanning…',
     amt_title:'Buy amount (native token); changing it syncs every buy button below',
