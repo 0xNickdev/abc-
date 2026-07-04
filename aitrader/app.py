@@ -977,7 +977,15 @@ def assess_escape(cur_sec: dict, entry: dict):
     if cur_sec.get("top10", 0) > entry.get("top10", 0) + 0.15:
         sev += 22; sigs.append((f"Top-10 concentration rose to {cur_sec.get('top10',0):.0%}", cur_sec.get("top10",0) > 0.5))
     if not sigs:
-        sigs.append(("Position stable — monitoring", False))
+        # Стабильно — но показываем ЖИВОЙ статус того, что мониторим (а не пустую заглушку),
+        # чтобы реальный монитор был так же информативен, как демо.
+        sigs.append(("✓ Mint renounced" if cur_sec.get("renounced_mint")
+                     else "⚠ Mint NOT renounced (can dilute)", not cur_sec.get("renounced_mint")))
+        sigs.append(("✓ Freeze renounced" if cur_sec.get("renounced_freeze")
+                     else "⚠ Freeze NOT renounced (can lock sells)", not cur_sec.get("renounced_freeze")))
+        top10 = cur_sec.get("top10", 0)
+        if top10:
+            sigs.append((f"Top-10 holders {top10:.0%}", top10 > 0.5))
     return min(100, sev), sigs
 
 # ──────────────────────────────────────────────────────────────────────────
