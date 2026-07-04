@@ -402,6 +402,11 @@ td{padding:5px 10px;vertical-align:middle}
 .pnlcell.loss .pnlv{color:var(--clay,#e8896b)}
 .pnlcell.today{outline:2px solid var(--violet,#8b5cf6);outline-offset:-1px}
 .pnltot .win{color:var(--lime,#9be86b);font-weight:700}.pnltot .loss{color:var(--clay,#e8896b);font-weight:700}
+.pnlstats{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin-top:12px}
+.pstat{display:flex;flex-direction:column;gap:2px;padding:7px 8px;border:1px solid rgba(255,255,255,.07);border-radius:8px;background:rgba(255,255,255,.02)}
+.pstat .pl{font-size:9px;color:var(--dim2,#9aa);text-transform:uppercase;letter-spacing:.03em}
+.pstat .pv{font-size:13px;font-weight:700;color:var(--paper,#fff)}
+.pstat .pv.win{color:var(--lime,#9be86b)}.pstat .pv.loss{color:var(--clay,#e8896b)}
 </style>
 <div class="scrim" id="pipeScrim">
   <div class="modal">
@@ -460,7 +465,8 @@ td{padding:5px 10px;vertical-align:middle}
       </div>
       <div class="pnlgrid" id="pnlHead"></div>
       <div class="pnlgrid" id="pnlDays"></div>
-      <div class="hint" id="pnlNote" style="margin-top:10px"></div>
+      <div class="pnlstats" id="pnlStats"></div>
+      <div class="hint" id="pnlNote" style="margin-top:8px"></div>
     </div>
   </div>
 </div>
@@ -1274,7 +1280,26 @@ function setSource(s){
 /* ── PnL-календарь (per-user дневной реализованный PnL) ── */
 let pnlYM=null;   // {y,m} текущий показываемый месяц
 function _ym(d){return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0');}
-function openPnl(){pnlYM=null;document.getElementById('pnlScrim').classList.add('on');loadPnl();}
+function openPnl(){pnlYM=null;document.getElementById('pnlScrim').classList.add('on');loadPnl();loadPnlStats();}
+async function loadPnlStats(){
+  const box=document.getElementById('pnlStats');if(!box)return;
+  if(source!=='backend'){box.innerHTML='';return;}
+  try{
+    const r=await fetch(API+'/api/backtest');if(!r.ok)throw 0;
+    const rz=(await r.json()).realized||{};
+    if(!rz.trades){box.innerHTML='';return;}
+    const pct=v=>(v>=0?'+':'')+Math.round(v*100)+'%';
+    const R=rz.expectancy_R||rz.avg_R||0;
+    const cell=(lbl,val,cls)=>`<div class="pstat"><span class="pl">${lbl}</span><span class="pv ${cls||''}">${val}</span></div>`;
+    box.innerHTML=
+      cell('Trades',rz.trades)+
+      cell('Win rate',Math.round((rz.win_rate||0)*100)+'%')+
+      cell('Avg win',pct(rz.avg_win_pct||0),'win')+
+      cell('Avg loss',pct(rz.avg_loss_pct||0),'loss')+
+      cell('Expectancy',(R>=0?'+':'')+R.toFixed(2)+'R',R>=0?'win':'loss')+
+      cell('Best / Worst',pct(rz.best_pct||0)+' / '+pct(rz.worst_pct||0));
+  }catch(e){box.innerHTML='';}
+}
 function closePnl(){document.getElementById('pnlScrim').classList.remove('on');}
 function pnlMonth(delta){
   const [y,m]=(pnlYM||_ym(new Date())).split('-').map(Number);
