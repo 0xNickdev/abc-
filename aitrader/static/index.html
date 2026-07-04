@@ -295,6 +295,8 @@ td{padding:5px 10px;vertical-align:middle}
 .scrim.view-mode .mbody{flex:1;overflow-y:auto;padding:20px 22px}
 .scrim.view-mode .mfoot{border-top:1px solid var(--line);padding:14px 22px;flex-shrink:0}
 .scrim.view-mode .tabpane{max-width:920px}
+.scrim.view-mode #tab_positions{max-width:none}
+.posviewgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:12px}
 .modal{width:520px;max-width:92vw;border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,var(--panel2),var(--panel));box-shadow:0 30px 80px #000a}
 .filterfields{display:grid;grid-template-columns:1fr 1fr;gap:7px 12px;margin-top:6px}
 .filterfields .ff{display:flex;flex-direction:column;gap:3px}
@@ -483,6 +485,7 @@ td{padding:5px 10px;vertical-align:middle}
       <div class="tabpane" id="tab_strategy"><div id="stratCards"></div></div>
       <div class="tabpane" id="tab_bot"><div id="botPane"></div></div>
       <div class="tabpane" id="tab_kol"><div id="kolPane"></div></div>
+      <div class="tabpane" id="tab_positions"><div id="positionsView"></div></div>
       <div class="mwarn" data-i18n="pipe_mwarn">⚠ 命令在你本机后端执行（127.0.0.1），仅限热榜命令。保存后立即生效：命令下一轮起用，间隔即时重设。</div>
     </div>
     <div class="mfoot"><button class="mbtn" onclick="savePipe()" data-i18n="pipe_save">保存并立即生效</button><button class="mbtn ghost" onclick="resetPipeCmd()" data-i18n="pipe_reset">恢复默认命令</button><button class="mbtn ghost" onclick="closePipe()" data-i18n="btn_close">关闭</button><span class="savestate" id="pipeState"></span></div>
@@ -1224,6 +1227,22 @@ function renderDetail(){
 
 /* ── escape monitor ── */
 function sevLevel(s){return s>=70?t('sev_escape'):s>=50?t('sev_high'):s>=30?t('sev_watch'):t('sev_stable');}
+function posCardHTML(p,i){
+  const hot=p.severity>=70;
+  const key=p.address||p.addr||p.sym;
+  let acls=p.escaping?'esc':'';
+  if(posIsAlert(p)){acls+=' falert';if(!escAlertSet.has(key)){acls+=' flash';escAlertSet.add(key);}}
+  else escAlertSet.delete(key);
+  return `<div class="pos ${acls}">
+    <div class="top"><div><span class="ps">${p.sym}</span>${caCell(p)}${p.price?`<small class="px">${t('pos_price',fmtPrice(p.price),fmtPrice(p.entryPrice))}</small>`:''}</div>
+      <span class="pnl ${p.pnl>=0?'up':'dn'}">${p.pnl>=0?'+':''}${(p.pnl*100).toFixed(1)}%</span>
+      ${p.selfc?`<button class="escbtn" title="${t('ph_sell_title')}" onclick="phantomSell(${i})">⚡ ${t('ph_sell')}</button>`:''}
+      <button class="escbtn" onclick="escape_(${i})">${svg('door')}${p.escaping?t('escbtn_now'):t('escbtn')}</button>
+      <button class="xbtn" title="${t('unmon_btn_title')}" onclick="unmonitor_(${i})">×</button></div>
+    <div class="sev"><div class="b"><i class="${hot?'hot':''}" style="width:${p.severity}%"></i></div><span class="lv" style="${hot?'color:var(--clay)':''}">${sevLevel(p.severity)} ${p.severity}</span></div>
+    <div class="sigs">${p.sigs.map(s=>`<div class="sig ${s.hot?'hot':''}">${svg(s.hot?'warn':'shield')}${sigText(s)}</div>`).join('')}</div>
+  </div>`;
+}
 function renderPositions(){
   const box=document.getElementById('positions');
   // дедуп по адресу: страхуемся от дублей позиции (scan + /api/positions могут наложиться)
@@ -1231,23 +1250,16 @@ function renderPositions(){
   POS=POS.filter(p=>{const k=p.address||p.addr||p.sym;if(_seen.has(k))return false;_seen.add(k);return true;});
   const alerts=POS.filter(p=>p.escaping).length;
   document.getElementById('escCnt').textContent=POS.length?t('esc_cnt',POS.length,RISK.openMax,alerts):'';
-  if(!POS.length){box.innerHTML=`<div class="posempty">${t('pos_empty')}</div>`;return;}
-  box.innerHTML=POS.map((p,i)=>{
-    const hot=p.severity>=70;
-    // 左侧筛选判定为非全绿/掉榜 → 弱红底；首次进入该状态才闪一下
-    const key=p.address||p.addr||p.sym;
-    let acls=p.escaping?'esc':'';
-    if(posIsAlert(p)){acls+=' falert';if(!escAlertSet.has(key)){acls+=' flash';escAlertSet.add(key);}}
-    else escAlertSet.delete(key);
-    return `<div class="pos ${acls}">
-      <div class="top"><div><span class="ps">${p.sym}</span>${caCell(p)}${p.price?`<small class="px">${t('pos_price',fmtPrice(p.price),fmtPrice(p.entryPrice))}</small>`:''}</div>
-        <span class="pnl ${p.pnl>=0?'up':'dn'}">${p.pnl>=0?'+':''}${(p.pnl*100).toFixed(1)}%</span>
-        ${p.selfc?`<button class="escbtn" title="${t('ph_sell_title')}" onclick="phantomSell(${i})">⚡ ${t('ph_sell')}</button>`:''}
-        <button class="escbtn" onclick="escape_(${i})">${svg('door')}${p.escaping?t('escbtn_now'):t('escbtn')}</button>
-        <button class="xbtn" title="${t('unmon_btn_title')}" onclick="unmonitor_(${i})">×</button></div>
-      <div class="sev"><div class="b"><i class="${hot?'hot':''}" style="width:${p.severity}%"></i></div><span class="lv" style="${hot?'color:var(--clay)':''}">${sevLevel(p.severity)} ${p.severity}</span></div>
-      <div class="sigs">${p.sigs.map(s=>`<div class="sig ${s.hot?'hot':''}">${svg(s.hot?'warn':'shield')}${sigText(s)}</div>`).join('')}</div>
-    </div>`;}).join('');
+  box.innerHTML=POS.length?POS.map(posCardHTML).join(''):`<div class="posempty">${t('pos_empty')}</div>`;
+  // если открыт полноэкранный раздел Positions — держим его в актуальном виде
+  const pv=document.getElementById('positionsView');
+  if(pv&&document.getElementById('tab_positions').classList.contains('on'))renderPositionsView();
+}
+/* полноэкранный раздел Positions: только открытые позиции */
+function renderPositionsView(){
+  const box=document.getElementById('positionsView');if(!box)return;
+  box.innerHTML=POS.length?`<div class="posviewgrid">${POS.map(posCardHTML).join('')}</div>`
+    :`<div class="posempty" style="padding:40px;text-align:center">${t('pos_empty')}</div>`;
 }
 
 /* ── funnel + risk mini ── */
@@ -1358,7 +1370,7 @@ function setSource(s){
 /* ── PnL-календарь (per-user дневной реализованный PnL) ── */
 let pnlYM=null;   // {y,m} текущий показываемый месяц
 function _ym(d){return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0');}
-function openPnl(){closeAllViews();pnlYM=null;document.getElementById('pnlScrim').classList.add('on','view-mode');loadPnl();loadPnlStats();}
+function openPnl(){closeAllViews();pnlYM=null;const s=document.getElementById('pnlScrim');s.classList.add('on','view-mode');_placeView(s);loadPnl();loadPnlStats();}
 async function loadPnlStats(){
   const box=document.getElementById('pnlStats');if(!box)return;
   if(source!=='backend'){box.innerHTML='';return;}
@@ -1513,10 +1525,16 @@ function closeAllViews(){
   const ws=document.getElementById('walletDrawerScrim'),wd=document.getElementById('walletDrawer');
   if(ws)ws.classList.remove('on');if(wd)wd.classList.remove('on');
 }
+/* view открывается ПОД топ-баром (не перекрывает шапку с MODE/wallet/PnL), заполняя область ниже */
+function _viewTop(){const b=document.querySelector('.bar');return b?Math.round(b.getBoundingClientRect().bottom+6):60;}
+function _placeView(scrim){scrim.style.top=_viewTop()+'px';}
 async function openView(section){
   closeAllViews();                       // сначала гасим PnL/другой раздел
   const scrim=document.getElementById('pipeScrim');
-  scrim.classList.add('on','view-mode');
+  scrim.classList.add('on','view-mode');_placeView(scrim);
+  if(section==='positions'){renderPositionsView();document.getElementById('viewTitle').textContent='Positions';
+    document.querySelectorAll('#pipeScrim .tabpane').forEach(p=>p.classList.toggle('on',p.id==='tab_positions'));
+    document.querySelector('#pipeScrim .hreset').style.display='none';document.querySelector('#pipeScrim .mfoot').style.display='none';return;}
   document.getElementById('viewTitle').textContent=VIEW_TITLES[section]||'';
   // показать ТОЛЬКО выбранную панель
   document.querySelectorAll('#pipeScrim .tabpane').forEach(p=>p.classList.toggle('on',p.id==='tab_'+section));
@@ -2080,7 +2098,7 @@ function switchLang(){lang=(lang==='zh'?'en':'zh');localStorage.setItem('aitrade
 /* ── левый рейл: единая навигация вместо разбросанных кнопок/модалок ── */
 const RAIL=[
   {id:'scanner',icon:'grid',label:'Scanner',act:()=>backToScanner()},
-  {id:'positions',icon:'gauge',label:'Positions',act:()=>{backToScanner();const e=document.getElementById('escCard');if(e)e.scrollIntoView({behavior:'smooth',block:'center'});}},
+  {id:'positions',icon:'gauge',label:'Positions',act:()=>openView('positions')},
   {id:'pnl',icon:'calendar',label:'PnL',act:()=>openPnl()},
   {id:'bot',icon:'zap',label:'Bot',act:()=>openView('bot')},
   {id:'strategy',icon:'brain',label:'Strategy',act:()=>openView('strategy')},
