@@ -14,10 +14,17 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 
 HERE = pathlib.Path(__file__).resolve().parent
 WALLETS_PATH = HERE / "outputs" / "wallets.json"
+
+# Веса «доказанного эджа» кошельков считает офлайн review-loop (review.py) из
+# реализованных исходов и кладёт сюда; scoring читает их через edge_weight().
+# Путь уважает ABC_DATA_DIR (том Railway), как и остальной журнал/позиции.
+_DATA_DIR = pathlib.Path(os.getenv("ABC_DATA_DIR").strip()) if os.getenv("ABC_DATA_DIR", "").strip() else HERE / "outputs"
+EDGES_PATH = _DATA_DIR / "wallet_edges.json"
 
 
 def load_tracked() -> dict:
@@ -65,6 +72,55 @@ def confluence(holder_addrs) -> list:
 def rolling_pnl(addr: str) -> dict:
     """占位：每个钱包的滚动已实现盈亏/胜率。上线前接真实数据再启用做权重。"""
     return dict(address=addr, window_days=30, realized_pnl=None, win_rate=None, trades=None)
+
+
+# ── Edge-weighting: вес кошелька по ДОКАЗАННОМУ эджу (заполняет review-loop) ──
+# Ключ = имя кошелька (то, что течёт в features.tracked_names → attrib → review),
+# чтобы вес был доступен там же, где scoring считает бонус за smart-money в场.
+_edges_mem: dict | None = None
+
+
+def load_edges() -> dict:
+    """Читает outputs/wallet_edges.json → {name: {weight, trades, winrate, expectancy_R}}.
+    Кэш в памяти; save_edges/reload_edges инвалидируют. Файла нет → пусто (все веса нейтральны)."""
+    global _edges_mem
+    if _edges_mem is None:
+        try:
+            data = json.loads(EDGES_PATH.read_text())
+            _edges_mem = data if isinstance(data, dict) else {}
+        except Exception:
+            _edges_mem = {}
+    return _edges_mem
+
+
+def save_edges(edges: dict):
+    """Ночной цикл кладёт сюда посчитанные веса; обновляет и кэш, и файл."""
+    global _edges_mem
+    _edges_mem = dict(edges or {})
+    try:
+        EDGES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        EDGES_PATH.write_text(json.dumps(_edges_mem, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def reload_edges() -> dict:
+    global _edges_mem
+    _edges_mem = None
+    return load_edges()
+
+
+def edge_weight(name: str) -> float:
+    """Множитель бонуса за этот кошелёк в scoring. 1.0 = нейтрально (мало данных или
+    неизвестен) — так фича без данных не искажает ранжирование; review-loop поднимает
+    вес доказанно прибыльным кошелькам и режет убыточным (см. review.wallet_edge)."""
+    e = load_edges().get(name)
+    if not isinstance(e, dict):
+        return 1.0
+    try:
+        return float(e.get("weight", 1.0))
+    except (TypeError, ValueError):
+        return 1.0
 
 
 def summary() -> dict:

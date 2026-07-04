@@ -54,6 +54,7 @@ import bot  # 自主执行回路（量化机器人，纸面优先）
 import dexadapter  # реальные данные без ключей (GeckoTerminal + Solana RPC), DATA_SOURCE=dex
 import execution  # non-custodial：服务器只构建 tx，签名在浏览器（Phantom）
 import kol  # Twitter/X KOL 信号（per-user opt-in）
+import review  # офлайн review-loop: эдж кошельков/KOL + предложения по конфигу (обучение на своих данных)
 import sessionwallet  # N3: session-кошелёк с ограниченным балансом (этап 7)
 import strategy  # ABC Alpha v1：具名策略预设 + 入场信号评估
 import wallets  # 私有 smart-money 跟踪钱包（信号，非跟单）
@@ -68,6 +69,7 @@ LOG_PATH = OUT_DIR / "trade_decisions.jsonl"
 POSITIONS_PATH = OUT_DIR / "positions.json"   # 持仓落盘：reload/重启不丢，与筛选榜完全独立
 TRENDING_CMDS_PATH = OUT_DIR / "trending_cmds.json"   # 按链热榜命令落盘：用户改过即持久，重启/刷新不回默认
 FILTERS_PATH = OUT_DIR / "filters.json"       # 筛选过滤器阈值落盘：UI 改过即持久，重启/刷新不回默认
+REVIEWS_DIR = OUT_DIR / "reviews"             # ночной review-loop: дневные отчёты (JSON per date)
 ENV_PATH = pathlib.Path.home() / ".config" / "gmgn" / ".env"
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -799,7 +801,13 @@ def priority_score(f: TokenFeatures, conv: float, crowd: str) -> int:
          + w["turnover"] * s_turn + w["consensus"] * s_cons + w["safety"] * s_safe)
     if f.chg_1h <= CFG["momentum_reject_chg1h"]:        # 阴跌沉底
         s *= 0.4
-    s += min(18, f.tracked_hits * 7)                    # 私有 smart-money 在场 → 强加成
+    # 私有 smart-money 在场 → 强加成；按【已证明的 edge】给每个钱包加权。
+    # 默认权重 1.0（中性）→ 与旧行为一致；数据够了才由 review-loop 调整每个钱包的权重
+    # （盈利钱包 >1、亏损钱包 <1），见 wallets.edge_weight / review.wallet_edge。
+    _names = f.tracked_names or []
+    _wsum = sum(wallets.edge_weight(n) for n in _names)
+    _wsum += max(0, f.tracked_hits - len(_names))       # 命中多于展示名时，其余按中性 1.0 计
+    s += min(18, _wsum * 7)
     s += min(10, max(0.0, f.holder_velocity) * 0.25)    # органический набор держателей (▲40/мин → максимум)
     return max(0, min(99, round(s)))
 
@@ -1264,6 +1272,55 @@ def pnl_calendar(pubkey: str, month: str) -> dict:
                 winrate=round(tot["wins"] / tot["trades"], 3) if tot["trades"] else 0.0)
 
 # ──────────────────────────────────────────────────────────────────────────
+# 10b. Ночной review-loop (офлайн-обучение на своих данных; ничего не применяет сам)
+#   Раз в сутки разбирает журнал → эдж кошельков/KOL + предложения по конфигу.
+#   persist=True: пишет веса кошельков (wallets.save_edges → scoring читает их),
+#   дневной отчёт (outputs/reviews/<date>.json) и строку REVIEW в журнал.
+#   Правки CFG/фильтров применяются ТОЛЬКО явным кликом (/api/review/apply).
+# ──────────────────────────────────────────────────────────────────────────
+NIGHTLY_REVIEW = os.getenv("ABC_NIGHTLY_REVIEW", "").strip().lower() in ("1", "true", "yes", "on")
+REVIEW_HOUR = int(os.getenv("ABC_REVIEW_HOUR", "3") or 3)   # час UTC ночного прогона
+
+def run_review_and_persist(persist: bool = True) -> dict:
+    """Прогнать review-loop по журналу. persist=True → записать веса/отчёт/строку REVIEW."""
+    records = backtest.load_records(LOG_PATH)
+    res = review.run(records, cfg=CFG, filters=ST.filters,
+                     trigger=strategy.get(ST.strategy_id)["trigger"])
+    if persist:
+        try:
+            wallets.save_edges(res["edges"])           # веса → scoring подхватит на след. скане
+        except Exception:
+            pass
+        try:
+            REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
+            (REVIEWS_DIR / f"{res['report']['day']}.json").write_text(
+                json.dumps(res, ensure_ascii=False, indent=2))
+        except Exception:
+            pass
+        rep = res["report"]
+        log("REVIEW", "ABC",
+            f"обзор {rep['day']}: сделок {rep['overall']['trades']}, "
+            f"предложений {len(rep['proposals'])}, кошельков с эджем {len(res['edges'])}")
+    return res
+
+def _nightly_review_loop():
+    """Демон: прогон при старте (подтянуть веса сразу), далее раз в сутки в REVIEW_HOUR UTC."""
+    stop = threading.Event()
+    while not stop.is_set():
+        try:
+            run_review_and_persist(persist=True)
+        except Exception as e:
+            try:
+                log("REVIEW", "ABC", f"ошибка ночного цикла: {e}")
+            except Exception:
+                pass
+        now = datetime.datetime.now(datetime.timezone.utc)
+        nxt = now.replace(hour=REVIEW_HOUR, minute=0, second=0, microsecond=0)
+        if nxt <= now:
+            nxt += datetime.timedelta(days=1)
+        stop.wait(max(60.0, (nxt - now).total_seconds()))
+
+# ──────────────────────────────────────────────────────────────────────────
 # 11. 筛选流水线（核心：确定性先筛 → 评分 → LLM 只判幸存者 → 产候选，不执行）
 # ──────────────────────────────────────────────────────────────────────────
 def _tracked_for(f: TokenFeatures, g: GMGNAdapter):
@@ -1299,6 +1356,26 @@ def _holder_velocity(addr: str, count: int) -> float:
     if not prev or now - prev[0] < 1.0:
         return 0.0
     return round((count - prev[1]) / ((now - prev[0]) / 60.0), 1)
+
+# ── Атрибуция входа (топливо для edge-weighting + ночного review-loop) ──
+# Какие tracked-кошельки/KOL были «в монете» на момент скрина. Снимок кладём при
+# формировании ACTION-кандидата, читаем в do_buy (кладём в позицию), а при закрытии
+# позиции переносим в SELL-запись журнала → каждая реализованная сделка размечена.
+_ATTRIB_CACHE: dict[str, dict] = {}
+
+def _remember_attrib(f: TokenFeatures, priority: int):
+    _ATTRIB_CACHE[f.address] = dict(
+        tracked=list(f.tracked_names or []), tracked_hits=int(f.tracked_hits),
+        smart_degen=int(f.smart_degen), renowned=int(f.renowned),
+        sm_confluence=int(f.sm_confluence), priority=int(priority),
+        age_min=round(f.age_min, 1), buy_ratio=round(f.buy_ratio, 3),
+        liquidity=round(f.liquidity, 2), chg_5m=round(f.chg_5m, 4))
+    if len(_ATTRIB_CACHE) > 2000:                      # кап памяти
+        _ATTRIB_CACHE.pop(next(iter(_ATTRIB_CACHE)))
+
+def _attrib_for(address: str) -> dict:
+    """Снимок атрибуции для адреса (пусто, если монету не скринили в этой сессии процесса)."""
+    return dict(_ATTRIB_CACHE.get(address, {}))
 
 def screen_once(chain: str, s: UserSession | None = None) -> dict:
     s = s or ST                       # 会话（多用户：每 pubkey 自己的过滤器/持仓/风控）
@@ -1355,6 +1432,7 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
         # 组合风控不在此阻断，只标 risk_warn（人在环：提示而非硬拦）
         allow, rnote = s.risk.gate(size, n_pos, exposure)
         pri = priority_score(f, v.conviction, v.crowdedness)
+        _remember_attrib(f, pri)                       # снимок атрибуции для будущей сделки по этому адресу
         abc = strategy.evaluate_for(s.strategy_id, f).as_dict()   # 按该用户选定策略评入场信号
         abc["strategy"] = strategy.get(s.strategy_id)["name"]
         decisions.append(dict(
@@ -1552,13 +1630,15 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         filled = False
         status_msg = "SHADOW (not sent on-chain — switch to LIVE + signing key)"
 
+    attrib = _attrib_for(address)                    # атрибуция входа (кошельки/KOL в场) → едет с позицией
     s.positions.append(dict(symbol=symbol, address=address, size_sol=round(size_sol, 4),
                             pnl=0.0, cycles=0, entry=entry, chain=chain,
-                            entry_price=entry_price, cur_price=entry_price))
+                            entry_price=entry_price, cur_price=entry_price,
+                            opened_ts=time.time(), entry_attrib=attrib))
     s.save_positions()
     _verb = "成交" if filled else ("提交·待确认" if s.mode == "LIVE" else "记录")
     log("BUY", symbol, f"{s.mode} {_verb} {size_sol} ({chain})",
-        dict(size_sol=size_sol, chain=chain, **exit_plan()), mode=s.mode)
+        dict(size_sol=size_sol, chain=chain, attrib=attrib, **exit_plan()), mode=s.mode)
     return dict(ok=True, status=status_msg, filled=filled, symbol=symbol)
 
 def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
@@ -1587,6 +1667,9 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
     pnl = p.get("pnl", 0)
     sold_sol = round(p["size_sol"] * frac, 6)        # 本次了结的本金（按比例）
     tag = (f" · {reason}" if reason else "")
+    # атрибуция входа + время удержания → в SELL-запись (топливо review-loop: исход × кошельки/KOL)
+    attrib = p.get("entry_attrib") or {}
+    hold_min = round((time.time() - p["opened_ts"]) / 60.0, 1) if p.get("opened_ts") else None
     if full:
         if pnl < 0:
             s.risk.consec_losses += 1
@@ -1594,7 +1677,8 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         else:
             s.risk.consec_losses = 0
         log("SELL", p["symbol"], f"{s.mode} 平仓 PnL {pnl:+.1%}{tag}",
-            dict(pnl=pnl, size_sol=p.get("size_sol", 0.0), address=p.get("address"), fraction=1.0),
+            dict(pnl=pnl, size_sol=p.get("size_sol", 0.0), address=p.get("address"), fraction=1.0,
+                 attrib=attrib, hold_min=hold_min),
             mode=s.mode, pubkey=s.pubkey)
         s.positions.pop(idx)
     else:
@@ -1602,7 +1686,8 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * sold_sol, 4)
         p["size_sol"] = round(p["size_sol"] - sold_sol, 6)
         log("SELL", p["symbol"], f"{s.mode} 分批 {pct}% PnL {pnl:+.1%}{tag}",
-            dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac),
+            dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac,
+                 attrib=attrib, hold_min=hold_min),
             mode=s.mode, pubkey=s.pubkey)
     s.save_positions()
     return dict(ok=True, symbol=p["symbol"], fraction=frac, closed=full)
@@ -1637,6 +1722,10 @@ async def _lifespan(_app: FastAPI):
                      positions_fn=lambda: ST.positions, risk_cfg=CFG, lock=ST.lock,
                      halted_fn=lambda: ST.risk.halted or ST.risk.realized_loss_today >= CFG["daily_loss_cap_sol"])
         log("BOT", "ABC", f"автозапуск режим {_auto} (BOT_AUTOSTART)", mode=ST.mode)
+    # Ночной review-loop (офлайн-обучение): opt-in через ABC_NIGHTLY_REVIEW=1.
+    # Первый прогон при старте подтянет веса кошельков сразу, далее раз в сутки.
+    if NIGHTLY_REVIEW:
+        threading.Thread(target=_nightly_review_loop, daemon=True).start()
     yield
 
 app = FastAPI(title="GMGN AI Trader (local)", lifespan=_lifespan)
@@ -1977,6 +2066,73 @@ def api_pnl_calendar(month: str = "", x_wallet: str | None = WalletHeader):
     # появятся реальные пользовательские сделки.
     return pnl_calendar("*", m)
 
+# ── Ночной review-loop: отчёт (read-only) + форс-прогон + применение одного предложения ──
+def _block_if_not_owner(sess: UserSession):
+    """Тюнинг конфига/эджа — house-level (влияет на общий scoring): только оператор
+    (ADMIN) или локальная сессия (127.0.0.1, без кошелька). Внешние юзеры — 403."""
+    if not (ADMIN_MODE or sess.pubkey == DEFAULT_PUBKEY):
+        raise HTTPException(403, "review-loop доступен оператору (локальная сессия/ADMIN)")
+
+# Белый список применяемых параметров (только house-кнобы; произвольные ключи не пишем).
+_REVIEW_CFG_KEYS = {"buy_ratio_reject": "num", "buy_ratio_pass": "num",
+                    "min_smart_money_confluence": "int", "min_llm_conviction": "num",
+                    "momentum_reject_chg1h": "num", "momentum_reject_chg5m": "num"}
+_REVIEW_BOT_KEYS = {"min_priority": "int", "max_new_per_tick": "int"}
+
+def _apply_review_param(target: str, param: str, value, sess: UserSession):
+    """Применить ОДНО предложение к конфигу (human-in-the-loop). Возвращает записанное значение."""
+    if target == "filters":
+        if param not in DEFAULT_FILTERS:
+            raise HTTPException(400, f"неизвестный фильтр: {param}")
+        return sess.set_filters({param: value}).get(param)   # sanitize + persist (per-user)
+    if target == "CFG":
+        if param not in _REVIEW_CFG_KEYS:
+            raise HTTPException(400, f"параметр CFG не в белом списке: {param}")
+        CFG[param] = int(value) if _REVIEW_CFG_KEYS[param] == "int" else float(value)
+        return CFG[param]
+    if target == "bot":
+        if param not in _REVIEW_BOT_KEYS:
+            raise HTTPException(400, f"параметр бота не в белом списке: {param}")
+        sess.bot.cfg[param] = int(value)
+        return sess.bot.cfg[param]
+    raise HTTPException(400, "target: CFG | filters | bot")
+
+@app.get("/api/review")
+def api_review(x_wallet: str | None = WalletHeader):
+    """Отчёт review-loop: эдж кошельков/KOL + предложения по конфигу. Отдаёт сегодняшний
+    сохранённый отчёт (если ночной цикл уже считал) или считает на лету (read-only)."""
+    get_session(x_wallet)
+    try:
+        p = REVIEWS_DIR / (datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d") + ".json")
+        if p.exists():
+            return json.loads(p.read_text())
+    except Exception:
+        pass
+    return run_review_and_persist(persist=False)
+
+@app.post("/api/review/run")
+def api_review_run(x_wallet: str | None = WalletHeader):
+    """Форсировать прогон + записать веса/отчёт (house-level: оператор)."""
+    _block_if_public()
+    sess = get_session(x_wallet)
+    _block_if_not_owner(sess)
+    return run_review_and_persist(persist=True)
+
+class ReviewApplyIn(BaseModel):
+    target: str                     # CFG | filters | bot
+    param: str
+    value: float | int | str | bool
+
+@app.post("/api/review/apply")
+def api_review_apply(a: ReviewApplyIn, x_wallet: str | None = WalletHeader):
+    """Применить одно предложение review-loop (human-in-the-loop; только house-кнобы из白名单)."""
+    _block_if_public()
+    sess = get_session(x_wallet)
+    _block_if_not_owner(sess)
+    applied = _apply_review_param(a.target, a.param, a.value, sess)
+    log("REVIEW_APPLY", "ABC", f"{a.target}.{a.param} → {applied}", mode=sess.mode)
+    return dict(ok=True, target=a.target, param=a.param, value=applied)
+
 class BotConfigIn(BaseModel):
     mode: str | None = None              # n1 | n2
     max_new_per_tick: int | None = None
@@ -2023,7 +2179,7 @@ def _n3_execute(sess: UserSession, side: str, chain: str, address: str,
                                  renounced_freeze=True, burn_ratio=0.0, top10=0.0),
             chain="sol", entry_price=price, cur_price=price,
             token_amount=built.get("out_amount", 0), self_custody=True, session=True,
-            wallet_tx=sig))
+            wallet_tx=sig, opened_ts=time.time(), entry_attrib=_attrib_for(address)))
         sess.save_positions()
         log("BUY", symbol, f"N3 session-кошелёк {size_sol} SOL · tx {sig[:16]}…",
             dict(size_sol=size_sol, chain="sol", session=True), mode="LIVE")
@@ -2207,7 +2363,7 @@ def api_tx_confirm(c: TxConfirmIn, x_wallet: str | None = WalletHeader,
                 symbol=symbol, address=c.address, size_sol=round(c.size_sol, 4),
                 pnl=0.0, cycles=0, entry=entry, chain="sol", entry_price=price,
                 cur_price=price, token_amount=int(c.token_amount), self_custody=True,
-                wallet_tx=c.signature))
+                wallet_tx=c.signature, opened_ts=time.time(), entry_attrib=_attrib_for(c.address)))
             sess.save_positions()
             log("BUY", symbol, f"PHANTOM исполнено {c.size_sol} SOL · {tag}",
                 dict(size_sol=c.size_sol, chain="sol", self_custody=True), mode="LIVE")
