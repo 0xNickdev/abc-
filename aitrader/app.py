@@ -1934,7 +1934,9 @@ def api_strategy_apply(x_wallet: str | None = WalletHeader):
 def api_backtest(x_wallet: str | None = WalletHeader):
     """从 trade_decisions.jsonl 复盘：漏斗 + 已实现 PnL/胜率/R + 纸面预期 R（按选定策略阈值）。"""
     sess = get_session(x_wallet)
-    return backtest.summary(trig=strategy.get(sess.strategy_id)["trigger"])
+    # передаём актуальный путь журнала (backtest.py по умолчанию смотрит в HERE/outputs,
+    # а с ABC_DATA_DIR журнал лежит на подключённом диске — иначе бэктест «видит» 0)
+    return backtest.summary(path=LOG_PATH, trig=strategy.get(sess.strategy_id)["trigger"])
 
 @app.get("/api/pnl/calendar")
 def api_pnl_calendar(month: str = "", x_wallet: str | None = WalletHeader):
