@@ -1055,17 +1055,26 @@ class TestPnlCalendar:
     def client(self, tmp_path, monkeypatch):
         return _mu_client(tmp_path, monkeypatch)
 
-    def test_per_user_daily_aggregation(self, client, monkeypatch):
+    def test_endpoint_is_house_view_all_trades(self, client):
         import datetime as dt
         appmod.log("SELL", "A", "x", dict(pnl=0.2, size_sol=0.1), pubkey="local")   # +0.02
         appmod.log("SELL", "B", "x", dict(pnl=-0.5, size_sol=0.1), pubkey="local")  # -0.05
-        appmod.log("SELL", "C", "x", dict(pnl=0.3, size_sol=0.1), pubkey="WX")       # чужой
+        appmod.log("SELL", "C", "x", dict(pnl=0.3, size_sol=0.1), pubkey="WX")       # +0.03
         m = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
-        d = client.get(f"/api/pnl/calendar?month={m}").json()   # local
-        assert d["total"]["trades"] == 2 and d["winrate"] == 0.5
-        assert abs(d["total"]["pnl"] - (-0.03)) < 1e-9
-        dx = client.get(f"/api/pnl/calendar?month={m}", headers={"X-Wallet": "WX"}).json()
-        assert dx["total"]["trades"] == 1 and dx["total"]["pnl"] == 0.03
+        # эндпоинт = house-вид: все 3 сделки, независимо от X-Wallet (иначе противоречит
+        # полосе метрик /api/backtest в том же окне)
+        for hdr in ({}, {"X-Wallet": "WX"}):
+            d = client.get(f"/api/pnl/calendar?month={m}", headers=hdr).json()
+            assert d["total"]["trades"] == 3
+            assert abs(d["total"]["pnl"] - 0.0) < 1e-9      # 0.02-0.05+0.03 = 0
+
+    def test_function_still_filters_per_user(self):
+        import datetime as dt
+        appmod.log("SELL", "A", "x", dict(pnl=0.2, size_sol=0.1), pubkey="local")
+        appmod.log("SELL", "C", "x", dict(pnl=0.3, size_sol=0.1), pubkey="WX")
+        m = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
+        assert appmod.pnl_calendar("WX", m)["total"]["trades"] == 1        # per-user сохранён
+        assert appmod.pnl_calendar("*", m)["total"]["trades"] == 2         # house = все
 
     def test_bad_month_rejected(self, client):
         assert client.get("/api/pnl/calendar?month=2026").status_code == 400

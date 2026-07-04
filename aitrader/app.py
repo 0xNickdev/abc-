@@ -1211,8 +1211,10 @@ def log(action: str, symbol: str, reason: str, extra: dict | None = None,
         fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
 def pnl_calendar(pubkey: str, month: str) -> dict:
-    """Дневной реализованный PnL (SOL) за месяц YYYY-MM для одного пользователя.
-    Источник — SELL-записи журнала: реализованный SOL ≈ pnl(доля) × size_sol(этой продажи)."""
+    """Дневной реализованный PnL (SOL) за месяц YYYY-MM.
+    pubkey="*" → все сделки (house/бот, что сейчас и нужно — торгует один бот);
+    конкретный pubkey → только его сделки. Источник — SELL-записи журнала:
+    реализованный SOL ≈ pnl(доля) × size_sol(этой продажи)."""
     pk = (pubkey or "").strip() or DEFAULT_PUBKEY
     days: dict[str, dict] = {}
     tot = dict(pnl=0.0, trades=0, wins=0)
@@ -1224,8 +1226,8 @@ def pnl_calendar(pubkey: str, month: str) -> dict:
                 continue
             if r.get("action") != "SELL" or not r.get("ts", "").startswith(month):
                 continue
-            # старые записи без pubkey считаем принадлежащими default-сессии (local)
-            if r.get("pubkey", DEFAULT_PUBKEY) != pk:
+            # pk="*" — не фильтруем (house/бот); иначе только записи этого pubkey
+            if pk != "*" and r.get("pubkey", DEFAULT_PUBKEY) != pk:
                 continue
             d = r["ts"][:10]
             sol = float(r.get("pnl", 0.0)) * float(r.get("size_sol", 0.0))
@@ -1941,11 +1943,15 @@ def api_backtest(x_wallet: str | None = WalletHeader):
 @app.get("/api/pnl/calendar")
 def api_pnl_calendar(month: str = "", x_wallet: str | None = WalletHeader):
     """Календарь дневного реализованного PnL за месяц (per-user). month=YYYY-MM (пусто=текущий)."""
-    sess = get_session(x_wallet)
+    get_session(x_wallet)
     m = month.strip() or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
     if len(m) != 7 or m[4] != "-":
         raise HTTPException(400, "month формат YYYY-MM")
-    return pnl_calendar(sess.pubkey, m)
+    # house-вид: показываем сделки бота всем (сейчас торгует один бот под local).
+    # Согласовано с /api/backtest (тоже по всему журналу) — иначе календарь и полоса
+    # метрик в одном окне противоречат друг другу. Разбивку «мои/бот» добавим, когда
+    # появятся реальные пользовательские сделки.
+    return pnl_calendar("*", m)
 
 class BotConfigIn(BaseModel):
     mode: str | None = None              # n1 | n2
