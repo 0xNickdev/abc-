@@ -28,6 +28,7 @@ body{font-family:var(--mono);font-size:13px;color:var(--paper);overflow:hidden;
 .app{height:100vh;display:flex;flex-direction:column;padding:10px;gap:9px;min-width:1160px;margin-left:56px;transition:margin-left .18s cubic-bezier(.4,0,.2,1)}
 body.rail-open .app{margin-left:196px}
 .scrim.view-mode{transition:left .18s cubic-bezier(.4,0,.2,1)}
+body.rail-open .scrim.view-mode{left:196px}   /* view уезжает вправо, рейл не наслаивается */
 /* ── левый рейл ── */
 .rail{position:fixed;top:0;left:0;bottom:0;width:56px;z-index:80;display:flex;flex-direction:column;
   background:linear-gradient(180deg,rgba(23,18,50,.92),rgba(13,10,26,.96));border-right:1px solid var(--line);
@@ -2146,9 +2147,8 @@ function railBadge(id,txt){const b=document.getElementById('rbadge-'+id);if(b)b.
   renderRail();
   const rail=document.getElementById('rail'),tog=document.getElementById('railToggle');
   tog.innerHTML=svg('menu');
-  const setOpen=(o)=>{rail.classList.toggle('open',o);document.body.classList.toggle('rail-open',o);
-    // открытый view сдвигается вправо синхронно с рейлом (не наслаивается)
-    ['pipeScrim','pnlScrim'].forEach(id=>{const s=document.getElementById(id);if(s&&s.classList.contains('view-mode'))s.style.left=(o?196:56)+'px';});};
+  // сдвиг view при развороте рейла — чисто через CSS (body.rail-open), без inline-конфликтов
+  const setOpen=(o)=>{rail.classList.toggle('open',o);document.body.classList.toggle('rail-open',o);};
   tog.onclick=(e)=>{e.stopPropagation();setOpen(!rail.classList.contains('open'));};
   const wIc=document.getElementById('walletDrawerIc');if(wIc)wIc.innerHTML=svg('wallet');
   // клик вне рейла — свернуть
