@@ -540,6 +540,52 @@ td{padding:5px 10px;vertical-align:middle}
     </div>
   </div>
 </div>
+<style>
+#reviewScrim .mbody{max-width:940px}
+.rv-empty{padding:24px;text-align:center;color:var(--dim2);font-size:13px}
+.rv-empty.small{padding:12px 4px}
+.rv-title{display:inline-flex;align-items:center;gap:9px}
+.rv-tic{display:inline-flex;width:17px;height:17px}.rv-tic svg{width:17px;height:17px}
+.rv-kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:12px}
+.rv-kpi{background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:10px;padding:12px 14px;display:flex;flex-direction:column;gap:4px}
+.rv-kv{font-size:20px;font-weight:800;color:var(--paper)}
+.rv-kv.pos{color:var(--lime)}.rv-kv.neg{color:var(--clay)}
+.rv-kl{font-size:10.5px;color:var(--dim2);text-transform:uppercase;letter-spacing:.5px}
+.rv-note{font-size:12.5px;color:var(--dim2);background:rgba(255,255,255,.02);border:1px dashed var(--line);border-radius:8px;padding:9px 12px;margin-bottom:18px}
+.rv-sec{margin-bottom:22px}
+.rv-h{font-size:13px;font-weight:700;color:var(--paper);margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.rv-cnt{font-size:11px;color:var(--dim2);background:rgba(255,255,255,.06);border-radius:20px;padding:1px 8px;font-weight:600}
+.rv-prop{background:rgba(255,255,255,.03);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin-bottom:9px}
+.rv-prop-top{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px}
+.rv-tag{font-family:ui-monospace,monospace;font-size:12px;color:var(--paper2);background:rgba(255,255,255,.05);padding:2px 8px;border-radius:6px}
+.rv-conf{font-size:10.5px;text-transform:uppercase;letter-spacing:.5px;color:var(--dim2)}
+.rv-conf.high{color:var(--lime)}.rv-conf.medium{color:#e0b64a}
+.rv-rat{font-size:13px;color:var(--paper);line-height:1.45;margin-bottom:9px}
+.rv-prop-bot{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.rv-chg{font-size:13px;color:var(--paper);font-family:ui-monospace,monospace}.rv-chg b{color:var(--paper2);margin:0 3px}
+.rv-ev{font-size:11.5px;color:var(--dim2)}
+.rv-apply{margin-left:auto;background:var(--lime);color:#05140a;border:none;border-radius:7px;padding:6px 16px;font-weight:700;font-size:12.5px;cursor:pointer}
+.rv-apply:hover{filter:brightness(1.08)}
+.rv-adv{margin-left:auto;font-size:11px;color:var(--dim2);font-style:italic}
+.rv-table{width:100%;border-collapse:collapse;font-size:12.5px}
+.rv-table th{text-align:left;color:var(--dim2);font-weight:600;font-size:10.5px;text-transform:uppercase;letter-spacing:.4px;padding:6px 10px;border-bottom:1px solid var(--line)}
+.rv-table td{padding:7px 10px;border-bottom:1px solid rgba(255,255,255,.04);color:var(--paper)}
+.rv-table td.pos{color:var(--lime)}.rv-table td.neg{color:var(--clay)}
+.rv-name{font-weight:600}
+.rv-chip{font-family:ui-monospace,monospace;font-weight:700;padding:1px 7px;border-radius:6px;background:rgba(255,255,255,.06);color:var(--paper2)}
+.rv-chip.pos{background:rgba(120,220,120,.14);color:var(--lime)}
+.rv-chip.neg{background:rgba(220,120,120,.14);color:var(--clay)}
+.rv-chip.dim{opacity:.55}
+.rv-verd{font-size:11px;padding:1px 8px;border-radius:6px}
+.rv-verd.reliable{background:rgba(120,220,120,.14);color:var(--lime)}
+.rv-verd.unreliable{background:rgba(220,120,120,.14);color:var(--clay)}
+</style>
+<div class="scrim" id="reviewScrim">
+  <div class="modal">
+    <h2><span class="rv-title"><span class="rv-tic"></span> Review · self-learning</span><span class="x" onclick="closeReview()">×</span></h2>
+    <div class="mbody" id="reviewBody"><div class="rv-empty">…</div></div>
+  </div>
+</div>
 <div class="drawer-scrim" id="walletDrawerScrim" onclick="closeWallet()"></div>
 <aside class="drawer" id="walletDrawer">
   <div class="drawer-head"><span class="dh-ic" id="walletDrawerIc"></span><span>Wallet</span><span class="x" onclick="closeWallet()">×</span></div>
@@ -916,7 +962,7 @@ const I18N={
 };
 function detectLang(){ return 'en'; }   // UI фиксирован на английском (кроме имён токенов)
 let lang=detectLang();
-const APP_VERSION='v0.0.1';   // 显示在副标题，方便排查问题；改动前端时一并 bump
+const APP_VERSION='v0.0.2';   // 显示在副标题，方便排查问题；改动前端时一并 bump
 // англ. в приоритете; на всякий случай fallback к en, а не zh
 function t(k,...a){const d=I18N.en;let s=d[k];if(s===undefined)s=(I18N.zh||{})[k];if(s===undefined)return k;return typeof s==='function'?s(...a):s;}
 
@@ -947,6 +993,7 @@ const I={
   xlogo:'<path d="M4 3l16 18M20 3L4 21"/>',
   menu:'<line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/>',
   bag:'<path d="M6 8h12l-1 12a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1L6 8z"/><path d="M9 8V6a3 3 0 0 1 6 0v2"/>',
+  beaker:'<path d="M9 3h6"/><path d="M10 3v7L4.6 18.4A2 2 0 0 0 6.3 21.5h11.4a2 2 0 0 0 1.7-3.1L14 10V3"/><line x1="7" y1="15" x2="17" y2="15"/>',
 };
 const svg=(n,c='currentColor')=>`<svg viewBox="0 0 24 24" fill="none" stroke="${c}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${I[n]}</svg>`;
 const fill=n=>`<svg viewBox="0 0 24 24" fill="currentColor" stroke="none">${I[n]}</svg>`;
@@ -1543,8 +1590,78 @@ const VIEW_TITLES={scan:'Scan settings',filters:'Filters',strategy:'Strategy',bo
 function closeAllViews(){
   document.getElementById('pipeScrim').classList.remove('on','view-mode');
   document.getElementById('pnlScrim').classList.remove('on','view-mode');
+  const rv=document.getElementById('reviewScrim');if(rv)rv.classList.remove('on','view-mode');
   const ws=document.getElementById('walletDrawerScrim'),wd=document.getElementById('walletDrawer');
   if(ws)ws.classList.remove('on');if(wd)wd.classList.remove('on');
+}
+
+/* ── Review · офлайн-обучение: эдж кошельков/KOL + предложения по конфигу ── */
+function openReview(){closeAllViews();const s=document.getElementById('reviewScrim');s.classList.add('on','view-mode');_placeView(s);const ic=s.querySelector('.rv-tic');if(ic)ic.innerHTML=svg('beaker');loadReview();}
+function closeReview(){document.getElementById('reviewScrim').classList.remove('on','view-mode');railSelect('scanner');}
+const _rvR=v=>(v==null||isNaN(v))?'—':(v>=0?'+':'')+Number(v).toFixed(2)+'R';
+const _rvPct=v=>(v==null||isNaN(v))?'—':(v>=0?'+':'')+Math.round(v*100)+'%';
+const _rvVal=v=>v==null?'—':(typeof v==='number'?(Number.isInteger(v)?v:v.toFixed(2)):v);
+let _RVPROPS=[];
+async function loadReview(){
+  const box=document.getElementById('reviewBody');
+  box.innerHTML='<div class="rv-empty">Loading…</div>';
+  if(source!=='backend'){box.innerHTML='<div class="rv-empty">Connect to the local backend to see the review-loop.</div>';return;}
+  let d;
+  try{const r=await fetch(API+'/api/review');if(!r.ok)throw 0;d=await r.json();}
+  catch(e){box.innerHTML='<div class="rv-empty">Backend offline.</div>';return;}
+  const rep=d.report||{}, ov=rep.overall||{};
+  const kpi=(lbl,val,cls)=>`<div class="rv-kpi"><span class="rv-kv ${cls||''}">${val}</span><span class="rv-kl">${lbl}</span></div>`;
+  let html=`<div class="rv-kpis">
+    ${kpi('Closed trades',ov.trades??0)}
+    ${kpi('Win rate',ov.winrate!=null?Math.round(ov.winrate*100)+'%':'—')}
+    ${kpi('Expectancy',_rvR(ov.expectancy_R),(ov.expectancy_R||0)>=0?'pos':'neg')}
+    ${kpi('Net',_fmtSol(ov.total_sol||0),(ov.total_sol||0)>=0?'pos':'neg')}
+  </div>`;
+  if(rep.note)html+=`<div class="rv-note">${rep.note}</div>`;
+
+  const props=rep.proposals||[];_RVPROPS=props;
+  html+=`<div class="rv-sec"><div class="rv-h">Config proposals <span class="rv-cnt">${props.length}</span></div>`;
+  if(!props.length)html+='<div class="rv-empty small">No changes suggested yet — need more labeled trades. Keep the SHADOW bot running to accumulate fuel.</div>';
+  else html+=props.map((p,i)=>{
+    const ev=p.evidence||{},bad=ev.bad||{},good=ev.good||{};
+    const evTxt=(bad.trades||good.trades)?`<span class="rv-ev">weak ${_rvR(bad.expectancy_R)} (${bad.trades||0}) vs strong ${_rvR(good.expectancy_R)} (${good.trades||0})</span>`:'';
+    const btn=p.applicable?`<button class="rv-apply" onclick="applyProposal(${i})">Apply</button>`:'<span class="rv-adv">advisory</span>';
+    return `<div class="rv-prop"><div class="rv-prop-top"><span class="rv-tag">${p.target}·${p.param}</span><span class="rv-conf ${p.confidence||''}">${p.confidence||''}</span></div>
+      <div class="rv-rat">${p.rationale||''}</div>
+      <div class="rv-prop-bot"><span class="rv-chg">${_rvVal(p.current)}<b>→</b>${_rvVal(p.suggested)}</span>${evTxt}${btn}</div></div>`;
+  }).join('');
+  html+='</div>';
+
+  const we=rep.wallet_edge||{}, wk=Object.keys(we).sort((a,b)=>(we[b].weight||1)-(we[a].weight||1));
+  html+=`<div class="rv-sec"><div class="rv-h">Wallet edge <span class="rv-cnt">${wk.length}</span></div>`;
+  if(!wk.length)html+='<div class="rv-empty small">No tracked-wallet outcomes yet — attribution accrues as SHADOW trades close.</div>';
+  else html+=`<table class="rv-table"><thead><tr><th>Wallet</th><th>Trades</th><th>Win</th><th>Avg</th><th>Exp</th><th>Weight</th></tr></thead><tbody>`+
+    wk.map(k=>{const w=we[k],wt=w.weight??1;
+      const chip=`<span class="rv-chip ${w.sample_ok?(wt>1?'pos':wt<1?'neg':''):'dim'}" ${w.sample_ok?'':'title="Neutral — not enough trades yet"'}>×${Number(wt).toFixed(2)}</span>`;
+      return `<tr><td class="rv-name">${k}</td><td>${w.trades}</td><td>${Math.round((w.winrate||0)*100)}%</td><td class="${(w.avg_pnl||0)>=0?'pos':'neg'}">${_rvPct(w.avg_pnl)}</td><td class="${(w.expectancy_R||0)>=0?'pos':'neg'}">${_rvR(w.expectancy_R)}</td><td>${chip}</td></tr>`;}).join('')+
+    '</tbody></table>';
+  html+='</div>';
+
+  const kr=rep.kol_review||[];
+  html+=`<div class="rv-sec"><div class="rv-h">KOL reliability <span class="rv-cnt">${kr.length}</span></div>`;
+  if(!kr.length)html+='<div class="rv-empty small">No KOL calls with enough samples yet (enable KOL/X + accumulate).</div>';
+  else html+=`<table class="rv-table"><thead><tr><th>KOL</th><th>Calls</th><th>Win</th><th>Median</th><th></th></tr></thead><tbody>`+
+    kr.map(k=>`<tr><td class="rv-name">@${k.username}</td><td>${k.calls}</td><td>${Math.round((k.winrate||0)*100)}%</td><td>×${Number(k.median_x||0).toFixed(2)}</td><td><span class="rv-verd ${k.verdict}">${k.verdict}</span></td></tr>`).join('')+
+    '</tbody></table>';
+  html+='</div>';
+
+  box.innerHTML=html;
+}
+async function applyProposal(i){
+  const p=_RVPROPS[i];if(!p)return;
+  try{
+    const r=await fetch(API+'/api/review/apply',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({target:p.target,param:p.param,value:p.suggested})});
+    if(r.status===403){toast('Operator only (connect as local / enable ADMIN)','warn');return;}
+    if(!r.ok){const e=await r.json().catch(()=>({}));toast('Apply failed: '+(e.detail||r.status),'warn');return;}
+    toast('Applied '+p.param+' → '+p.suggested,'ok');
+    loadReview();
+  }catch(e){toast('Apply failed','warn');}
 }
 /* view открывается ПОД топ-баром (не перекрывает шапку с MODE/wallet/PnL), заполняя область ниже */
 function _viewTop(){const b=document.querySelector('.bar');return b?Math.round(b.getBoundingClientRect().bottom+6):60;}
@@ -2123,12 +2240,13 @@ const RAIL=[
   {id:'pnl',icon:'calendar',label:'PnL',act:()=>openPnl()},
   {id:'bot',icon:'zap',label:'Bot',act:()=>openView('bot')},
   {id:'strategy',icon:'brain',label:'Strategy',act:()=>openView('strategy')},
+  {id:'review',icon:'beaker',label:'Review',act:()=>openReview()},
   {id:'filters',icon:'sliders',label:'Filters',act:()=>openView('filters')},
   {id:'kol',icon:'xlogo',label:'KOL / X',act:()=>openView('kol')},
   {id:'wallet',icon:'wallet',label:'Wallet',act:()=>openWallet()},
 ];
 /* вернуться к главному экрану-сканеру (закрыть любой открытый view) */
-function backToScanner(){document.getElementById('pipeScrim').classList.remove('on','view-mode');document.getElementById('pnlScrim').classList.remove('on','view-mode');}
+function backToScanner(){document.getElementById('pipeScrim').classList.remove('on','view-mode');document.getElementById('pnlScrim').classList.remove('on','view-mode');const rv=document.getElementById('reviewScrim');if(rv)rv.classList.remove('on','view-mode');}
 function renderRail(){
   const box=document.getElementById('railItems');if(!box)return;
   box.innerHTML=RAIL.map(r=>`<div class="ritem" data-id="${r.id}" title="${r.label}">${svg(r.icon)}<span class="rlbl">${r.label}</span><span class="rbadge" id="rbadge-${r.id}"></span></div>`).join('');
