@@ -1358,7 +1358,7 @@ function setSource(s){
 /* ── PnL-календарь (per-user дневной реализованный PnL) ── */
 let pnlYM=null;   // {y,m} текущий показываемый месяц
 function _ym(d){return d.getUTCFullYear()+'-'+String(d.getUTCMonth()+1).padStart(2,'0');}
-function openPnl(){pnlYM=null;document.getElementById('pnlScrim').classList.add('on','view-mode');loadPnl();loadPnlStats();}
+function openPnl(){closeAllViews();pnlYM=null;document.getElementById('pnlScrim').classList.add('on','view-mode');loadPnl();loadPnlStats();}
 async function loadPnlStats(){
   const box=document.getElementById('pnlStats');if(!box)return;
   if(source!=='backend'){box.innerHTML='';return;}
@@ -1506,7 +1506,15 @@ function openPipe(){openView('scan');}
 function closePipe(){const s=document.getElementById('pipeScrim');s.classList.remove('on','view-mode');railSelect('scanner');}
 /* открыть раздел на весь экран (рейл — единственный переключатель; вкладок внутри нет) */
 const VIEW_TITLES={scan:'Scan settings',filters:'Filters',strategy:'Strategy',bot:'Bot',kol:'KOL / X'};
+/* закрыть все полноэкранные views (иначе ранее открытый перекрывает новый) */
+function closeAllViews(){
+  document.getElementById('pipeScrim').classList.remove('on','view-mode');
+  document.getElementById('pnlScrim').classList.remove('on','view-mode');
+  const ws=document.getElementById('walletDrawerScrim'),wd=document.getElementById('walletDrawer');
+  if(ws)ws.classList.remove('on');if(wd)wd.classList.remove('on');
+}
 async function openView(section){
+  closeAllViews();                       // сначала гасим PnL/другой раздел
   const scrim=document.getElementById('pipeScrim');
   scrim.classList.add('on','view-mode');
   document.getElementById('viewTitle').textContent=VIEW_TITLES[section]||'';
@@ -1703,6 +1711,7 @@ async function sessionWithdraw(){
 
 /* ── раздел Wallet (drawer): состояние коннекта, session-кошелёк N3, disconnect ── */
 function openWallet(){
+  closeAllViews();
   document.getElementById('walletDrawerScrim').classList.add('on');
   document.getElementById('walletDrawer').classList.add('on');
   renderWalletDrawer();
