@@ -97,7 +97,7 @@ CFG = {
     "max_top10_concentration": 0.40,
     # 选择质量：共识 = 聪明钱(smart_degen) + 知名KOL(renowned) 计数之和
     "min_smart_money_confluence": 1,
-    "min_llm_conviction": 0.6,
+    "min_llm_conviction": 0.7,   # качество > количество: судья должен быть уверен (было 0.6)
     # 排序档位：趋势动能跟随（看现在在不在涨、买盘强不强、量价齐升）
     "rank_profile": "momentum",
     "rank_weights": {
@@ -1960,6 +1960,7 @@ class BotConfigIn(BaseModel):
     escape_severity_exit: int | None = None
     trail_activate_pct: float | None = None
     require_abc_trigger: bool | None = None
+    min_priority: int | None = None
 
 # ── Этап 6: N1 — бот не исполняет, а кладёт предложение в очередь; человек кликает.
 def _propose(sess: UserSession, side: str, chain: str, address: str,

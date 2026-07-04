@@ -29,6 +29,7 @@ CFG = {
     "escape_severity_exit": 60,   # 逃生严重度 ≥ 此值即清仓离场（比人工 escape_severity 略激进）
     "trail_activate_pct": 0.30,   # 浮盈达此幅度后才启用移动止盈（避免刚建仓就被噪声扫出）
     "require_abc_trigger": True,  # 只对 ABC Alpha v1 触发的候选自动建仓
+    "min_priority": 0,            # 最低优先级分才自主建仓（0=关闭；качество: подними до ~70）
 }
 
 
@@ -41,7 +42,7 @@ class ExitDecision:
 
 
 def select_entries(decisions, held_addrs, n_open, max_concurrent, max_new,
-                   *, require_trigger: bool = True):
+                   *, require_trigger: bool = True, min_priority: float = 0.0):
     """从一轮 screen 结果挑【可自主建仓】的候选。
 
     条件：通过全部闸门（decision.action=="ACTION"）+ ABC 触发 + 未持有 + 不超并发。
@@ -61,6 +62,8 @@ def select_entries(decisions, held_addrs, n_open, max_concurrent, max_new,
         abc = dec.get("abc") or {}
         if require_trigger and not abc.get("triggered"):
             continue
+        if min_priority and float(dec.get("priority", 0)) < min_priority:
+            continue                                  # качество: пропускаем слабые сетапы
         size = dec.get("size_sol", 0.0)
         if not size or size <= 0:
             continue
@@ -166,7 +169,8 @@ class BotRunner:
                 decisions, held, len(positions),
                 risk_cfg.get("max_concurrent_positions", 3),
                 self.cfg["max_new_per_tick"],
-                require_trigger=self.cfg["require_abc_trigger"])
+                require_trigger=self.cfg["require_abc_trigger"],
+                min_priority=self.cfg.get("min_priority", 0))
             for addr, size, _sym in entries:
                 try:
                     f["buy"](self.chain, addr, size)
