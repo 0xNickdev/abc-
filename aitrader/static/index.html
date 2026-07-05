@@ -1252,22 +1252,41 @@ function renderRows(){
     }
     return;
   }
-  box.innerHTML=rows.map(t=>{
-    const rc=t.status==='action'?(t.warn?COL.WARN:COL.ACTION):COL.SKIP;
-    const gates=GATE_ICONS.map((ic,i)=>{const s=gst(t,i);const inner=s==='fail'?svg('skull'):s==='pass'?svg(ic):'';
-      return `<div class="pip ${s}" data-tip="${i+1}. ${gateName(i)}　${t2('gatetip'+i)}　|　${t2('gate_self')}${t2('gst_'+s)}">${inner}</div>`;}).join('');
-    let last;
-    if(t.status==='action'){
-      last=`<button class="buybtn ${t.warn?'warn':''}" onclick="event.stopPropagation();openBuy(${t._i})">${svg('zap')}${t2('amt_lbl')} ${buyAmount} ${NATIVE_UNIT[curChain]}</button>`;
-    }else{
-      const diedGate=gateName(t.died);
-      const rbLabel=t.died===1?t2('rb_safety'):t.died===2?t2('rb_cons'):t.died===4?'LLM':'SKIP';
-      last=`<span class="rb has-tip" style="--rc:${rc}" data-tip="${t2('rb_tip',diedGate,reasonOf(t)||t2('rb_nopass'))}">${rbLabel}</span>`;
-    }
-    const priCls=t.pri>=80?'hi':t.pri>=55?'mid':'';
-    const hasPos=POS.some(p=>(p.address||'')&&(p.address||'')===(t.address||''));
-    const radar=hasPos?`<span class="radar" data-tip="${t2('radar_tip')}"></span>`:'';
-    return `<tr data-i="${t._i}" class="${t._i===sel?'sel':''} ${t.status==='action'?'act':''}" style="--rc:${rc}">
+  // keyed-рендер: переиспользуем <tr> по ключу (адрес), обновляем ТОЛЬКО изменившиеся ячейки и
+  // переставляем узлы порядком — вместо пересоздания всей таблицы. Это убирает остаточное мигание.
+  const have={};[...box.children].forEach(tr=>{const k=tr.getAttribute('data-addr');if(k)have[k]=tr;});
+  const frag=document.createDocumentFragment();
+  rows.forEach(t=>{
+    const key=t.address||('i'+t._i);
+    const p=rowParts(t);
+    let tr=have[key];
+    if(!tr){tr=document.createElement('tr');tr.setAttribute('data-addr',key);
+      tr.onclick=()=>{const i=+tr.getAttribute('data-i');sel=(sel===i?-1:i);renderRows();renderDetail();};}
+    if(tr._cells!==p.cells){tr.innerHTML=p.cells;tr._cells=p.cells;}   // касаем DOM только при изменении
+    if(tr.getAttribute('data-i')!==String(t._i))tr.setAttribute('data-i',String(t._i));
+    if(tr.className!==p.cls)tr.className=p.cls;
+    if(tr.getAttribute('style')!==p.style)tr.setAttribute('style',p.style);
+    frag.appendChild(tr);   // перемещает существующий узел в нужную позицию (не пересоздаёт)
+  });
+  box.replaceChildren(frag);   // ставит порядок; ушедшие из выдачи узлы удаляются
+}
+/* HTML ячеек одной строки + атрибуты обёртки (вынесено из renderRows для keyed-обновления) */
+function rowParts(t){
+  const rc=t.status==='action'?(t.warn?COL.WARN:COL.ACTION):COL.SKIP;
+  const gates=GATE_ICONS.map((ic,i)=>{const s=gst(t,i);const inner=s==='fail'?svg('skull'):s==='pass'?svg(ic):'';
+    return `<div class="pip ${s}" data-tip="${i+1}. ${gateName(i)}　${t2('gatetip'+i)}　|　${t2('gate_self')}${t2('gst_'+s)}">${inner}</div>`;}).join('');
+  let last;
+  if(t.status==='action'){
+    last=`<button class="buybtn ${t.warn?'warn':''}" onclick="event.stopPropagation();openBuy(${t._i})">${svg('zap')}${t2('amt_lbl')} ${buyAmount} ${NATIVE_UNIT[curChain]}</button>`;
+  }else{
+    const diedGate=gateName(t.died);
+    const rbLabel=t.died===1?t2('rb_safety'):t.died===2?t2('rb_cons'):t.died===4?'LLM':'SKIP';
+    last=`<span class="rb has-tip" style="--rc:${rc}" data-tip="${t2('rb_tip',diedGate,reasonOf(t)||t2('rb_nopass'))}">${rbLabel}</span>`;
+  }
+  const priCls=t.pri>=80?'hi':t.pri>=55?'mid':'';
+  const hasPos=POS.some(p=>(p.address||'')&&(p.address||'')===(t.address||''));
+  const radar=hasPos?`<span class="radar" data-tip="${t2('radar_tip')}"></span>`:'';
+  const cells=`
       <td><span class="sym"><span class="tk" onclick="event.stopPropagation();copyTicker(this)" title="${t2('tk_copy_title')}">${t.sym}</span>${radar}${t.inj?`<span class="inj" data-tip="${t2('inj_tip')}">${t2('inj_label')}</span>`:''}${caCell(t)}</span></td>
       <td><div class="gates">${gates}</div></td>
       <td><span class="m has-tip ${t.hp||!t.frz?'bad':(!t.ren||t.bund>.30||t.dev>.10||t.top10>.40)?'warn':''}" data-tip="${t2('safe_tip')}　|　Bundler ${P(t.bund)} · Dev ${P(t.dev)} · Top10 ${P(t.top10)}${t.rug>0.2?`　|　⚠ dev rug history `+P(t.rug):``}">${t.hp?t2('safe_honeypot'):!t.frz?t2('safe_freeze'):t.ren?t2('safe_renounced'):t2('safe_not_renounced')}</span></td>
@@ -1276,9 +1295,8 @@ function renderRows(){
       <td><span class="m has-tip ${t.crowd==='late'?'bad':t.crowd==='crowded'?'warn':''}" data-tip="${t2('timing_label')+'　|　'+(I18N[lang]['crowdtip_'+t.crowd]?t2('crowdtip_'+t.crowd):t2('crowd_none_tip'))}">${I18N[lang]['crowd_'+t.crowd]?t2('crowd_'+t.crowd):t.crowd}</span></td>
       <td>${t.v==='-'?`<span class="has-tip" style="color:var(--dim2)" data-tip="${t2('llm_none_tip')}">—</span>`:`<span class="vd has-tip ${t.v}" data-tip="${t2('vd_tip',t.v.toUpperCase(),t2('llmtip_'+t.v)||'',(+t.conv).toFixed(2))}">${t.v.toUpperCase()}</span>`}</td>
       <td>${t.status==='action'?`<span class="pri ${priCls}">${t.pri}<small>${t2('pri_label')}</small></span>`:'<span style="color:var(--dim2)">—</span>'}</td>
-      <td>${last}</td>
-    </tr>`;}).join('');
-  document.querySelectorAll('#rows tr').forEach(r=>r.onclick=()=>{const i=+r.dataset.i;sel=(sel===i?-1:i);renderRows();renderDetail();});
+      <td>${last}</td>`;
+  return {cls:(`${t._i===sel?'sel':''} ${t.status==='action'?'act':''}`).trim(),style:`--rc:${rc}`,cells};
 }
 /* renderRows 内部把行对象命名为 t（沿用旧代码），与取词函数 t() 撞名，故行内取词改用别名 t2 = 全局 t */
 function fmtCap(v){v=+v||0;return v>=1e6?'$'+(v/1e6).toFixed(1)+'M':v>=1e3?'$'+(v/1e3).toFixed(0)+'k':'$'+v.toFixed(0);}
