@@ -6,3 +6,6 @@ outputs/*.log
 outputs/*.json
 .DS_Store
 outputs/users/
+outputs/*.db
+outputs/*.db-wal
+outputs/*.db-shm

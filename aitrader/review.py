@@ -198,6 +198,21 @@ def propose(records: list[dict], cfg: dict | None = None, filters: dict | None =
     return props
 
 
+# ── соц-сигнал X на входе vs исход (топливо A: коррелируем хайп с результатом) ──
+def social_edge(records: list[dict], thr: int = 3,
+                hard_stop: float = DEFAULT_HARD_STOP) -> dict:
+    """Разбить закрытые сделки по числу X-упоминаний CA на входе (attrib['x_mentions'])
+    относительно порога → «мало хайпа» vs «есть хайп». Пусто, пока сигнал не копился
+    (x_mentions пишется только при подключённом Twitter, см. app._enrich_x_signal)."""
+    trades = [t for t in closed_trades(records) if t["attrib"].get("x_mentions") is not None]
+    if not trades:
+        return {}
+    lo, hi = _split(trades, "x_mentions", thr)
+    return dict(threshold=thr, samples=len(trades),
+                low=_stats([t["pnl"] for t in lo], hard_stop),
+                high=_stats([t["pnl"] for t in hi], hard_stop))
+
+
 # ── дайджест дня + полный прогон ─────────────────────────────────────────────
 def _data_note(n: int) -> str:
     if n == 0:
@@ -229,6 +244,7 @@ def daily_report(records: list[dict], day: str | None = None, cfg: dict | None =
         overall=_summ(all_trades, hs, fee_pct),
         wallet_edge=wallet_edge(records, hard_stop=hs),
         kol_review=kol_review(),
+        social_edge=social_edge(records, hard_stop=hs),
         proposals=propose(records, cfg, filters, trigger),
         note=_data_note(len(all_trades)),
     )

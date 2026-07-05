@@ -1,6 +1,9 @@
 """单元测试：覆盖确定性核心（避雷/过滤器闸门、评分、风控、消毒、逃生、仓位）。
 全部针对纯函数/内存状态，不依赖网络与 gmgn-cli；落盘相关用 tmp 隔离。"""
+import datetime
 import json
+import time
+import types
 
 import pytest
 
@@ -953,6 +956,251 @@ class TestDexAdapter:
         assert ok is True                       # без consensus-данных гейт 2 не применяется
         ok2, _, gate2 = appmod.hard_gates(f, chain="sol", require_consensus=True)
         assert ok2 is False and gate2 == 2      # обычный источник — как раньше
+
+
+# ── B: реальный top-10 холдеров через Solana RPC (getTokenLargestAccounts), opt-in ──
+class TestTop10Concentration:
+    def _dx(self):
+        import dexadapter as dx
+        dx._top10_cache.clear()
+        return dx
+
+    def test_share_excludes_largest_as_pool(self):
+        dx = self._dx()
+        # крупнейший (LP-пул) исключён; следующие держатели / супплай = (100+50)/1000
+        assert dx._share_top10([{"uiAmount": 800}, {"uiAmount": 100}, {"uiAmount": 50}], 1000) == 0.15
+        assert dx._share_top10([{"uiAmount": 900}], 1000) == 0.0        # <2 аккаунтов → 0
+        assert dx._share_top10([], 0) == 0.0                            # нет супплая → 0
+
+    def test_off_by_default_no_rpc(self, monkeypatch):
+        dx = self._dx()
+        monkeypatch.setattr(dx, "TOP10_RPC", False)
+        called = []
+        monkeypatch.setattr(dx, "_rpc_post", lambda reqs: called.append(1) or {})
+        assert dx._top10_concentration("MINT") == 0.0
+        assert not called                                              # флаг выкл → RPC не трогаем
+
+    def test_live_value_and_cache(self, monkeypatch):
+        dx = self._dx()
+        monkeypatch.setattr(dx, "TOP10_RPC", True)
+        calls = []
+        monkeypatch.setattr(dx, "_rpc_post", lambda reqs: calls.append(reqs) or {
+            "lg": {"result": {"value": [{"uiAmount": 700}, {"uiAmount": 200}, {"uiAmount": 100}]}},
+            "sup": {"result": {"value": {"uiAmount": 1000}}}})
+        assert dx._top10_concentration("MINT") == 0.3                  # (200+100)/1000, пул исключён
+        assert dx._top10_concentration("MINT") == 0.3                  # из кэша
+        assert len(calls) == 1                                         # второй раз RPC не дёргаем
+
+    def test_token_security_and_holders_live(self, monkeypatch):
+        dx = self._dx()
+        monkeypatch.setattr(dx, "TOP10_RPC", True)
+        monkeypatch.setattr(dx, "_rpc_post", lambda reqs: {
+            "lg": {"result": {"value": [{"uiAmount": 600}, {"uiAmount": 300}]}},
+            "sup": {"result": {"value": {"uiAmount": 1000}}}})
+        monkeypatch.setattr(dx.DexAdapter, "_fill_authorities", lambda self, rows, mints: None)
+        assert dx.DexAdapter().token_security("MINT")["top10"] == 0.3  # 300/1000
+        dx._top10_cache.clear()
+        assert dx.DexAdapter().token_holders("MINT")["top10_concentration"] == 0.3
+
+    def test_fill_top10_batch_fills_rows(self, monkeypatch):
+        dx = self._dx()
+        monkeypatch.setattr(dx, "TOP10_RPC", True)
+
+        def fake(reqs):
+            out = {}
+            for r in reqs:
+                out[r["id"]] = ({"result": {"value": [{"uiAmount": 500}, {"uiAmount": 250}]}}
+                                if r["method"] == "getTokenLargestAccounts"
+                                else {"result": {"value": {"uiAmount": 1000}}})
+            return out
+        monkeypatch.setattr(dx, "_rpc_post", fake)
+        rows = [{"address": "M1", "top_10_holder_rate": 0.0},
+                {"address": "M2", "top_10_holder_rate": 0.0}]
+        dx.DexAdapter()._fill_top10(rows, ["M1", "M2"])
+        assert rows[0]["top_10_holder_rate"] == 0.25                   # 250/1000, пул исключён
+        assert rows[1]["top_10_holder_rate"] == 0.25
+
+
+# ── A: соц-сигнал X (упоминания CA) в снепшот входа — opt-in, quota-safe ──
+class TestXSignalAttribution:
+    def _sess(self, enabled, bearer="tok"):
+        return types.SimpleNamespace(twitter={"enabled": enabled, "bearer": bearer})
+
+    def test_disabled_twitter_no_call_no_change(self, monkeypatch):
+        called = []
+        monkeypatch.setattr(appmod.kol, "mentions",
+                            lambda ca, b: called.append(1) or dict(ok=True, count=5, authors=[]))
+        attrib = {"priority": 80}
+        appmod._enrich_x_signal(attrib, "CA", self._sess(False), 0.001)
+        assert "x_mentions" not in attrib and not called              # выключено → Twitter не дёргаем
+
+    def test_enabled_captures_mentions_and_records_calls(self, monkeypatch):
+        rec = []
+        monkeypatch.setattr(appmod.kol, "mentions", lambda ca, b: dict(
+            ok=True, count=7, authors=[dict(username="whale", followers=42000)]))
+        monkeypatch.setattr(appmod.kol, "record_calls", lambda ca, a, p: rec.append((ca, p)))
+        attrib = {}
+        appmod._enrich_x_signal(attrib, "CA", self._sess(True), 0.002)
+        assert attrib["x_mentions"] == 7 and attrib["x_top_followers"] == 42000
+        assert rec == [("CA", 0.002)]                                 # коллы KOL зафиксированы
+
+    def test_twitter_failure_never_blocks_buy(self, monkeypatch):
+        def boom(ca, b):
+            raise RuntimeError("429")
+        monkeypatch.setattr(appmod.kol, "mentions", boom)
+        attrib = {}
+        appmod._enrich_x_signal(attrib, "CA", self._sess(True), 0.0)  # не должно бросить
+        assert attrib == {}
+
+    def test_not_ok_result_ignored(self, monkeypatch):
+        monkeypatch.setattr(appmod.kol, "mentions",
+                            lambda ca, b: dict(ok=False, error="rate_limited"))
+        attrib = {}
+        appmod._enrich_x_signal(attrib, "CA", self._sess(True), 0.0)
+        assert "x_mentions" not in attrib                            # мягкая ошибка → без разметки
+
+
+# ── Снапшот-хранилище качества токенов (SQLite), фундамент verification-слоя ──
+class TestSnapshotDB:
+    def _dec(self, addr="M1", action="ACTION", **ft):
+        base = dict(top10=0.2, bundler=0.03, dev_hold=0.02, sniper_count=0, smart_degen=2,
+                    tracked_hits=1, holder_count=300, holder_velocity=5.0, renounced=True)
+        base.update(ft)
+        return dict(decision=dict(symbol="X", address=addr, action=action, reason="r",
+                                  gate=0, priority=77, features=base), exec=None)
+
+    def test_record_and_recent_roundtrip(self, tmp_path):
+        import db
+        p = tmp_path / "abc.db"
+        n = db.record_decisions([self._dec("A"), self._dec("B", action="SKIP", gate=1)],
+                                "sol", "2026-07-06T00:00:00+00:00", path=p)
+        assert n == 2
+        rows = db.recent(path=p)
+        assert len(rows) == 2 and rows[0]["address"] == "B"          # новые первыми
+        a = db.recent(address="A", path=p)
+        assert len(a) == 1 and a[0]["priority"] == 77 and a[0]["renounced"] == 1
+
+    def test_empty_and_bad_input_safe(self, tmp_path):
+        import db
+        p = tmp_path / "abc.db"
+        assert db.record_decisions([], "sol", "t", path=p) == 0       # нет решений → 0, без падения
+        assert db.recent(path=p) == []                               # нет БД → пусто, без падения
+
+    def test_prune_by_age(self, tmp_path):
+        import db
+        p = tmp_path / "abc.db"
+        db.record_decisions([self._dec("OLD")], "sol", "2000-01-01T00:00:00+00:00", path=p)
+        db.record_decisions([self._dec("NEW")], "sol", "2999-01-01T00:00:00+00:00", path=p)
+        assert db.prune(days=14, path=p) == 1                        # старый ряд удалён
+        assert [r["address"] for r in db.recent(path=p)] == ["NEW"]
+
+    def test_enabled_flag(self, monkeypatch):
+        import db
+        monkeypatch.delenv("ABC_SNAPSHOT_DB", raising=False)
+        assert db.enabled() is False
+        monkeypatch.setenv("ABC_SNAPSHOT_DB", "1")
+        assert db.enabled() is True
+
+    def test_screen_snapshots_when_enabled(self, tmp_path, monkeypatch):
+        import db
+        monkeypatch.setenv("ABC_SNAPSHOT_DB", "1")
+        monkeypatch.setenv("ABC_DB_PATH", str(tmp_path / "abc.db"))
+        out = appmod.screen_once("sol")                             # mock-адаптер, реальная сеть не нужна
+        snap = {r["address"] for r in db.recent(limit=1000)}
+        dec = {d["decision"]["address"] for d in out["decisions"]}
+        assert dec and dec <= snap                                  # каждое решение прохода снапшотнуто
+
+
+# ── Свежие кошельки среди топ-холдеров (он-чейн, независимо от GMGN) ──
+class TestFreshWallets:
+    def test_off_by_default(self, monkeypatch):
+        import dexadapter as dx
+        monkeypatch.setattr(dx, "FRESH_RPC", False)
+        assert dx.fresh_wallet_count("M") == {}
+
+    def test_counts_fresh_vs_established(self, monkeypatch):
+        import dexadapter as dx
+        dx._fresh_cache.clear()
+        monkeypatch.setattr(dx, "FRESH_RPC", True)
+        monkeypatch.setattr(dx, "FRESH_AGE_H", 48.0)
+        now = int(time.time())
+
+        def fake(reqs):
+            m = reqs[0]["method"]
+            if m == "getTokenLargestAccounts":
+                return {"lg": {"result": {"value": [                 # [0]=пул, дальше 2 холдера
+                    {"address": "POOL"}, {"address": "TA1"}, {"address": "TA2"}]}}}
+            if m == "getMultipleAccounts":
+                return {"mi": {"result": {"value": [
+                    {"data": {"parsed": {"info": {"owner": "W1"}}}},
+                    {"data": {"parsed": {"info": {"owner": "W2"}}}}]}}}
+            return {"s0": {"result": [{"blockTime": now - 3600}]},   # W1: 1 tx, час назад → свежий
+                    "s1": {"result": [{"blockTime": now - 3600}] * 100}}   # W2: 100 tx → старый
+        monkeypatch.setattr(dx, "_rpc_post", fake)
+        r = dx.fresh_wallet_count("M", top_n=20)
+        assert r["checked"] == 2 and r["fresh"] == 1 and r["ratio"] == 0.5
+
+
+# ── X reuse-детектор (getxapi): тот же хендл → другие токены + молодой аккаунт ──
+class TestXReuse:
+    def test_no_key_soft(self, monkeypatch):
+        import xapi
+        monkeypatch.delenv("GETXAPI_KEY", raising=False)
+        monkeypatch.delenv("X_DATA_API_KEY", raising=False)
+        assert xapi.reuse_check("CA", "handle")["ok"] is False       # нет ключа → мягко
+
+    def test_detects_serial_shiller(self, monkeypatch):
+        import xapi
+        xapi._cache.clear()
+        monkeypatch.setenv("GETXAPI_KEY", "k")
+        ca = "So11111111111111111111111111111111111111112"
+        others = ["4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R",
+                  "9n4nbM75f5Ui33ZbPYXn59EwSgE8CGsHtAeTH5YFeJ9E",
+                  "7EYnhQoR9YM3N7UoaKRoA44Uy8JeaZV3qyouov87awMs"]
+
+        def fake_get(path, params, api_key):
+            if path.endswith("/info"):
+                return {"data": {"followers": 500, "createdAt": "2020-01-01T00:00:00Z"}}
+            return {"data": [{"text": f"buy {c} now"} for c in others] + [{"text": ca}]}
+        monkeypatch.setattr(xapi, "_get", fake_get)
+        r = xapi.reuse_check(ca, "@shiller")
+        assert r["ok"] and r["other_tokens"] == 3 and r["red_flag"] is True
+        assert ca not in r["other_sample"]                           # свой CA не считаем
+
+    def test_young_account_flagged(self, monkeypatch):
+        import xapi
+        xapi._cache.clear()
+        monkeypatch.setenv("GETXAPI_KEY", "k")
+        recent = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        def fake_get(path, params, api_key):
+            return ({"data": {"followers": 3, "createdAt": recent}} if path.endswith("/info")
+                    else {"data": []})
+        monkeypatch.setattr(xapi, "_get", fake_get)
+        r = xapi.reuse_check("CA", "newbie")
+        assert r["ok"] and r["other_tokens"] == 0 and r["red_flag"] is True   # молодой аккаунт = флаг
+
+
+# ── Резолв X-хендла токена из socials DexScreener (для авто X-reuse) ──
+class TestTokenTwitter:
+    def _mock(self, monkeypatch, payload):
+        import dexadapter as dx
+
+        class R:
+            def raise_for_status(self): pass
+            def json(self): return payload
+        monkeypatch.setattr(dx.httpx, "get", lambda *a, **k: R())
+        return dx
+
+    def test_extracts_handle(self, monkeypatch):
+        dx = self._mock(monkeypatch, {"pairs": [{"info": {"socials": [
+            {"type": "website", "url": "https://t.co/x"},
+            {"type": "twitter", "url": "https://x.com/CoolToken"}]}}]})
+        assert dx.token_twitter("MINT") == "CoolToken"
+
+    def test_no_socials_empty(self, monkeypatch):
+        dx = self._mock(monkeypatch, {"pairs": [{"info": {}}]})
+        assert dx.token_twitter("MINT") == ""
 
 
 # ── Идеи 1/2/4/5: рейтинг KOL, скорость холдеров, rug в features, умный размер ──

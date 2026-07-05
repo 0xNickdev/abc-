@@ -51,6 +51,7 @@ from pydantic import BaseModel
 
 import backtest  # 纸面/SHADOW 回测复盘（已实现 PnL/胜率/R）
 import bot  # 自主执行回路（量化机器人，纸面优先）
+import db  # снапшот-хранилище качества токенов (SQLite), opt-in ABC_SNAPSHOT_DB=1
 import dexadapter  # реальные данные без ключей (GeckoTerminal + Solana RPC), DATA_SOURCE=dex
 import execution  # non-custodial：服务器只构建 tx，签名在浏览器（Phantom）
 import kol  # Twitter/X KOL 信号（per-user opt-in）
@@ -58,6 +59,7 @@ import review  # офлайн review-loop: эдж кошельков/KOL + пр�
 import sessionwallet  # N3: session-кошелёк с ограниченным балансом (этап 7)
 import strategy  # ABC Alpha v1：具名策略预设 + 入场信号评估
 import wallets  # 私有 smart-money 跟踪钱包（信号，非跟单）
+import xapi  # X reuse-детектор (getxapi.com), ключ оператора в env GETXAPI_KEY
 
 random.seed(7)
 HERE = pathlib.Path(__file__).resolve().parent
@@ -1397,6 +1399,29 @@ def _attrib_for(address: str) -> dict:
     """Снимок атрибуции для адреса (пусто, если монету не скринили в этой сессии процесса)."""
     return dict(_ATTRIB_CACHE.get(address, {}))
 
+def _enrich_x_signal(attrib: dict, address: str, s: UserSession, price: float = 0.0) -> None:
+    """Соц-сигнал X на момент BUY: кол-во упоминаний CA + подписчики топ-автора → в entry_attrib.
+    Топливо review-loop (коррелируем «соц-хайп на входе» с исходом сделки). Дёргаем kol.mentions
+    РОВНО раз на покупку (кэш 5 мин в kol.py), только если юзер подключил свой Bearer — чужую
+    квоту не жжём (ключ per-user). Сбой Twitter НЕ должен блокировать покупку → мягко глотаем."""
+    tw = getattr(s, "twitter", None) or {}
+    if not (tw.get("enabled") and tw.get("bearer")):
+        return
+    try:
+        m = kol.mentions(address, tw["bearer"])
+    except Exception:
+        return
+    if not m.get("ok"):
+        return
+    authors = m.get("authors") or []
+    attrib["x_mentions"] = int(m.get("count", 0))
+    attrib["x_top_followers"] = int(authors[0].get("followers", 0)) if authors else 0
+    if authors:                                   # заодно фиксируем коллы KOL (как /api/kol/check)
+        try:
+            kol.record_calls(address, authors, float(price or 0.0))
+        except Exception:
+            pass
+
 def screen_once(chain: str, s: UserSession | None = None) -> dict:
     s = s or ST                       # 会话（多用户：每 pubkey 自己的过滤器/持仓/风控）
     g = s.adapter_for(chain)          # 市场层共享（运营者 key），与会话无关
@@ -1453,12 +1478,17 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
         allow, rnote = s.risk.gate(size, n_pos, exposure)
         pri = priority_score(f, v.conviction, v.crowdedness)
         _remember_attrib(f, pri)                       # снимок атрибуции для будущей сделки по этому адресу
+        _ft = _feat(f)
+        _fresh = dexadapter.fresh_wallet_count(f.address)   # свежие коши среди топ-холдеров (opt-in RPC, независимо от GMGN)
+        if _fresh:
+            _ft["fresh_wallets"], _ft["fresh_ratio"] = _fresh.get("fresh"), _fresh.get("ratio")
+            _ft["fresh_checked"] = _fresh.get("checked")
         abc = strategy.evaluate_for(s.strategy_id, f).as_dict()   # 按该用户选定策略评入场信号
         abc["strategy"] = strategy.get(s.strategy_id)["name"]
         decisions.append(dict(
             decision=dict(symbol=f.symbol_safe, address=f.address, action="ACTION",
                           reason="Passed all gates · your call", size_sol=size, risk_warn=(not allow),
-                          verdict=asdict(v), features=_feat(f), priority=pri, abc=abc),
+                          verdict=asdict(v), features=_ft, priority=pri, abc=abc),
             exec=exit_plan()))
         # 落特征快照 + abc 信号，喂回测纸面复盘（backtest.paper 读 features）；保持反馈飞轮闭环。
         log("SCREEN", f.symbol_safe, "通过闸门 · 待决策",
@@ -1473,6 +1503,13 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
     # 持仓逃生监控（与筛选同一轮跑）；把本轮热榜行喂进去，持仓在榜则零额外 cli
     rows_by_addr = {t["address"]: t for t in candidates if t.get("address")}
     positions_out = monitor_positions(chain, rows_by_addr, s)
+
+    if db.enabled():          # снапшот всех решений прохода в SQLite (opt-in ABC_SNAPSHOT_DB=1)
+        try:
+            db.record_decisions(decisions, chain,
+                                datetime.datetime.now(datetime.timezone.utc).isoformat())
+        except Exception:
+            pass              # снапшот НИКОГДА не роняет скан
 
     # 回传后端真实 mode：前端据此同步 LIVE/SHADOW 开关，避免重启后端后开关停留在 LIVE 误导
     return dict(decisions=decisions, portfolio=_portfolio(s), positions=positions_out, mode=s.mode)
@@ -1654,6 +1691,7 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         status_msg = "SHADOW (not sent on-chain — switch to LIVE + signing key)"
 
     attrib = _attrib_for(address)                    # атрибуция входа (кошельки/KOL в场) → едет с позицией
+    _enrich_x_signal(attrib, address, s, entry_price)   # + соц-сигнал X на входе (opt-in, quota-safe)
     s.positions.append(dict(symbol=symbol, address=address, size_sol=round(size_sol, 4),
                             pnl=0.0, cycles=0, entry=entry, chain=chain,
                             entry_price=entry_price, cur_price=entry_price,
@@ -2197,13 +2235,15 @@ def _n3_execute(sess: UserSession, side: str, chain: str, address: str,
             symbol = sanitize(info.get("symbol", ""))
         except Exception:
             symbol, price = address[:6], 0.0
+        attrib = _attrib_for(address)
+        _enrich_x_signal(attrib, address, sess, price)      # соц-сигнал X на входе (opt-in)
         sess.positions.append(dict(
             symbol=symbol, address=address, size_sol=round(size_sol, 4), pnl=0.0,
             cycles=0, entry=dict(honeypot=False, renounced_mint=True,
                                  renounced_freeze=True, burn_ratio=0.0, top10=0.0),
             chain="sol", entry_price=price, cur_price=price,
             token_amount=built.get("out_amount", 0), self_custody=True, session=True,
-            wallet_tx=sig, opened_ts=time.time(), entry_attrib=_attrib_for(address)))
+            wallet_tx=sig, opened_ts=time.time(), entry_attrib=attrib))
         sess.save_positions()
         log("BUY", symbol, f"N3 session-кошелёк {size_sol} SOL · tx {sig[:16]}…",
             dict(size_sol=size_sol, chain="sol", session=True), mode="LIVE")
@@ -2383,11 +2423,13 @@ def api_tx_confirm(c: TxConfirmIn, x_wallet: str | None = WalletHeader,
                          renounced_mint=sec.get("renounced_mint", True),
                          renounced_freeze=sec.get("renounced_freeze", True),
                          burn_ratio=sec.get("burn_ratio", 0.0), top10=sec.get("top10", 0.0))
+            attrib = _attrib_for(c.address)
+            _enrich_x_signal(attrib, c.address, sess, price)   # соц-сигнал X на входе (opt-in)
             sess.positions.append(dict(
                 symbol=symbol, address=c.address, size_sol=round(c.size_sol, 4),
                 pnl=0.0, cycles=0, entry=entry, chain="sol", entry_price=price,
                 cur_price=price, token_amount=int(c.token_amount), self_custody=True,
-                wallet_tx=c.signature, opened_ts=time.time(), entry_attrib=_attrib_for(c.address)))
+                wallet_tx=c.signature, opened_ts=time.time(), entry_attrib=attrib))
             sess.save_positions()
             log("BUY", symbol, f"PHANTOM исполнено {c.size_sol} SOL · {tag}",
                 dict(size_sol=c.size_sol, chain="sol", self_custody=True), mode="LIVE")
@@ -2482,6 +2524,45 @@ def api_kol_check(address: str, x_wallet: str | None = WalletHeader):
 def api_kol_rating():
     """Накопленный рейтинг KOL'ов: колл = упоминание CA; win = пик ≥1.5x от цены колла."""
     return dict(rating=kol.rating())
+
+@app.get("/api/snapshots")
+def api_snapshots(address: str | None = None, limit: int = 100):
+    """История снапшотов качества токенов из SQLite (opt-in ABC_SNAPSHOT_DB=1) — для UI/анализа."""
+    _block_if_public()
+    return dict(enabled=db.enabled(),
+                snapshots=db.recent(min(int(limit), 1000), address))
+
+@app.get("/api/token/freshness")
+def api_token_freshness(address: str):
+    """Свежие кошельки среди топ-холдеров (он-чейн, независимо от GMGN). Opt-in ABC_FRESH_WALLETS_RPC=1."""
+    _block_if_public()
+    return dict(enabled=dexadapter.FRESH_RPC, **(dexadapter.fresh_wallet_count(address.strip()) or {}))
+
+@app.get("/api/token/xcheck")
+def api_token_xcheck(username: str, address: str = ""):
+    """X reuse-профиль хендла (getxapi): возраст/подписчики + сколько РАЗНЫХ CA постил. По кнопке."""
+    _block_if_public()
+    return xapi.reuse_check(address.strip(), username.strip())
+
+@app.get("/api/token/quality")
+def api_token_quality(address: str):
+    """Сводная НЕЗАВИСИМАЯ проверка токена (не GMGN-агрегаты): top10-концентрация (RPC) +
+    свежие кошельки (RPC) + X-reuse (getxapi, хендл авто из socials). По кнопке — платит RPC/getxapi."""
+    _block_if_public()
+    address = address.strip()
+    handle = dexadapter.token_twitter(address)
+    out = dict(address=address,
+               top10=dexadapter._top10_concentration(address) if dexadapter.TOP10_RPC else None,
+               fresh=dexadapter.fresh_wallet_count(address) or None,
+               twitter=handle or None)
+    if handle and xapi.key():
+        out["x_reuse"] = xapi.reuse_check(address, handle)
+    # единый флаг качества: любой независимый красный сигнал → watch
+    fresh_ratio = (out["fresh"] or {}).get("ratio", 0.0)
+    red = bool((out.get("x_reuse") or {}).get("red_flag")) \
+        or (fresh_ratio >= 0.5) or ((out["top10"] or 0) >= 0.6)
+    out["red_flag"] = red
+    return out
 
 # 静态前端（同源，避免 CORS）。把上一版 dashboard 存为 static/index.html
 if STATIC_DIR.exists():

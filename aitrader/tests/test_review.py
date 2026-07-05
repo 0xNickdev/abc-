@@ -246,6 +246,31 @@ class TestEscapeSignals:
         assert sev == 55
 
 
+# ── A: соц-эдж — X-упоминания на входе vs исход (коррелируем хайп с результатом) ──
+class TestSocialEdge:
+    def _sx(self, pnl, xm):
+        r = sell(pnl)
+        r["attrib"]["x_mentions"] = xm       # как кладёт app._enrich_x_signal при подключённом Twitter
+        return r
+
+    def test_empty_without_signal(self):
+        recs = [sell(0.5, ["W"]) for _ in range(3)]      # attrib без x_mentions
+        assert review.social_edge(recs) == {}
+
+    def test_splits_low_vs_high_hype(self):
+        recs = [self._sx(-0.3, 0), self._sx(-0.35, 1),   # мало хайпа → проигрыш
+                self._sx(0.6, 10), self._sx(0.8, 20)]    # есть хайп → выигрыш
+        e = review.social_edge(recs, thr=3)
+        assert e["samples"] == 4 and e["threshold"] == 3
+        assert e["low"]["trades"] == 2 and e["low"]["winrate"] == 0.0
+        assert e["high"]["trades"] == 2 and e["high"]["winrate"] == 1.0
+
+    def test_included_in_daily_report(self):
+        recs = [self._sx(0.6, 10), self._sx(-0.3, 0)]
+        rep = review.daily_report(recs, cfg={"hard_stop_pct": 0.35})
+        assert "social_edge" in rep and rep["social_edge"]["samples"] == 2
+
+
 # ── Fee/slippage-aware PnL: чистый = вал − round-trip cost ──
 class TestFeeAwarePnl:
     def test_calendar_net_subtracts_fees(self, tmp_path, monkeypatch):
