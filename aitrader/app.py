@@ -2180,13 +2180,18 @@ def api_review(x_wallet: str | None = WalletHeader):
     """Отчёт review-loop: эдж кошельков/KOL + предложения по конфигу. Отдаёт сегодняшний
     сохранённый отчёт (если ночной цикл уже считал) или считает на лету (read-only)."""
     get_session(x_wallet)
+    rep = None
     try:
         p = REVIEWS_DIR / (datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d") + ".json")
         if p.exists():
-            return json.loads(p.read_text())
+            rep = json.loads(p.read_text())
     except Exception:
         pass
-    return run_review_and_persist(persist=False)
+    if rep is None:
+        rep = run_review_and_persist(persist=False)
+    if isinstance(rep, dict):
+        rep["learning"] = wallets.learning_enabled()      # текущее состояние тумблера самообучения
+    return rep
 
 @app.post("/api/review/run")
 def api_review_run(x_wallet: str | None = WalletHeader):
@@ -2210,6 +2215,19 @@ def api_review_apply(a: ReviewApplyIn, x_wallet: str | None = WalletHeader):
     applied = _apply_review_param(a.target, a.param, a.value, sess)
     log("REVIEW_APPLY", "ABC", f"{a.target}.{a.param} → {applied}", mode=sess.mode)
     return dict(ok=True, target=a.target, param=a.param, value=applied)
+
+class LearnIn(BaseModel):
+    enabled: bool
+
+@app.post("/api/review/learning")
+def api_review_learning(a: LearnIn, x_wallet: str | None = WalletHeader):
+    """Вкл/выкл edge-weighting самообучения (owner-gated). ВЫКЛ по умолчанию (не учимся на шуме)."""
+    _block_if_public()
+    sess = get_session(x_wallet)
+    _block_if_not_owner(sess)
+    on = wallets.set_learning(a.enabled)
+    log("REVIEW_LEARN", "ABC", f"self-learning {'ON' if on else 'OFF'}", mode=sess.mode)
+    return dict(ok=True, enabled=on)
 
 class BotConfigIn(BaseModel):
     mode: str | None = None              # n1 | n2

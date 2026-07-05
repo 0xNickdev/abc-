@@ -108,6 +108,7 @@ class TestEdgeWeighting:
     def _iso_edges(self, tmp_path, monkeypatch):
         monkeypatch.setattr(wallets, "EDGES_PATH", tmp_path / "wallet_edges.json")
         monkeypatch.setattr(wallets, "_edges_mem", None)
+        monkeypatch.setattr(wallets, "_learn_on", True)   # тесты edge-weighting: самообучение вкл
 
     def test_edge_weight_roundtrip(self):
         wallets.save_edges({"W": dict(weight=1.6, trades=8)})
@@ -179,7 +180,8 @@ class TestReviewEndpoints:
         assert "report" in d and "edges" in d
         assert set(("wallet_edge", "kol_review", "proposals", "overall")) <= set(d["report"])
 
-    def test_run_persists_edges_and_report(self, client):
+    def test_run_persists_edges_and_report(self, client, monkeypatch):
+        monkeypatch.setattr(wallets, "_learn_on", True)            # самообучение вкл для проверки веса
         # накопим достаточную выборку по кошельку → появится вес + файл отчёта
         for _ in range(6):
             appmod.log("SELL", "X", "x", dict(pnl=0.5, size_sol=0.1, fraction=1.0,

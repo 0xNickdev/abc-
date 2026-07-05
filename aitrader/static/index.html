@@ -565,6 +565,11 @@ td{padding:5px 10px;vertical-align:middle}
 .rv-kv.pos{color:var(--lime)}.rv-kv.neg{color:var(--clay)}
 .rv-kl{font-size:10.5px;color:var(--dim2);text-transform:uppercase;letter-spacing:.5px}
 .rv-note{font-size:12.5px;color:var(--dim2);background:rgba(255,255,255,.02);border:1px dashed var(--line);border-radius:8px;padding:9px 12px;margin-bottom:18px}
+.rv-learn{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.rv-learn-t{font-size:13px;font-weight:700;color:var(--paper)}
+.rv-toggle{border:1px solid var(--line);background:rgba(255,255,255,.04);color:var(--dim2);border-radius:20px;padding:3px 14px;font-size:11px;font-weight:800;cursor:pointer;letter-spacing:.05em}
+.rv-toggle.on{background:rgba(155,232,107,.15);border-color:rgba(155,232,107,.4);color:var(--lime)}
+.rv-learn-h{font-size:11.5px;color:var(--dim2)}
 .rv-sec{margin-bottom:22px}
 .rv-h{font-size:13px;font-weight:700;color:var(--paper);margin-bottom:10px;display:flex;align-items:center;gap:8px}
 .rv-cnt{font-size:11px;color:var(--dim2);background:rgba(255,255,255,.06);border-radius:20px;padding:1px 8px;font-weight:600}
@@ -1136,7 +1141,7 @@ function seedPositions(){return [
  {sym:'LATEMOON',address:'2MfTqVrJkHx9pQ3mKvR7tWn4bYj6cLwZ8sFgUaXpBn5dz',size:0.01,pnl:-0.21,severity:62,escaping:false,_frozen:true,entryPrice:0.05,price:0.0395,sigs:[{k:'sig_top45',hot:false},{k:'sig_5mweak',hot:false}]},
  {sym:'RUGRUN',address:'RUGRUNzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz',size:0.01,pnl:-0.61,severity:88,escaping:true,entryPrice:0.003,price:0.00117,sigs:[{k:'sig_mintback',hot:true},{k:'sig_top58',hot:true}]},
 ];}
-let POS=seedPositions();
+let POS=[];   // пусто на старте: НЕ показываем мок-позиции до ответа бэка (demo-режим сам засеет)
 
 let RISK={open:1,openMax:20,expo:0.2857,expoMax:1.0,loss:0,lossMax:0.5,consec:0,consecMax:3,killed:false};
 const P=x=>Math.round(x*100)+'%';
@@ -1467,6 +1472,7 @@ function setSource(s){
   document.getElementById('demoBar').classList.toggle('on',s==='demo');  // 演示横幅仅 DEMO 显示
   const mcp=document.getElementById('mcpPill');
   if(s==='backend'){mcp.textContent='LIVE';mcp.style.color='var(--lime)';
+    POS=[];T=[];loadingScreen=true;renderAll(false);     // очистить мок/старое → скелет до первого ответа бэка (без мигания)
     if(beReady){bePolling=true;scanCycle();}              // 环境已有 key，直接轮询，不弹框
     else{toast(t('toast_be_switched'),'ok');if(document.body.classList.contains('admin'))openCfg();}}  // 凭据面板仅运营者弹出
   else{mcp.textContent='DEMO';mcp.style.color='var(--amber)';loadingScreen=false;T=freshSeed();POS=seedPositions();RISK={open:1,openMax:20,expo:0.2857,expoMax:1.0,loss:0,lossMax:0.5,consec:0,consecMax:3,killed:false};sel=-1;cycles=1;renderAll(false);feed.innerHTML='';logScreen();}
@@ -1664,6 +1670,8 @@ async function loadReview(){
     ${kpi('Expectancy',_rvR(ov.expectancy_R),(ov.expectancy_R||0)>=0?'pos':'neg')}
     ${kpi('Net (after fees)',_fmtSol(ov.net_total_sol!=null?ov.net_total_sol:(ov.total_sol||0)),((ov.net_total_sol!=null?ov.net_total_sol:ov.total_sol)||0)>=0?'pos':'neg')}
   </div>`;
+  const learnOn=!!d.learning;
+  html+=`<div class="rv-learn"><span class="rv-learn-t">Self-learning · edge-weighting</span><button class="rv-toggle ${learnOn?'on':''}" onclick="toggleLearning(${!learnOn})">${learnOn?'ON':'OFF'}</button><span class="rv-learn-h">${learnOn?'Weighting wallets by proven edge.':'Neutral (off) — recommended until hundreds of trades accrue per wallet.'}</span></div>`;
   if(rep.fee_pct)html+=`<div class="rv-note">Net = gross − est. round-trip cost (${Math.round(rep.fee_pct*1000)/10}% fee+priority+slippage, both legs). Gross ${_fmtSol(ov.total_sol||0)}.</div>`;
   if(rep.note)html+=`<div class="rv-note">${rep.note}</div>`;
 
@@ -1699,6 +1707,12 @@ async function loadReview(){
   html+='</div>';
 
   box.innerHTML=html;
+}
+async function toggleLearning(on){
+  try{const r=await fetch(API+'/api/review/learning',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})});
+    if(!r.ok){toast(await errDetail(r),'err');return;}
+    toast('Self-learning '+(on?'ON':'OFF'),'ok');loadReview();
+  }catch(e){toast(e.message,'err');}
 }
 async function applyProposal(i){
   const p=_RVPROPS[i];if(!p)return;

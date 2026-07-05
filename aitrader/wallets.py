@@ -110,10 +110,39 @@ def reload_edges() -> dict:
     return load_edges()
 
 
+LEARN_PATH = _DATA_DIR / "self_learn.json"
+_learn_on = None
+
+
+def learning_enabled() -> bool:
+    """Включён ли edge-weighting самообучения. Персист self_learn.json; env ABC_SELF_LEARN=1 —
+    дефолт-он. По умолчанию ВЫКЛ: не учимся на шуме, пока мало данных."""
+    global _learn_on
+    if _learn_on is None:
+        try:
+            _learn_on = bool(json.loads(LEARN_PATH.read_text()).get("enabled"))
+        except Exception:
+            _learn_on = os.getenv("ABC_SELF_LEARN", "").strip().lower() in ("1", "true", "yes", "on")
+    return _learn_on
+
+
+def set_learning(on: bool) -> bool:
+    global _learn_on
+    _learn_on = bool(on)
+    try:
+        LEARN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        LEARN_PATH.write_text(json.dumps({"enabled": _learn_on}))
+    except Exception:
+        pass
+    return _learn_on
+
+
 def edge_weight(name: str) -> float:
-    """Множитель бонуса за этот кошелёк в scoring. 1.0 = нейтрально (мало данных или
-    неизвестен) — так фича без данных не искажает ранжирование; review-loop поднимает
-    вес доказанно прибыльным кошелькам и режет убыточным (см. review.wallet_edge)."""
+    """Множитель бонуса за этот кошелёк в scoring. 1.0 = нейтрально (выключено / мало данных /
+    неизвестен) — так фича без данных не искажает ранжирование; review-loop поднимает вес
+    доказанно прибыльным кошелькам и режет убыточным (см. review.wallet_edge)."""
+    if not learning_enabled():
+        return 1.0
     e = load_edges().get(name)
     if not isinstance(e, dict):
         return 1.0
