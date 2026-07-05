@@ -207,19 +207,26 @@ def _data_note(n: int) -> str:
     return f"выборка {n} сделок — эдж/предложения активны"
 
 
+def _summ(trades: list[dict], hs: float, fee_pct: float) -> dict:
+    """Сводка по сделкам: реализованная статистика + вал/чистый SOL (минус round-trip cost)."""
+    return _stats([t["pnl"] for t in trades], hs) | dict(
+        total_sol=round(sum(t["sol"] for t in trades), 4),
+        net_total_sol=round(sum((t["pnl"] - fee_pct) * t["size_sol"] for t in trades), 4))
+
+
 def daily_report(records: list[dict], day: str | None = None, cfg: dict | None = None,
-                 filters: dict | None = None, trigger: dict | None = None) -> dict:
-    """Разбор дня: что сработало/нет + эдж кошельков/KOL + предложения (ничего не применяет)."""
+                 filters: dict | None = None, trigger: dict | None = None,
+                 fee_pct: float = 0.0) -> dict:
+    """Разбор дня: что сработало/нет + эдж кошельков/KOL + предложения (ничего не применяет).
+    fee_pct — оценочный round-trip cost, вычитается из чистого PnL (net_total_sol)."""
     day = day or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
     hs = float((cfg or {}).get("hard_stop_pct", DEFAULT_HARD_STOP))
     day_trades = closed_trades([r for r in records if str(r.get("ts", "")).startswith(day)])
     all_trades = closed_trades(records)
     return dict(
-        day=day,
-        day_summary=_stats([t["pnl"] for t in day_trades], hs)
-        | dict(total_sol=round(sum(t["sol"] for t in day_trades), 4)),
-        overall=_stats([t["pnl"] for t in all_trades], hs)
-        | dict(total_sol=round(sum(t["sol"] for t in all_trades), 4)),
+        day=day, fee_pct=fee_pct,
+        day_summary=_summ(day_trades, hs, fee_pct),
+        overall=_summ(all_trades, hs, fee_pct),
         wallet_edge=wallet_edge(records, hard_stop=hs),
         kol_review=kol_review(),
         proposals=propose(records, cfg, filters, trigger),
@@ -228,9 +235,9 @@ def daily_report(records: list[dict], day: str | None = None, cfg: dict | None =
 
 
 def run(records: list[dict], cfg: dict | None = None, filters: dict | None = None,
-        trigger: dict | None = None) -> dict:
+        trigger: dict | None = None, fee_pct: float = 0.0) -> dict:
     """Полный прогон: отчёт + веса кошельков для персиста (только выборки с достаточными данными)."""
-    rep = daily_report(records, cfg=cfg, filters=filters, trigger=trigger)
+    rep = daily_report(records, cfg=cfg, filters=filters, trigger=trigger, fee_pct=fee_pct)
     edges = {name: dict(weight=st["weight"], trades=st["trades"],
                         winrate=st["winrate"], expectancy_R=st["expectancy_R"])
              for name, st in rep["wallet_edge"].items() if st.get("sample_ok")}
@@ -238,9 +245,9 @@ def run(records: list[dict], cfg: dict | None = None, filters: dict | None = Non
 
 
 def summary(path=None, cfg: dict | None = None, filters: dict | None = None,
-            trigger: dict | None = None) -> dict:
+            trigger: dict | None = None, fee_pct: float = 0.0) -> dict:
     """Удобный вход для CLI/эндпоинта: сам читает журнал по пути."""
-    return run(backtest.load_records(path), cfg=cfg, filters=filters, trigger=trigger)
+    return run(backtest.load_records(path), cfg=cfg, filters=filters, trigger=trigger, fee_pct=fee_pct)
 
 
 if __name__ == "__main__":

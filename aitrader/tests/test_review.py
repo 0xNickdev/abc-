@@ -212,3 +212,55 @@ class TestReviewEndpoints:
         r = client.post("/api/review/apply", headers={"X-Wallet": "ExtPk"},
                         json={"target": "bot", "param": "min_priority", "value": 70})
         assert r.status_code == 403
+
+
+# ── Escape: реальные сигналы на просадку ликвидности/цены (раньше монитор был мёртв) ──
+class TestEscapeSignals:
+    ENTRY = dict(honeypot=False, renounced_mint=True, renounced_freeze=True, top10=0.25)
+
+    def test_liquidity_pull_is_hot_escape(self):
+        sev, sigs = appmod.assess_escape(dict(self.ENTRY), self.ENTRY,
+                                         cur_liq=20_000, entry_liq=100_000)   # −80%
+        assert sev >= 70 and any(hot for _, hot in sigs)
+
+    def test_liquidity_draining_mid_severity(self):
+        sev, _ = appmod.assess_escape(dict(self.ENTRY), self.ENTRY,
+                                      cur_liq=55_000, entry_liq=100_000)      # −45%
+        assert 40 <= sev < 70
+
+    def test_price_collapse_signal(self):
+        sev, _ = appmod.assess_escape(dict(self.ENTRY), self.ENTRY,
+                                      cur_price=0.4, entry_price=1.0)          # −60%
+        assert sev >= 40
+
+    def test_stable_liq_and_price_no_alarm(self):
+        sev, _ = appmod.assess_escape(dict(self.ENTRY), self.ENTRY,
+                                      cur_liq=96_000, entry_liq=100_000,
+                                      cur_price=0.98, entry_price=1.0)
+        assert sev == 0                                   # мелкие колебания не паникуют
+
+    def test_defaults_preserve_old_behavior(self):
+        # без price/liq (старые вызовы) — как раньше: mint отозван = 55
+        entry = dict(honeypot=False, renounced_mint=True, top10=0.25)
+        sev, _ = appmod.assess_escape(dict(entry, renounced_mint=False), entry)
+        assert sev == 55
+
+
+# ── Fee/slippage-aware PnL: чистый = вал − round-trip cost ──
+class TestFeeAwarePnl:
+    def test_calendar_net_subtracts_fees(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(appmod, "LOG_PATH", tmp_path / "j.jsonl")
+        monkeypatch.setattr(appmod, "FEE_ROUNDTRIP_PCT", 0.025)
+        appmod.log("SELL", "A", "x", dict(pnl=0.2, size_sol=1.0, fraction=1.0), pubkey="local")
+        m = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
+        c = appmod.pnl_calendar("*", m)
+        assert abs(c["total"]["pnl"] - 0.2) < 1e-9         # вал 0.2*1
+        assert abs(c["total"]["net"] - 0.175) < 1e-9        # чистый 0.2 − 0.025*1
+        assert c["stats"]["net_total_sol"] == c["total"]["net"]
+        assert c["stats"]["fee_pct"] == 0.025
+
+    def test_review_overall_has_net(self, tmp_path):
+        recs = [dict(action="SELL", symbol="A", reason="x", pnl=0.2, size_sol=1.0, fraction=1.0)]
+        rep = review.daily_report(recs, cfg={"hard_stop_pct": 0.35}, fee_pct=0.025)
+        assert abs(rep["overall"]["net_total_sol"] - 0.175) < 1e-9
+        assert rep["fee_pct"] == 0.025

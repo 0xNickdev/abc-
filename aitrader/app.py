@@ -213,6 +213,10 @@ DEFAULT_POLL_S = 5.6
 RUN_MIN_INTERVAL_S = float(os.getenv("RUN_MIN_INTERVAL_S", "1.5"))
 # 同链 trending 短缓存：TTL 内多个 tab/请求复用同一次 cli 结果（同链多开不放大配额）。
 TRENDING_CACHE_TTL = 3.0
+# Оценочная round-trip стоимость сделки (pool fee + priority + slippage, обе ноги) как доля
+# от размера позиции. Вычитается из реализованного PnL → «чистый» PnL в календаре/Review.
+# Дефолт 2.5%; на прямом Jupiter без bot-налога ставь ниже (ABC_FEE_PCT=0.015).
+FEE_ROUNDTRIP_PCT = float(os.getenv("ABC_FEE_PCT", "0.025") or 0.025)
 
 # ──────────────────────────────────────────────────────────────────────────
 # 1. .env 读写（凭据落地本机）
@@ -970,11 +974,14 @@ class LLMJudge:
 # 7. 持仓逃生监控（确定性；LLM 完全不在路径上，求快）
 #    对已开仓的币，比对「当前 vs 建仓时」的安全/筹码快照，命中信号即累加 severity。
 # ──────────────────────────────────────────────────────────────────────────
-def assess_escape(cur_sec: dict, entry: dict):
-    """安全快照 diff（只用方向明确、口径稳定的字段：honeypot / renounced_mint / top10）。
+def assess_escape(cur_sec: dict, entry: dict, cur_price: float = 0.0, entry_price: float = 0.0,
+                  cur_liq: float = 0.0, entry_liq: float = 0.0):
+    """安全快照 diff（方向明确的字段：honeypot / renounced_mint / top10）+ 流动性撤离 + 价格崩塌。
 
     注意：不要用 burn_ratio——LP 销毁不可逆（"下降"现实中不会发生），且 token security 与
-    trending 行的 burn_ratio 口径不同，相减必误报。流动性撤离应看 liquidity，后续再加。
+    trending 行的 burn_ratio 口径不同，相减必误报。
+    流动性/价格是逃生的核心真实信号（DexScreener 实时给）：liq 撤走 = 正在 rug；价格深崩 = dev 抛。
+    price/liq 为 0（未提供）时跳过对应信号，保持旧行为与既有测试不变。
     """
     sev, sigs = 0, []
     if cur_sec.get("honeypot") and not entry.get("honeypot"):
@@ -984,6 +991,18 @@ def assess_escape(cur_sec: dict, entry: dict):
     # top10 跨源（建仓 token security vs 监控 trending 行）有波动，阈值放宽到 +15% 减少误报
     if cur_sec.get("top10", 0) > entry.get("top10", 0) + 0.15:
         sev += 22; sigs.append((f"Top-10 concentration rose to {cur_sec.get('top10',0):.0%}", cur_sec.get("top10",0) > 0.5))
+    # 流动性撤离（最强 rug 信号；ликвидность реальна из DexScreener）
+    if entry_liq > 0 and cur_liq > 0:
+        drop = 1.0 - cur_liq / entry_liq
+        if drop >= 0.65:
+            sev += 70; sigs.append((f"Liquidity pulled −{drop:.0%} (rug in progress)", True))
+        elif drop >= 0.40:
+            sev += 45; sigs.append((f"Liquidity draining −{drop:.0%}", True))
+    # 价格深崩（dev-дамп/каскад；дополняет жёсткий стоп, полезно и когда бот выключен）
+    if entry_price > 0 and cur_price > 0:
+        pdrop = 1.0 - cur_price / entry_price
+        if pdrop >= 0.50:
+            sev += 40; sigs.append((f"Price collapsed −{pdrop:.0%} from entry", True))
     if not sigs:
         # Стабильно — но показываем ЖИВОЙ статус того, что мониторим (а не пустую заглушку),
         # чтобы реальный монитор был так же информативен, как демо.
@@ -1233,7 +1252,7 @@ def pnl_calendar(pubkey: str, month: str) -> dict:
     реализованный SOL ≈ pnl(доля) × size_sol(этой продажи)."""
     pk = (pubkey or "").strip() or DEFAULT_PUBKEY
     days: dict[str, dict] = {}
-    tot = dict(pnl=0.0, trades=0, wins=0)
+    tot = dict(pnl=0.0, net=0.0, trades=0, wins=0)   # net = вал минус оценочный round-trip cost
     pcts: list[float] = []            # доли PnL по каждой сделке (для сводной статистики)
     if LOG_PATH.exists():
         for line in LOG_PATH.read_text().splitlines():
@@ -1249,12 +1268,13 @@ def pnl_calendar(pubkey: str, month: str) -> dict:
             d = r["ts"][:10]
             pct = float(r.get("pnl", 0.0)); size = float(r.get("size_sol", 0.0))
             sol = pct * size
-            cell = days.setdefault(d, dict(pnl=0.0, trades=0, wins=0, list=[]))
-            cell["pnl"] = round(cell["pnl"] + sol, 6); cell["trades"] += 1
-            # детализация сделки: токен, PnL% и в SOL, время (для клика по дню)
+            net = sol - FEE_ROUNDTRIP_PCT * size          # чистый: минус оценочный round-trip cost (fee+priority+slippage)
+            cell = days.setdefault(d, dict(pnl=0.0, net=0.0, trades=0, wins=0, list=[]))
+            cell["pnl"] = round(cell["pnl"] + sol, 6); cell["net"] = round(cell["net"] + net, 6); cell["trades"] += 1
+            # детализация сделки: токен, PnL% и в SOL (вал/чистый), время (для клика по дню)
             cell["list"].append(dict(sym=r.get("symbol", "?"), pct=round(pct, 4),
-                                     sol=round(sol, 6), ts=r.get("ts", "")[11:16]))
-            tot["pnl"] = round(tot["pnl"] + sol, 6); tot["trades"] += 1
+                                     sol=round(sol, 6), net=round(net, 6), ts=r.get("ts", "")[11:16]))
+            tot["pnl"] = round(tot["pnl"] + sol, 6); tot["net"] = round(tot["net"] + net, 6); tot["trades"] += 1
             pcts.append(pct)
             if sol > 0:
                 cell["wins"] += 1; tot["wins"] += 1
@@ -1267,7 +1287,7 @@ def pnl_calendar(pubkey: str, month: str) -> dict:
         avg_pnl_pct=round(sum(pcts) / len(pcts), 4) if pcts else 0.0,
         best_pct=round(max(pcts), 4) if pcts else 0.0,
         worst_pct=round(min(pcts), 4) if pcts else 0.0,
-        total_sol=tot["pnl"])
+        total_sol=tot["pnl"], net_total_sol=tot["net"], fee_pct=FEE_ROUNDTRIP_PCT)
     return dict(month=month, days=days, total=tot, stats=stats,
                 winrate=round(tot["wins"] / tot["trades"], 3) if tot["trades"] else 0.0)
 
@@ -1285,7 +1305,7 @@ def run_review_and_persist(persist: bool = True) -> dict:
     """Прогнать review-loop по журналу. persist=True → записать веса/отчёт/строку REVIEW."""
     records = backtest.load_records(LOG_PATH)
     res = review.run(records, cfg=CFG, filters=ST.filters,
-                     trigger=strategy.get(ST.strategy_id)["trigger"])
+                     trigger=strategy.get(ST.strategy_id)["trigger"], fee_pct=FEE_ROUNDTRIP_PCT)
     if persist:
         try:
             wallets.save_edges(res["edges"])           # веса → scoring подхватит на след. скане
@@ -1536,7 +1556,10 @@ def monitor_positions(chain: str, rows_by_addr: dict | None = None,
                                     pnl=p.get("pnl", 0), severity=0,
                                     signals=[dict(t=f"Monitor query failed: {e}", hot=False)]))
                     continue
-            severity, sigs = assess_escape(cur_sec, p["entry"])
+            cur_liq = _f(row.get("liquidity")) if row is not None else 0.0   # реальна из DexScreener, когда токен ещё в榜
+            severity, sigs = assess_escape(cur_sec, p["entry"], cur_price=cur_price,
+                                           entry_price=p.get("entry_price", 0.0),
+                                           cur_liq=cur_liq, entry_liq=p.get("entry_liq", 0.0))
             ep = p.get("entry_price", 0.0)
             if ep > 0 and cur_price > 0:
                 p["pnl"] = round((cur_price - ep) / ep, 4)
@@ -1634,7 +1657,8 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
     s.positions.append(dict(symbol=symbol, address=address, size_sol=round(size_sol, 4),
                             pnl=0.0, cycles=0, entry=entry, chain=chain,
                             entry_price=entry_price, cur_price=entry_price,
-                            opened_ts=time.time(), entry_attrib=attrib))
+                            opened_ts=time.time(), entry_attrib=attrib,
+                            entry_liq=float(attrib.get("liquidity", 0.0) or 0.0)))   # базовая ликвидность для escape-диффа
     s.save_positions()
     _verb = "成交" if filled else ("提交·待确认" if s.mode == "LIVE" else "记录")
     log("BUY", symbol, f"{s.mode} {_verb} {size_sol} ({chain})",

@@ -1615,8 +1615,9 @@ async function loadReview(){
     ${kpi('Closed trades',ov.trades??0)}
     ${kpi('Win rate',ov.winrate!=null?Math.round(ov.winrate*100)+'%':'—')}
     ${kpi('Expectancy',_rvR(ov.expectancy_R),(ov.expectancy_R||0)>=0?'pos':'neg')}
-    ${kpi('Net',_fmtSol(ov.total_sol||0),(ov.total_sol||0)>=0?'pos':'neg')}
+    ${kpi('Net (after fees)',_fmtSol(ov.net_total_sol!=null?ov.net_total_sol:(ov.total_sol||0)),((ov.net_total_sol!=null?ov.net_total_sol:ov.total_sol)||0)>=0?'pos':'neg')}
   </div>`;
+  if(rep.fee_pct)html+=`<div class="rv-note">Net = gross − est. round-trip cost (${Math.round(rep.fee_pct*1000)/10}% fee+priority+slippage, both legs). Gross ${_fmtSol(ov.total_sol||0)}.</div>`;
   if(rep.note)html+=`<div class="rv-note">${rep.note}</div>`;
 
   const props=rep.proposals||[];_RVPROPS=props;
