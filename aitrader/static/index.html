@@ -456,7 +456,7 @@ td{padding:5px 10px;vertical-align:middle}
 .pnltot{margin-left:auto;font-size:13px;color:var(--dim2,#9aa)}
 .pnlgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px}
 .pnlhcell{text-align:center;font-size:10px;color:var(--dim2,#9aa);padding:2px 0;font-weight:600}
-.pnlcell{aspect-ratio:1;border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:4px 5px;display:flex;flex-direction:column;background:rgba(255,255,255,.02);min-height:48px}
+.pnlcell{border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:5px 6px;display:flex;flex-direction:column;background:rgba(255,255,255,.02);min-height:52px}
 .pnlcell.empty{border:none;background:none}
 .pnlcell .pnld{font-size:11px;color:var(--dim2,#9aa)}
 .pnlcell .pnlv{font-size:11px;font-weight:700;margin-top:auto}
@@ -481,6 +481,10 @@ td{padding:5px 10px;vertical-align:middle}
 .daytrade .dt-ts{color:var(--dim2,#9aa);font-size:11px}
 .daytrade .dt-pct,.daytrade .dt-sol{font-weight:700;text-align:right;font-variant-numeric:tabular-nums}
 .daytrade .win{color:var(--lime,#9be86b)}.daytrade .loss{color:var(--clay,#e8896b)}
+.daytrade .dt-ca{display:block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;font-weight:400;color:var(--dim2,#9aa);cursor:pointer;margin-top:2px;letter-spacing:.02em}
+.daytrade .dt-ca:hover{color:var(--violet2,#b18cff)}
+#pnlScrim .mbody{max-width:760px;margin:0 auto}
+#pnlDayDetail{max-height:38vh;overflow-y:auto;margin-top:8px;padding-right:3px}
 </style>
 <div class="scrim" id="pipeScrim">
   <div class="modal">
@@ -1516,7 +1520,7 @@ function pnlDay(key){
   if(!c||!c.list||!c.list.length){box.innerHTML='';return;}
   const dt=new Date(key+'T00:00:00Z').toLocaleString('en',{weekday:'long',month:'short',day:'numeric',timeZone:'UTC'});
   const rows=c.list.slice().sort((a,b)=>b.sol-a.sol).map(x=>`<div class="daytrade">
-    <span class="dt-sym">${x.sym}</span><span class="dt-ts">${x.ts}</span>
+    <span class="dt-sym">${x.sym}${x.address?`<span class="dt-ca" onclick="copyCA(this,'${x.address}')" title="copy CA">${_short(x.address)}</span>`:''}</span><span class="dt-ts">${x.ts}</span>
     <span class="dt-pct ${x.pct>=0?'win':'loss'}">${x.pct>=0?'+':''}${(x.pct*100).toFixed(1)}%</span>
     <span class="dt-sol ${x.sol>=0?'win':'loss'}">${x.sol>=0?'+':''}${x.sol.toFixed(4)}${SOL_SVG}</span></div>`).join('');
   box.innerHTML=`<div class="daydet-h">${dt} · ${c.trades} trade${c.trades>1?'s':''} · <span class="${c.pnl>=0?'win':'loss'}">${_fmtSol(c.pnl)}</span></div>${rows}`;
@@ -1579,6 +1583,7 @@ async function authedFetch(url,opts){
 }
 function _provider(){const p=window.phantom&&window.phantom.solana;if(p&&p.isPhantom)return p;if(window.solana&&window.solana.isPhantom)return window.solana;return null;}
 function _short(a){return a.slice(0,4)+'…'+a.slice(-4);}
+function copyCA(el,ca){try{navigator.clipboard.writeText(ca);}catch(e){}const o=el.textContent;el.textContent='copied';setTimeout(()=>{el.textContent=o;},900);}
 function renderWallet(){
   loadAuthToken();   // токен привязан к pubkey — обновляем при каждой смене кошелька
   const btn=document.getElementById('walletBtn'),lbl=document.getElementById('walletLbl');if(!btn)return;

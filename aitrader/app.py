@@ -1290,7 +1290,8 @@ def pnl_calendar(pubkey: str, month: str) -> dict:
             cell["pnl"] = round(cell["pnl"] + sol, 6); cell["net"] = round(cell["net"] + net, 6); cell["trades"] += 1
             # детализация сделки: токен, PnL% и в SOL (вал/чистый), время (для клика по дню)
             cell["list"].append(dict(sym=r.get("symbol", "?"), pct=round(pct, 4),
-                                     sol=round(sol, 6), net=round(net, 6), ts=r.get("ts", "")[11:16]))
+                                     sol=round(sol, 6), net=round(net, 6), ts=r.get("ts", "")[11:16],
+                                     address=r.get("address", "")))
             tot["pnl"] = round(tot["pnl"] + sol, 6); tot["net"] = round(tot["net"] + net, 6); tot["trades"] += 1
             pcts.append(pct)
             if sol > 0:
