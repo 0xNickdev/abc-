@@ -1180,6 +1180,26 @@ class TestXReuse:
         r = xapi.reuse_check("CA", "newbie")
         assert r["ok"] and r["other_tokens"] == 0 and r["red_flag"] is True   # молодой аккаунт = флаг
 
+    def _mem(self, monkeypatch, screen_names):
+        import xapi
+        xapi._hist_cache.clear()
+
+        class R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self): return {"accounts": [{"screen_names": screen_names}]}
+        monkeypatch.setattr(xapi.httpx, "get", lambda *a, **k: R())
+        return xapi
+
+    def test_handle_history_counts_renames(self, monkeypatch):
+        xapi = self._mem(monkeypatch, {"old1": [], "old2": [], "cur": []})
+        d = xapi.handle_history("cur")
+        assert d["renames"] == 2 and "old1" in d["names"] and d["red_flag"] is False
+
+    def test_handle_history_flags_many_renames(self, monkeypatch):
+        xapi = self._mem(monkeypatch, {"a": [], "b": [], "c": [], "d": []})
+        assert xapi.handle_history("d")["red_flag"] is True           # 4+ хендлов = ферма-флаг
+
 
 # ── Резолв X-хендла токена из socials DexScreener (для авто X-reuse) ──
 class TestTokenTwitter:

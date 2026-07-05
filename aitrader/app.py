@@ -2571,9 +2571,12 @@ def api_token_quality(address: str):
                twitter=handle or None)
     if handle and xapi.key():
         out["x_reuse"] = xapi.reuse_check(address, handle)
+    if handle:
+        out["renames"] = xapi.handle_history(handle) or None   # memory.lol (бесплатно, без ключа)
     # единый флаг качества: любой независимый красный сигнал → watch
     fresh_ratio = (out["fresh"] or {}).get("ratio", 0.0)
     red = bool((out.get("x_reuse") or {}).get("red_flag")) \
+        or bool((out.get("renames") or {}).get("red_flag")) \
         or (fresh_ratio >= 0.5) or ((out["top10"] or 0) >= 0.6)
     out["red_flag"] = red
     return out

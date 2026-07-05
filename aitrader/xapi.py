@@ -111,3 +111,41 @@ def reuse_check(ca: str, username: str) -> dict:
                    red_flag=bool(red), cached=False)
     _cache[ck] = (time.monotonic(), payload)
     return payload
+
+
+MEMORY_LOL = "https://api.memory.lol/v1/tw/"
+_hist_cache: dict[str, tuple] = {}
+
+
+def handle_history(username: str) -> dict:
+    """История хендлов из memory.lol (БЕСПЛАТНО, без ключа): прошлые screen names аккаунта.
+    Много ренеймов = красный флаг (ферма перекатывает аудиторию / прячет запуск). Кэш TTL.
+    {} при сбое; ok=True с пустым списком, если аккаунт не найден (нет истории ренеймов)."""
+    username = (username or "").lstrip("@").strip()
+    if not username:
+        return {}
+    hit = _hist_cache.get(username)
+    if hit and time.monotonic() - hit[0] < TTL:
+        return dict(hit[1], cached=True)
+    try:
+        r = httpx.get(MEMORY_LOL + username, timeout=10.0)
+        if r.status_code == 404:
+            payload = dict(ok=True, names=[], renames=0, red_flag=False, cached=False)
+            _hist_cache[username] = (time.monotonic(), payload)
+            return payload
+        r.raise_for_status()
+        j = r.json() or {}
+    except Exception:
+        return {}
+    names: list = []
+    for acc in (j.get("accounts") or []):
+        sn = acc.get("screen_names")
+        if isinstance(sn, dict):
+            names += list(sn.keys())
+        elif isinstance(sn, list):
+            names += [(x.get("screen_name") if isinstance(x, dict) else x) for x in sn]
+    uniq = [n for n in dict.fromkeys(names) if n]
+    payload = dict(ok=True, names=uniq[:10], renames=max(0, len(uniq) - 1),
+                   red_flag=len(uniq) >= 4, cached=False)          # 4+ разных хендлов = ферма-флаг
+    _hist_cache[username] = (time.monotonic(), payload)
+    return payload
