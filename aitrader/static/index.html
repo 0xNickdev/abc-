@@ -1220,6 +1220,21 @@ function renderKpis(flash){
   }
 }
 
+/* ── стабильность дашборда: токены ротируют в трендинге между поллами → держим ненадолго
+   тех, кто выпал из выдачи, вместо мгновенного удаления. Иначе строки пропадают и моргают
+   (remove→re-add). GRACE = сколько поллов ждать перед удалением пропавшего токена. ── */
+let GRACE=2;
+function mergeTokens(prev,incoming){
+  const inc=new Map();(incoming||[]).forEach(t=>{if(t&&t.address)inc.set(t.address,t);});
+  const out=[],used=new Set();
+  (prev||[]).forEach(p=>{
+    if(!p||!p.address)return;                              // без адреса не мёрджим
+    if(inc.has(p.address)){const n=inc.get(p.address);n._miss=0;delete n._stale;out.push(n);used.add(p.address);}
+    else{const m=(p._miss||0)+1;if(m<=GRACE){p._miss=m;p._stale=true;out.push(p);used.add(p.address);}}  // грейс
+  });
+  (incoming||[]).forEach(t=>{if(t){if(!t.address)out.push(t);else if(!used.has(t.address)){t._miss=0;out.push(t);used.add(t.address);}}});
+  return out;
+}
 /* ── pipeline table (sorted: action by priority desc, then reject) ── */
 let sel=-1;   // 默认不选中、不展开解读（笔记本屏幕省空间）；点击行展开，再点收起
 function ordered(){return [...T].map((t,i)=>({...t,_i:i})).sort((a,b)=>{
@@ -1400,7 +1415,7 @@ async function scanCycle(){
       syncBackendMode(data.mode);            // 后端真实 mode 同步到开关（重启后端会回 SHADOW，避免开关停留 LIVE 误导）
       const {list,risk,positions}=normalize(data);
       loadingScreen=false;                 // 拿到后端响应，结束骨架
-      T=list; RISK=risk; if(positions)POS=positions; if(sel>=T.length)sel=-1;
+      T=mergeTokens(T,list); RISK=risk; if(positions)POS=positions; if(sel>=T.length)sel=-1;   // грейс: не роняем токены, что моргнули из трендинга
       document.getElementById('lat').textContent=Math.round(performance.now()-t0)+'ms';
       cycles++;renderAll(true);logScreen();
     }catch(e){bePolling=false;toast(t('toast_be_fail',e.message),'err');}
