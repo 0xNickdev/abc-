@@ -2147,6 +2147,11 @@ async function qualityCheck(){
     if(d.x_reuse&&d.x_reuse.ok)h+=_qtag(d.x_reuse.red_flag?'bad':'ok',`X @${d.twitter||'?'}: ${d.x_reuse.other_tokens} other CA · age ${d.x_reuse.account_age_days??'?'}d · ${d.x_reuse.followers} foll`);
     else if(d.twitter)h+=_qtag('n',`@${d.twitter}`);
     if(d.renames&&d.renames.renames>0)h+=_qtag(d.renames.red_flag?'bad':'n',`renamed ${d.renames.renames}× (${(d.renames.names||[]).slice(0,3).join(' → ')})`);
+    if(d.holders_risk&&d.holders_risk.ok){const hr=d.holders_risk;
+      if(hr.rugged)h+=_qtag('bad','RUGGED');
+      if(hr.insiders>0)h+=_qtag(hr.insiders>=3?'bad':'n',`insiders ${hr.insiders}`);
+      if(hr.bundled>0)h+=_qtag('bad',`bundled ${hr.bundled}`);
+      (hr.danger||[]).slice(0,2).forEach(x=>h+=_qtag('bad',x));}
     if(!h.includes('qtag')&&!d.top10&&!d.fresh)h+='<span class="hint">enable ABC_TOP10_RPC / ABC_FRESH_WALLETS_RPC / GETXAPI_KEY for signals</span>';
     h+=`<div style="margin-top:6px"><button class="mbtn ghost" onclick="farmScan()">Scan holders for farm</button><div id="farmRes" class="hint"></div></div>`;
     box.innerHTML=h;

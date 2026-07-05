@@ -57,6 +57,7 @@ import execution  # non-custodial：服务器只构建 tx，签名在浏览器�
 import farm  # детектор ферм по кластеризации истории кошельков (gmgn portfolio activity)
 import kol  # Twitter/X KOL 信号（per-user opt-in）
 import review  # офлайн review-loop: эдж кошельков/KOL + предложения по конфигу (обучение на своих данных)
+import rugcheck  # он-чейн риск холдеров (бандлеры/инсайдеры/danger) — белый лейбл, без бренда
 import sessionwallet  # N3: session-кошелёк с ограниченным балансом (этап 7)
 import strategy  # ABC Alpha v1：具名策略预设 + 入场信号评估
 import wallets  # 私有 smart-money 跟踪钱包（信号，非跟单）
@@ -2573,10 +2574,12 @@ def api_token_quality(address: str):
         out["x_reuse"] = xapi.reuse_check(address, handle)
     if handle:
         out["renames"] = xapi.handle_history(handle) or None   # memory.lol (бесплатно, без ключа)
+    out["holders_risk"] = rugcheck.check(address) or None      # бандлеры/инсайдеры/danger (белый лейбл)
     # единый флаг качества: любой независимый красный сигнал → watch
     fresh_ratio = (out["fresh"] or {}).get("ratio", 0.0)
     red = bool((out.get("x_reuse") or {}).get("red_flag")) \
         or bool((out.get("renames") or {}).get("red_flag")) \
+        or bool((out.get("holders_risk") or {}).get("red_flag")) \
         or (fresh_ratio >= 0.5) or ((out["top10"] or 0) >= 0.6)
     out["red_flag"] = red
     return out

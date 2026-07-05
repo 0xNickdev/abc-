@@ -1254,6 +1254,48 @@ class TestFarmCluster:
         assert farm.detect("CA", boom, lambda w: []) == {}           # сбой источника → пусто
 
 
+# ── Он-чейн риск холдеров (бандлеры/инсайдеры/danger) — белый лейбл ──
+class TestRugCheck:
+    def _mock(self, monkeypatch, report):
+        import rugcheck
+        rugcheck._cache.clear()
+
+        class R:
+            status_code = 200
+            def raise_for_status(self): pass
+            def json(self): return report
+        monkeypatch.setattr(rugcheck.httpx, "get", lambda *a, **k: R())
+        return rugcheck
+
+    def test_parses_insiders_bundled_danger(self, monkeypatch):
+        rc = self._mock(monkeypatch, {
+            "topHolders": [{"insider": True}, {"insider": True}, {"insider": False}],
+            "insiderNetworks": [{"type": "bundle"}, {"type": "transfer"}],
+            "risks": [{"name": "Low liquidity", "level": "danger"}, {"name": "x", "level": "warn"}],
+            "rugged": False})
+        d = rc.check("M")
+        assert d["insiders"] == 2 and d["bundled"] == 1 and d["insider_networks"] == 2
+        assert d["danger"] == ["Low liquidity"] and d["red_flag"] is True   # danger → флаг (красным ДА)
+
+    def test_clean_token_no_flag(self, monkeypatch):
+        rc = self._mock(monkeypatch, {"topHolders": [{"insider": False}],
+                                      "insiderNetworks": [], "risks": [], "rugged": False})
+        assert rc.check("M")["red_flag"] is False
+
+    def test_rugged_flags(self, monkeypatch):
+        rc = self._mock(monkeypatch, {"rugged": True, "topHolders": [], "risks": []})
+        assert rc.check("M")["rugged"] is True and rc.check("M")["red_flag"] is True
+
+    def test_soft_on_error(self, monkeypatch):
+        import rugcheck
+        rugcheck._cache.clear()
+
+        def boom(*a, **k):
+            raise RuntimeError("down")
+        monkeypatch.setattr(rugcheck.httpx, "get", boom)
+        assert rugcheck.check("M") == {}                             # сбой → пусто, не флагим
+
+
 # ── Идеи 1/2/4/5: рейтинг KOL, скорость холдеров, rug в features, умный размер ──
 class TestSmartSizing:
     def test_conviction_scales_and_liquidity_cuts(self):
