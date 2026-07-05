@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import contextlib
 import datetime
 import json
 import os
@@ -56,7 +57,7 @@ def _connect(path=None) -> sqlite3.Connection:
 
 
 def init_db(path=None) -> None:
-    with _LOCK, _connect(path) as con:
+    with _LOCK, contextlib.closing(_connect(path)) as con, con:
         con.executescript(_SCHEMA)
 
 
@@ -86,7 +87,7 @@ def record_decisions(decisions: list[dict], chain: str, ts: str, path=None) -> i
     cols = list(_COLS) + ["features"]
     sql = f"INSERT INTO snapshots ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})"
     try:
-        with _LOCK, _connect(path) as con:
+        with _LOCK, contextlib.closing(_connect(path)) as con, con:
             con.executescript(_SCHEMA)
             con.executemany(sql, [tuple(r[c] for c in cols) for r in rows])
         return len(rows)
@@ -104,7 +105,7 @@ def recent(limit: int = 100, address: str | None = None, path=None) -> list[dict
     q += " ORDER BY id DESC LIMIT ?"
     args.append(int(limit))
     try:
-        with _connect(path) as con:
+        with contextlib.closing(_connect(path)) as con:
             con.row_factory = sqlite3.Row
             return [dict(r) for r in con.execute(q, args).fetchall()]
     except Exception:
@@ -116,7 +117,7 @@ def prune(days: int = 14, path=None) -> int:
     cutoff = (datetime.datetime.now(datetime.timezone.utc)
               - datetime.timedelta(days=days)).isoformat()
     try:
-        with _LOCK, _connect(path) as con:
+        with _LOCK, contextlib.closing(_connect(path)) as con, con:
             cur = con.execute("DELETE FROM snapshots WHERE ts < ?", (cutoff,))
             return cur.rowcount
     except Exception:

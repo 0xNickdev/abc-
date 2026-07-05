@@ -54,6 +54,7 @@ import bot  # 自主执行回路（量化机器人，纸面优先）
 import db  # снапшот-хранилище качества токенов (SQLite), opt-in ABC_SNAPSHOT_DB=1
 import dexadapter  # реальные данные без ключей (GeckoTerminal + Solana RPC), DATA_SOURCE=dex
 import execution  # non-custodial：服务器只构建 tx，签名在浏览器（Phantom）
+import farm  # детектор ферм по кластеризации истории кошельков (gmgn portfolio activity)
 import kol  # Twitter/X KOL 信号（per-user opt-in）
 import review  # офлайн review-loop: эдж кошельков/KOL + предложения по конфигу (обучение на своих данных)
 import sessionwallet  # N3: session-кошелёк с ограниченным балансом (этап 7)
@@ -507,6 +508,19 @@ class LiveGMGN(GMGNAdapter):
         return self._cli("token", "holders", "--address", addr)
 
     def portfolio_stats(self, w):   return self._cli("portfolio", "stats", "--wallet", w)
+
+    def token_traders(self, addr, order_by="buy_volume_cur", limit=100, tag=None):
+        args = ["token", "traders", "--address", addr, "--order-by", order_by, "--limit", str(limit)]
+        if tag:
+            args += ["--tag", tag]
+        d = self._cli(*args)
+        rows = d.get("data", d)
+        return rows.get("list", rows.get("traders", [])) if isinstance(rows, dict) else rows
+
+    def wallet_activity(self, wallet, limit=50):
+        d = self._cli("portfolio", "activity", "--wallet", wallet, "--limit", str(limit))
+        rows = d.get("data", d)
+        return rows.get("activity", rows.get("list", [])) if isinstance(rows, dict) else rows
 
     def wallet_address(self) -> str:
         """取绑定到 API Key 的本链钱包地址（swap 的 --from 必须与 Key 绑定一致）。
@@ -2563,6 +2577,26 @@ def api_token_quality(address: str):
         or (fresh_ratio >= 0.5) or ((out["top10"] or 0) >= 0.6)
     out["red_flag"] = red
     return out
+
+def _farm_fns(g):
+    """Адаптер gmgn → колбэки для farm.detect. Терпимо к адаптерам без методов (→ пусто)."""
+    def get_traders(addr, n):
+        fn = getattr(g, "token_traders", None)
+        rows = fn(addr, order_by="buy_volume_cur", limit=n) if fn else []
+        return [r.get("address") or r.get("wallet_address") for r in (rows or []) if isinstance(r, dict)]
+    def get_activity(w):
+        fn = getattr(g, "wallet_activity", None)
+        rows = fn(w) if fn else []
+        return [r.get("token_address") or r.get("address") for r in (rows or []) if isinstance(r, dict)]
+    return get_traders, get_activity
+
+@app.get("/api/token/farm")
+def api_token_farm(address: str, max_wallets: int = 30):
+    """Детектор ферм: топ-покупатели по объёму → история каждого (gmgn) → кластеры одинаковой
+    истории (ферма). Тяжело по rate-limit → по кнопке, бюджет max_wallets. Нужен live-gmgn."""
+    _block_if_public()
+    gt, ga = _farm_fns(MK.adapter_for("sol"))
+    return farm.detect(address.strip(), gt, ga, max_wallets=min(int(max_wallets), 100))
 
 # 静态前端（同源，避免 CORS）。把上一版 dashboard 存为 static/index.html
 if STATIC_DIR.exists():

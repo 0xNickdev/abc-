@@ -1203,6 +1203,37 @@ class TestTokenTwitter:
         assert dx.token_twitter("MINT") == ""
 
 
+# ── Farm-детектор: кластеризация одинаковой истории кошельков = ферма ──
+class TestFarmCluster:
+    def test_groups_identical_histories(self):
+        import farm
+        h = {"W1": {"A", "B", "C"}, "W2": {"A", "B", "D"},   # общие A,B
+             "W3": {"A", "B"}, "W4": {"X", "Y"}}             # W4 одинокий
+        r = farm.cluster_wallets(h, min_common=2, farm_min=3)
+        assert r["largest_cluster"] == 3 and r["red_flag"] is True
+        assert r["checked"] == 4 and r["clustered"] == 3
+
+    def test_disjoint_no_cluster(self):
+        import farm
+        r = farm.cluster_wallets({"W1": {"A"}, "W2": {"B"}, "W3": {"C"}}, min_common=2)
+        assert r["largest_cluster"] == 1 and r["red_flag"] is False
+
+    def test_detect_excludes_current_token(self):
+        import farm
+        traders = ["W1", "W2", "W3"]
+        acts = {"W1": ["CA", "A", "B"], "W2": ["A", "B", "Z"], "W3": ["A", "B"]}
+        r = farm.detect("CA", lambda a, n: traders, lambda w: acts[w],
+                        max_wallets=10, farm_min=3)
+        assert r["largest_cluster"] == 3 and r["red_flag"] is True   # общие A,B (CA исключён)
+
+    def test_detect_soft_on_source_error(self):
+        import farm
+
+        def boom(a, n):
+            raise RuntimeError("gmgn down")
+        assert farm.detect("CA", boom, lambda w: []) == {}           # сбой источника → пусто
+
+
 # ── Идеи 1/2/4/5: рейтинг KOL, скорость холдеров, rug в features, умный размер ──
 class TestSmartSizing:
     def test_conviction_scales_and_liquidity_cuts(self):
