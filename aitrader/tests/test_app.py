@@ -679,7 +679,7 @@ class TestChainAwareGates:
     def test_tax_gate_enforced_on_evm(self):
         f = feat(buy_tax=0.5, sell_tax=0.5)
         ok, reason, gate = appmod.hard_gates(f, chain="bsc")
-        assert ok is False and gate == 1 and "税" in reason
+        assert ok is False and gate == 1 and "tax" in reason
 
     def test_tax_gate_default_behavior_unchanged(self):
         ok, _, _ = appmod.hard_gates(feat(buy_tax=0.5))   # без chain — как раньше

@@ -758,48 +758,48 @@ def hard_gates(f: TokenFeatures, flt: dict | None = None, chain: str | None = No
     flt = flt if flt is not None else DEFAULT_FILTERS
     # gate 1 避雷（真实布尔/数值字段，无合成安全分）
     if f.honeypot:
-        return False, "REJECT 避雷：honeypot 命中", 1
+        return False, "REJECT safety: honeypot flagged", 1
     if CFG["require_renounced_mint"] and not f.renounced_mint:
-        return False, "REJECT 避雷：未放弃增发权（可无限增发）", 1
+        return False, "REJECT safety: mint authority not renounced (can inflate supply)", 1
     # —— 可调过滤器（UI/配置可改；0/-1/空=关闭，不影响默认行为）——
     if flt.get("require_renounced_freeze") and not f.renounced_freeze:
-        return False, "REJECT 过滤：未放弃冻结权（可锁死卖出）", 1
+        return False, "REJECT filter: freeze authority not renounced (can lock sells)", 1
     if flt.get("min_liquidity", 0) > 0 and f.liquidity < flt["min_liquidity"]:
-        return False, f"REJECT 过滤：流动性 {f.liquidity:,.0f} < {flt['min_liquidity']:,.0f}", 1
+        return False, f"REJECT filter: liquidity {f.liquidity:,.0f} < {flt['min_liquidity']:,.0f}", 1
     if flt.get("min_volume_1h", 0) > 0 and f.vol_1h < flt["min_volume_1h"]:
-        return False, f"REJECT 过滤：1h 量 {f.vol_1h:,.0f} < {flt['min_volume_1h']:,.0f}", 1
+        return False, f"REJECT filter: 1h volume {f.vol_1h:,.0f} < {flt['min_volume_1h']:,.0f}", 1
     if flt.get("min_mcap", 0) > 0 and f.mcap < flt["min_mcap"]:
-        return False, f"REJECT 过滤：市值 {f.mcap:,.0f} < {flt['min_mcap']:,.0f}", 1
+        return False, f"REJECT filter: mcap {f.mcap:,.0f} < {flt['min_mcap']:,.0f}", 1
     if flt.get("max_mcap", 0) > 0 and f.mcap > flt["max_mcap"]:
-        return False, f"REJECT 过滤：市值 {f.mcap:,.0f} > {flt['max_mcap']:,.0f}（已起飞）", 1
+        return False, f"REJECT filter: mcap {f.mcap:,.0f} > {flt['max_mcap']:,.0f} (already mooned)", 1
     if flt.get("min_age_min", 0) > 0 and f.age_min < flt["min_age_min"]:
-        return False, f"REJECT 过滤：币龄 {f.age_min:.0f}m < {flt['min_age_min']:.0f}m（过新/狙击风险）", 1
+        return False, f"REJECT filter: age {f.age_min:.0f}m < {flt['min_age_min']:.0f}m (too new / snipe risk)", 1
     if flt.get("max_age_min", 0) > 0 and f.age_min > flt["max_age_min"]:
-        return False, f"REJECT 过滤：币龄 {f.age_min:.0f}m > {flt['max_age_min']:.0f}m（动能已尽）", 1
+        return False, f"REJECT filter: age {f.age_min:.0f}m > {flt['max_age_min']:.0f}m (momentum spent)", 1
     if flt.get("max_sniper_count", -1) >= 0 and f.sniper_count > flt["max_sniper_count"]:
-        return False, f"REJECT 过滤：狙击钱包 {f.sniper_count} > {flt['max_sniper_count']}", 1
+        return False, f"REJECT filter: snipers {f.sniper_count} > {flt['max_sniper_count']}", 1
     if flt.get("max_vol_to_liq", 0) > 0 and f.liquidity > 0 and (f.vol_1h / f.liquidity) > flt["max_vol_to_liq"]:
-        return False, f"REJECT 过滤：量/流动性 {f.vol_1h / f.liquidity:.1f}x > {flt['max_vol_to_liq']:.1f}x（疑似刷量）", 1
+        return False, f"REJECT filter: vol/liq {f.vol_1h / f.liquidity:.1f}x > {flt['max_vol_to_liq']:.1f}x (wash-trade suspect)", 1
     sym_lower = (f.symbol_safe or "").lower()
     if any(b and b.lower() in sym_lower for b in flt.get("symbol_blacklist", [])):
-        return False, "REJECT 过滤：符号在黑名单", 1
+        return False, "REJECT filter: symbol blacklisted", 1
     if f.address in set(flt.get("address_blacklist", [])):
-        return False, "REJECT 过滤：地址在黑名单", 1
+        return False, "REJECT filter: address blacklisted", 1
     if chain != "sol" and (f.buy_tax > CFG["max_buy_tax"] or f.sell_tax > CFG["max_sell_tax"]):
-        return False, f"REJECT 避雷：税过高 买{f.buy_tax:.0%}/卖{f.sell_tax:.0%}", 1
+        return False, f"REJECT safety: tax too high buy {f.buy_tax:.0%}/sell {f.sell_tax:.0%}", 1
     if f.rug_ratio > CFG["max_rug_ratio"]:
-        return False, f"REJECT 避雷：rug 比例 {f.rug_ratio:.0%} > {CFG['max_rug_ratio']:.0%}", 1
+        return False, f"REJECT safety: rug ratio {f.rug_ratio:.0%} > {CFG['max_rug_ratio']:.0%}", 1
     if f.bundler > CFG["max_bundler_ratio"]:
-        return False, f"REJECT 避雷：bundler {f.bundler:.0%} > {CFG['max_bundler_ratio']:.0%}", 1
+        return False, f"REJECT safety: bundler {f.bundler:.0%} > {CFG['max_bundler_ratio']:.0%}", 1
     if f.dev_hold > CFG["max_dev_holding_pct"]:
-        return False, f"REJECT 避雷：dev 持仓 {f.dev_hold:.0%} > {CFG['max_dev_holding_pct']:.0%}", 1
+        return False, f"REJECT safety: dev holding {f.dev_hold:.0%} > {CFG['max_dev_holding_pct']:.0%}", 1
     if f.top10 > CFG["max_top10_concentration"]:
-        return False, f"REJECT 避雷：top10 {f.top10:.0%} 集中", 1
+        return False, f"REJECT safety: top10 {f.top10:.0%} concentrated", 1
     # gate 2 共识：smart_degen + renowned KOL 计数。
     # Источники без smart-money полей (DATA_SOURCE=dex) не режем этим гейтом —
     # иначе честные нули убили бы весь реальный список (require_consensus=False).
     if require_consensus and f.sm_confluence < CFG["min_smart_money_confluence"]:
-        return False, (f"REJECT 共识：聪明钱+KOL {f.sm_confluence} "
+        return False, (f"REJECT consensus: smart+KOL {f.sm_confluence} "
                        f"(degen {f.smart_degen}/KOL {f.renowned}) < {CFG['min_smart_money_confluence']}"), 2
     return True, "ok", 0
 
@@ -1470,7 +1470,7 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
     scored.sort(key=lambda x: -x[0])
     to_llm = scored[:CFG["llm_max"]]
     for sc, f in scored[CFG["llm_max"]:]:
-        decisions.append(_reject(f, "REJECT 排序：优先级低于本轮 LLM 名额", 3, None))
+        decisions.append(_reject(f, "REJECT ranking: priority below this round's LLM slots", 3, None))
 
     # STEP 5 LLM 只对幸存者解释；STEP 6 仓位由代码算；产出候选（不执行）
     n_pos = len(s.positions)
@@ -1484,10 +1484,10 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
         verdicts = [judge.judge(f) for _, f in to_llm]
     for (sc, f), v in zip(to_llm, verdicts):
         if v.verdict != "pass":
-            decisions.append(_reject(f, f"REJECT LLM：{v.verdict}（{v.crowdedness}）", 4, v))
+            decisions.append(_reject(f, f"REJECT LLM: {v.verdict} ({v.crowdedness})", 4, v))
             continue
         if v.conviction < CFG["min_llm_conviction"]:
-            decisions.append(_reject(f, f"REJECT LLM：置信度 {v.conviction} 偏低", 4, v))
+            decisions.append(_reject(f, f"REJECT LLM: conviction {v.conviction} too low", 4, v))
             continue
         size = position_size(v.conviction, f.liquidity)
         # 组合风控不在此阻断，只标 risk_warn（人在环：提示而非硬拦）
@@ -1507,7 +1507,7 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
                           verdict=asdict(v), features=_ft, priority=pri, abc=abc),
             exec=exit_plan()))
         # 落特征快照 + abc 信号，喂回测纸面复盘（backtest.paper 读 features）；保持反馈飞轮闭环。
-        log("SCREEN", f.symbol_safe, "通过闸门 · 待决策",
+        log("SCREEN", f.symbol_safe, "passed gates · awaiting your call",
             dict(size_sol=size, priority=pri, risk_warn=(not allow),
                  features=_feat(f), abc=abc))
 
@@ -1714,7 +1714,7 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
                             opened_ts=time.time(), entry_attrib=attrib,
                             entry_liq=float(attrib.get("liquidity", 0.0) or 0.0)))   # базовая ликвидность для escape-диффа
     s.save_positions()
-    _verb = "成交" if filled else ("提交·待确认" if s.mode == "LIVE" else "记录")
+    _verb = "filled" if filled else ("submitted·pending" if s.mode == "LIVE" else "recorded")
     log("BUY", symbol, f"{s.mode} {_verb} {size_sol} ({chain})",
         dict(size_sol=size_sol, chain=chain, attrib=attrib, **exit_plan()), mode=s.mode)
     return dict(ok=True, status=status_msg, filled=filled, symbol=symbol)
@@ -1754,7 +1754,7 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * p["size_sol"], 4)
         else:
             s.risk.consec_losses = 0
-        log("SELL", p["symbol"], f"{s.mode} 平仓 PnL {pnl:+.1%}{tag}",
+        log("SELL", p["symbol"], f"{s.mode} closed PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=p.get("size_sol", 0.0), address=p.get("address"), fraction=1.0,
                  attrib=attrib, hold_min=hold_min),
             mode=s.mode, pubkey=s.pubkey)
@@ -1763,7 +1763,7 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         if pnl < 0:                                  # 分批离场若为亏损也按比例入账当日亏损
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * sold_sol, 4)
         p["size_sol"] = round(p["size_sol"] - sold_sol, 6)
-        log("SELL", p["symbol"], f"{s.mode} 分批 {pct}% PnL {pnl:+.1%}{tag}",
+        log("SELL", p["symbol"], f"{s.mode} partial {pct}% PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac,
                  attrib=attrib, hold_min=hold_min),
             mode=s.mode, pubkey=s.pubkey)

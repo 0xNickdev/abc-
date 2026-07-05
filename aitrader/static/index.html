@@ -483,8 +483,12 @@ td{padding:5px 10px;vertical-align:middle}
 .daytrade .win{color:var(--lime,#9be86b)}.daytrade .loss{color:var(--clay,#e8896b)}
 .daytrade .dt-ca{display:block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;font-weight:400;color:var(--dim2,#9aa);cursor:pointer;margin-top:2px;letter-spacing:.02em}
 .daytrade .dt-ca:hover{color:var(--violet2,#b18cff)}
-#pnlScrim .mbody{max-width:760px;margin:0 auto}
-#pnlDayDetail{max-height:38vh;overflow-y:auto;margin-top:8px;padding-right:3px}
+#pnlScrim .mbody{max-width:1060px;margin:0 auto}
+.pnlwrap{display:flex;gap:18px;align-items:flex-start}
+.pnlleft{flex:1 1 0;min-width:0}
+.pnlright{flex:0 0 330px;align-self:stretch;max-height:64vh;overflow-y:auto;border-left:1px solid rgba(255,255,255,.08);padding-left:16px}
+.pnlright:empty{display:none}
+@media(max-width:900px){.pnlwrap{flex-direction:column}.pnlright{flex-basis:auto;border-left:none;padding-left:0;max-height:42vh}}
 </style>
 <div class="scrim" id="pipeScrim">
   <div class="modal">
@@ -531,17 +535,21 @@ td{padding:5px 10px;vertical-align:middle}
   <div class="modal" style="width:560px">
     <h2><span>📅 PnL Calendar</span><span class="x" onclick="closePnl()">×</span></h2>
     <div class="mbody">
-      <div class="pnlbar">
-        <button class="mbtn ghost pnlnav" onclick="pnlMonth(-1)">‹</button>
-        <span id="pnlMonthLbl" class="pnlmonth">—</span>
-        <button class="mbtn ghost pnlnav" onclick="pnlMonth(1)">›</button>
-        <span class="pnltot" id="pnlTot"></span>
+      <div class="pnlwrap">
+        <div class="pnlleft">
+          <div class="pnlbar">
+            <button class="mbtn ghost pnlnav" onclick="pnlMonth(-1)">‹</button>
+            <span id="pnlMonthLbl" class="pnlmonth">—</span>
+            <button class="mbtn ghost pnlnav" onclick="pnlMonth(1)">›</button>
+            <span class="pnltot" id="pnlTot"></span>
+          </div>
+          <div class="pnlgrid" id="pnlHead"></div>
+          <div class="pnlgrid" id="pnlDays"></div>
+          <div class="pnlstats" id="pnlStats"></div>
+          <div class="hint" id="pnlNote" style="margin-top:8px"></div>
+        </div>
+        <div class="pnlright" id="pnlDayDetail"></div>
       </div>
-      <div class="pnlgrid" id="pnlHead"></div>
-      <div class="pnlgrid" id="pnlDays"></div>
-      <div class="pnlstats" id="pnlStats"></div>
-      <div class="hint" id="pnlNote" style="margin-top:8px"></div>
-      <div id="pnlDayDetail"></div>
     </div>
   </div>
 </div>
