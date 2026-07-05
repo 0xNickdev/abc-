@@ -517,6 +517,7 @@ td{padding:5px 10px;vertical-align:middle}
       <div class="mwarn" id="buyRiskWarn" style="display:none"></div>
       <div class="mwarn" id="buyModeNote"></div>
       <div class="fld" id="kolWrap" style="display:none"><button class="mbtn ghost" onclick="kolCheck()" id="kolBtn">𝕏</button><div class="hint" id="kolRes"></div></div>
+      <div class="fld" id="qualWrap"><button class="mbtn ghost" onclick="qualityCheck()" id="qualBtn">Verify · independent check</button><div class="hint" id="qualRes"></div></div>
     </div>
     <div class="mfoot"><button class="mbtn" id="buyConfirm" onclick="doBuy()" data-i18n="buy_confirm">确认买入</button><button class="mbtn" id="buyPhantom" onclick="phantomBuy()" style="display:none">⚡ Phantom</button><button class="mbtn ghost" onclick="closeBuy()" data-i18n="btn_cancel">取消</button><span class="savestate" id="buyState"></span></div>
   </div>
@@ -2114,6 +2115,36 @@ async function kolCheck(){
     const d=await resp.json();
     if(d.ok===false){box.textContent=d.detail||d.error;return;}
     box.innerHTML=d.count?t('kol_res',d.count)+' '+d.authors.map(a=>`@${a.username} (${a.followers>=1000?(a.followers/1000).toFixed(0)+'k':a.followers}${a.verified?'✓':''}${a.winrate!==undefined?` · win ${Math.round(a.winrate*100)}%/${a.calls} · x${a.median_x}`:''})`).join(', '):t('kol_none');
+  }catch(e){box.textContent=e.message;}
+}
+/* независимая проверка качества токена (не GMGN-агрегаты): top10 (RPC) + свежие коши (RPC) + X-reuse (getxapi) + фермы (кластеры истории) */
+function _qtag(kind,txt){const c=kind==='bad'?'#ff5c7a':(kind==='ok'?'#4be3a0':'#8a8fb0');return `<span style="display:inline-block;padding:2px 8px;margin:3px 3px 0 0;border-radius:6px;font-size:11px;border:1px solid ${c};color:${c}">${txt}</span>`;}
+async function qualityCheck(){
+  const r=T[buyIdx];const box=document.getElementById('qualRes');
+  box.innerHTML='<span class="spin"></span>';
+  try{
+    const resp=await fetch(API+'/api/token/quality?address='+encodeURIComponent(r.address));
+    if(!resp.ok)throw new Error(await errDetail(resp));
+    const d=await resp.json();let h='';
+    if(d.red_flag)h+='<div style="color:#ff5c7a;font-weight:600;margin-bottom:2px">RED FLAG — independent signals</div>';
+    if(d.top10!=null)h+=_qtag(d.top10>=0.6?'bad':'ok',`top10 ${Math.round(d.top10*100)}%`);
+    if(d.fresh)h+=_qtag((d.fresh.ratio||0)>=0.5?'bad':'ok',`fresh wallets ${d.fresh.fresh}/${d.fresh.checked}`);
+    if(d.x_reuse&&d.x_reuse.ok)h+=_qtag(d.x_reuse.red_flag?'bad':'ok',`X @${d.twitter||'?'}: ${d.x_reuse.other_tokens} other CA · age ${d.x_reuse.account_age_days??'?'}d · ${d.x_reuse.followers} foll`);
+    else if(d.twitter)h+=_qtag('n',`@${d.twitter}`);
+    if(!h.includes('qtag')&&!d.top10&&!d.fresh)h+='<span class="hint">enable ABC_TOP10_RPC / ABC_FRESH_WALLETS_RPC / GETXAPI_KEY for signals</span>';
+    h+=`<div style="margin-top:6px"><button class="mbtn ghost" onclick="farmScan()">Scan holders for farm</button><div id="farmRes" class="hint"></div></div>`;
+    box.innerHTML=h;
+  }catch(e){box.textContent=e.message;}
+}
+async function farmScan(){
+  const r=T[buyIdx];const box=document.getElementById('farmRes');
+  box.innerHTML='<span class="spin"></span> scanning holder histories…';
+  try{
+    const resp=await fetch(API+'/api/token/farm?address='+encodeURIComponent(r.address));
+    if(!resp.ok)throw new Error(await errDetail(resp));
+    const d=await resp.json();
+    if(!d.checked){box.innerHTML='<span class="hint">no data (needs live gmgn)</span>';return;}
+    box.innerHTML=_qtag(d.red_flag?'bad':'ok',`farm cluster ${d.largest_cluster}/${d.checked}${d.red_flag?' · LIKELY FARM':' · looks organic'}`);
   }catch(e){box.textContent=e.message;}
 }
 function closeBuy(){document.getElementById('buyScrim').classList.remove('on');}
