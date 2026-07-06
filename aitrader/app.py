@@ -1361,11 +1361,16 @@ def _nightly_review_loop():
 # ──────────────────────────────────────────────────────────────────────────
 # 11. 筛选流水线（核心：确定性先筛 → 评分 → LLM 只判幸存者 → 产候选，不执行）
 # ──────────────────────────────────────────────────────────────────────────
-def _tracked_for(f: TokenFeatures, g: GMGNAdapter):
+def _wallet_holders_on() -> bool:
+    return os.getenv("GMGN_WALLET_HOLDERS", "").strip().lower() in ("1", "true", "yes", "on")
+
+def _tracked_for(f: TokenFeatures, g: GMGNAdapter, use_holders: bool = True):
     """某 token 命中多少我方私有跟踪钱包（smart-money 信号）。
-    Live + 显式开启(GMGN_WALLET_HOLDERS=1)：用 token holders ∩ 跟踪集（较慢，默认关，保执行速度）。
+    Live + 显式开启(GMGN_WALLET_HOLDERS=1)：用 token holders ∩ 跟踪集（较慢的 gmgn-cli 调用）。
+    ⚠ holders-путь дорог (subprocess на токен) → зовём его ТОЛЬКО с use_holders=True и лишь для
+    финалистов (llm_max), не для всех ~100 кандидатов, иначе /api/run таймаутит (502).
     Mock/默认：用地址确定性合成 0~3 命中，便于演示与测试，不污染真实数据。"""
-    if os.getenv("GMGN_WALLET_HOLDERS", "").strip().lower() in ("1", "true", "yes", "on") and ST.is_live_adapter:
+    if use_holders and _wallet_holders_on() and ST.is_live_adapter:
         try:
             h = g.token_holders(f.address)
             rows = h.get("holders") or h.get("list") or h.get("data") or []
@@ -1454,7 +1459,7 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
             continue
         f = fx.build_from_row(t)                          # STEP 2 尽调（直接用 trending 行字段）
         f.holder_velocity = _holder_velocity(f.address, f.holder_count)
-        f.tracked_hits, f.tracked_names = _tracked_for(f, g)   # 私有 smart-money 共识信号
+        f.tracked_hits, f.tracked_names = _tracked_for(f, g, use_holders=False)   # 私有 smart-money（быстро; holders-путь только для финалистов ниже）
         ok, reason, gate_idx = hard_gates(f, s.filters, chain,   # STEP 3 硬门槛（по链 + по источнику）
                                           require_consensus=getattr(g, "provides_consensus", True))
         if not ok:
@@ -1471,6 +1476,14 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
     to_llm = scored[:CFG["llm_max"]]
     for sc, f in scored[CFG["llm_max"]:]:
         decisions.append(_reject(f, "REJECT ranking: priority below this round's LLM slots", 3, None))
+
+    # tracked-кошельки через holders (gmgn-cli, дорого) — ТОЛЬКО для финалистов (llm_max),
+    # параллельно. Так attribution/скор видят пересечение с нашими 293, а /api/run не таймаутит.
+    if _wallet_holders_on() and ST.is_live_adapter and to_llm:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as ex:
+            _trk = list(ex.map(lambda pair: _tracked_for(pair[1], g, use_holders=True), to_llm))
+        for (sc, f), (hits, names) in zip(to_llm, _trk):
+            f.tracked_hits, f.tracked_names = hits, names
 
     # STEP 5 LLM 只对幸存者解释；STEP 6 仓位由代码算；产出候选（不执行）
     n_pos = len(s.positions)
