@@ -215,8 +215,14 @@ DEFAULT_TRENDING_CMD = default_trending_cmd("sol")   # 兼容旧引用
 DEFAULT_POLL_S = 5.6
 # Минимальный интервал /api/run на юзера (защита квоты оператора на публичном инстансе)
 RUN_MIN_INTERVAL_S = float(os.getenv("RUN_MIN_INTERVAL_S", "1.5"))
-# 同链 trending 短缓存：TTL 内多个 tab/请求复用同一次 cli 结果（同链多开不放大配额）。
-TRENDING_CACHE_TTL = 3.0
+# 同链 trending 缓存：TTL 内多个 tab/请求/机器人复用同一次 cli 结果（不放大 GMGN 配额）。
+# ⚠ 3s 太短 → 5.6s 轮询每轮都打 GMGN → 触发 429/IP 封禁。默认 20s，env 可调。
+TRENDING_CACHE_TTL = float(os.getenv("TRENDING_CACHE_TTL", "20"))
+TRENDING_COOLDOWN_S = float(os.getenv("TRENDING_COOLDOWN_S", "60"))   # после 429 не бьём GMGN столько сек (иначе бан продлевается)
+
+def _is_rate_limited(e: Exception) -> bool:
+    s = str(e).lower()
+    return "429" in s or "rate_limit" in s or "rate limit" in s or "banned" in s
 # Оценочная round-trip стоимость сделки (pool fee + priority + slippage, обе ноги) как доля
 # от размера позиции. Вычитается из реализованного PnL → «чистый» PnL в календаре/Review.
 # Дефолт 2.5%; на прямом Jupiter без bot-налога ставь ниже (ABC_FEE_PCT=0.015).
@@ -1101,6 +1107,7 @@ class MarketLayer:
         self._mock = MockGMGN()
         self._dex = dexadapter.DexAdapter() if DATA_SOURCE == "dex" else None
         self._trending_cache: dict[str, tuple] = {}
+        self._trending_cooldown: dict[str, float] = {}   # chain -> monotonic, до когда не бить GMGN (после 429)
         self.trending_cmds: dict[str, str] = load_trending_cmds()
         env = load_env()
         if env.get("GMGN_API_KEY"):
@@ -1148,8 +1155,17 @@ class MarketLayer:
         hit = self._trending_cache.get(chain)
         if hit and (now - hit[0]) < TRENDING_CACHE_TTL:
             return hit[1]
-        rows = self.adapter_for(chain).market_trending(cmd=self.get_trending_cmd(chain))
+        if now < self._trending_cooldown.get(chain, 0.0):   # недавно 429 → НЕ бьём GMGN (продлевает бан)
+            return hit[1] if hit else []                    # отдаём последний кэш / пусто
+        try:
+            rows = self.adapter_for(chain).market_trending(cmd=self.get_trending_cmd(chain))
+        except Exception as e:
+            if _is_rate_limited(e):                          # 429/бан → пауза, отдаём кэш/пусто (без 502-спама)
+                self._trending_cooldown[chain] = now + TRENDING_COOLDOWN_S
+                return hit[1] if hit else []
+            raise                                           # прочие ошибки — как раньше (502 + трейсбек)
         self._trending_cache[chain] = (now, rows)
+        self._trending_cooldown.pop(chain, None)            # успех → снять кулдаун
         return rows
 
 MK = MarketLayer()
@@ -1364,21 +1380,31 @@ def _nightly_review_loop():
 def _wallet_holders_on() -> bool:
     return os.getenv("GMGN_WALLET_HOLDERS", "").strip().lower() in ("1", "true", "yes", "on")
 
+_TRACKED_CACHE: dict[str, tuple] = {}          # addr -> (monotonic, (hits, names)) — не бить GMGN holders каждый поллинг
+_TRACKED_TTL = 90.0
+
 def _tracked_for(f: TokenFeatures, g: GMGNAdapter, use_holders: bool = True):
     """某 token 命中多少我方私有跟踪钱包（smart-money 信号）。
     Live + 显式开启(GMGN_WALLET_HOLDERS=1)：用 token holders ∩ 跟踪集（较慢的 gmgn-cli 调用）。
     ⚠ holders-путь дорог (subprocess на токен) → зовём его ТОЛЬКО с use_holders=True и лишь для
-    финалистов (llm_max), не для всех ~100 кандидатов, иначе /api/run таймаутит (502).
+    финалистов (llm_max); + кэш TTL на адрес, чтобы поллинги не долбили GMGN (иначе 429/бан).
     Mock/默认：用地址确定性合成 0~3 命中，便于演示与测试，不污染真实数据。"""
     if use_holders and _wallet_holders_on() and ST.is_live_adapter:
+        c = _TRACKED_CACHE.get(f.address)
+        if c and time.monotonic() - c[0] < _TRACKED_TTL:
+            return c[1]
         try:
             h = g.token_holders(f.address)
             rows = h.get("holders") or h.get("list") or h.get("data") or []
             addrs = [x.get("address") for x in rows if isinstance(x, dict)]
             hits = wallets.confluence(addrs)
-            return len(hits), [(w["name"] or w["address"][:4]) for w in hits][:5]
+            res = (len(hits), [(w["name"] or w["address"][:4]) for w in hits][:5])
         except Exception:
             return 0, []
+        _TRACKED_CACHE[f.address] = (time.monotonic(), res)
+        if len(_TRACKED_CACHE) > 4000:
+            _TRACKED_CACHE.pop(next(iter(_TRACKED_CACHE)))
+        return res
     if not ST.is_live_adapter:   # 演示合成
         n = int(hashlib.md5(f.address.encode()).hexdigest(), 16) % 4
         names = [w.get("name") or a[:4] for a, w in list(wallets.TRACKED.items())[:n]]
