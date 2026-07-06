@@ -467,6 +467,33 @@ def save_user_twitter(pubkey: str, cfg: dict):
     except Exception:
         pass
 
+def _merge_dup_positions(lst: list) -> list:
+    """Схлопнуть дубликаты одной монеты (адрес+chain+self_custody) в одну усреднённую
+    позицию — наследие докупок до введения усреднения: средневзвешенный вход, суммарный
+    размер, суммарный token_amount. Применяется при загрузке сессии."""
+    out: list = []
+    by: dict = {}
+    for p in lst or []:
+        k = (p.get("address"), p.get("chain", "sol"), bool(p.get("self_custody")))
+        ex = by.get(k)
+        if ex is None:
+            by[k] = p
+            out.append(p)
+            continue
+        osz = float(ex.get("size_sol", 0.0) or 0.0)
+        nsz = float(p.get("size_sol", 0.0) or 0.0)
+        tot = round(osz + nsz, 4)
+        oep = float(ex.get("entry_price", 0.0) or 0.0)
+        nep = float(p.get("entry_price", 0.0) or 0.0)
+        if oep > 0 and nep > 0 and tot > 0:
+            ex["entry_price"] = round((oep * osz + nep * nsz) / tot, 12)
+        elif nep > 0:
+            ex["entry_price"] = nep
+        ex["size_sol"] = tot
+        ex["token_amount"] = int(ex.get("token_amount", 0)) + int(p.get("token_amount", 0))
+        ex.pop("peak_pnl", None)
+    return out
+
 def load_user_mode(pubkey: str) -> str:
     """Режим кошельковой сессии (SHADOW|LIVE) с диска: переживает редеплой/рестарт.
     Безопасно: LIVE у кошельковой сессии = self-custody, каждая сделка всё равно
@@ -1265,7 +1292,8 @@ class UserSession:
         self.risk = RiskManager()
         self.bot = bot.BotRunner()    # 每用户一个自主回路（默认关闭）
         self.filters = load_filters() if self._default else load_user_filters(pubkey)
-        self.positions = load_positions() if self._default else load_user_positions(pubkey)
+        self.positions = _merge_dup_positions(
+            load_positions() if self._default else load_user_positions(pubkey))
         self.strategy_id = load_user_strategy(pubkey)   # 选定策略（落盘，重启不丢）
         self.twitter = load_user_twitter(pubkey)        # per-user Twitter KOL（opt-in）
         self.auth_token = None                          # sign-in-with-wallet 会话令牌（内存态）
@@ -1878,6 +1906,29 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         filled = False
         status_msg = "SHADOW (not sent on-chain — switch to LIVE + signing key)"
 
+    # Докупка того же токена = усреднение в ОДНУ позицию (средневзвешенный вход, суммарный
+    # размер), а не вторая запись: карточка в UI одна на адрес, и трейдер ждёт среднюю.
+    # Бумажные и self-custody записи не смешиваем (разная природа учёта).
+    existing = next((x for x in s.positions
+                     if x["address"] == address and x.get("chain", "sol") == chain
+                     and not x.get("self_custody")), None)
+    if existing is not None:
+        old_sz = float(existing.get("size_sol", 0.0) or 0.0)
+        new_sz = round(old_sz + size_sol, 4)
+        oep = float(existing.get("entry_price", 0.0) or 0.0)
+        if oep > 0 and entry_price > 0 and new_sz > 0:
+            existing["entry_price"] = round((oep * old_sz + entry_price * size_sol) / new_sz, 12)
+        elif entry_price > 0:
+            existing["entry_price"] = entry_price
+        existing["size_sol"] = new_sz
+        if entry_price > 0:
+            existing["cur_price"] = entry_price
+        existing.pop("peak_pnl", None)           # новая средняя → трейлинг с чистого листа
+        s.save_positions()
+        _verb = "filled" if filled else ("submitted·pending" if s.mode == "LIVE" else "recorded")
+        log("BUY", symbol, f"{s.mode} {_verb} +{size_sol} averaged → {new_sz} ({chain})",
+            dict(size_sol=size_sol, chain=chain, averaged=True, **exit_plan()), mode=s.mode)
+        return dict(ok=True, status=status_msg, filled=filled, symbol=symbol, averaged=True)
     attrib = _attrib_for(address)                    # атрибуция входа (кошельки/KOL в场) → едет с позицией
     _enrich_x_signal(attrib, address, s, entry_price)   # + соц-сигнал X на входе (opt-in, quota-safe)
     s.positions.append(dict(symbol=symbol, address=address, size_sol=round(size_sol, 4),
@@ -2691,6 +2742,26 @@ def api_tx_confirm(c: TxConfirmIn, x_wallet: str | None = WalletHeader,
                          renounced_mint=sec.get("renounced_mint", True),
                          renounced_freeze=sec.get("renounced_freeze", True),
                          burn_ratio=sec.get("burn_ratio", 0.0), top10=sec.get("top10", 0.0))
+            # докупка тем же кошельком → усреднение в одну self-custody позицию
+            existing = next((x for x in sess.positions
+                             if x["address"] == c.address and x.get("self_custody")), None)
+            if existing is not None:
+                old_sz = float(existing.get("size_sol", 0.0) or 0.0)
+                new_sz = round(old_sz + c.size_sol, 4)
+                oep = float(existing.get("entry_price", 0.0) or 0.0)
+                if oep > 0 and price > 0 and new_sz > 0:
+                    existing["entry_price"] = round((oep * old_sz + price * c.size_sol) / new_sz, 12)
+                elif price > 0:
+                    existing["entry_price"] = price
+                existing["size_sol"] = new_sz
+                existing["token_amount"] = int(existing.get("token_amount", 0)) + int(c.token_amount)
+                existing["wallet_tx"] = c.signature
+                existing.pop("peak_pnl", None)
+                sess.save_positions()
+                log("BUY", symbol, f"PHANTOM averaged +{c.size_sol} → {new_sz} · {tag}",
+                    dict(size_sol=c.size_sol, chain="sol", self_custody=True, averaged=True),
+                    mode="LIVE")
+                return dict(ok=True, symbol=symbol, averaged=True)
             attrib = _attrib_for(c.address)
             _enrich_x_signal(attrib, c.address, sess, price)   # соц-сигнал X на входе (opt-in)
             sess.positions.append(dict(

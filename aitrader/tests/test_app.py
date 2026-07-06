@@ -944,6 +944,35 @@ class TestStopLossFreshness:
         assert s.positions[0]["pnl"] == -0.2        # pnl не трогаем, честно показываем отказ
 
 
+# ── Докупка = усреднение в одну позицию (средневзвешенный вход, суммарный размер) ──
+class TestPositionAveraging:
+    ADDR = "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+    def test_rebuy_averages_into_one_position(self, tmp_path, monkeypatch):
+        client = _mu_client(tmp_path, monkeypatch)
+        h = {"X-Wallet": "AvgWallet1111"}
+        assert client.post("/api/buy", json={"address": self.ADDR, "size_sol": 0.1,
+                                             "chain": "sol"}, headers=h).status_code == 200
+        r2 = client.post("/api/buy", json={"address": self.ADDR, "size_sol": 0.3,
+                                           "chain": "sol"}, headers=h)
+        assert r2.status_code == 200 and r2.json().get("averaged") is True
+        pos = client.get("/api/positions", headers=h).json()["positions"]
+        assert len(pos) == 1 and pos[0]["size_sol"] == 0.4
+
+    def test_legacy_duplicates_merged_on_load(self):
+        lst = [dict(address="A", chain="sol", size_sol=0.3, entry_price=1.0, token_amount=0),
+               dict(address="A", chain="sol", size_sol=0.1, entry_price=2.0, token_amount=0),
+               dict(address="B", chain="sol", size_sol=0.2, entry_price=5.0)]
+        out = appmod._merge_dup_positions(lst)
+        assert len(out) == 2
+        a = next(p for p in out if p["address"] == "A")
+        assert a["size_sol"] == 0.4 and a["entry_price"] == 1.25   # (1.0*0.3+2.0*0.1)/0.4
+        # self-custody с бумажной не смешиваем
+        mix = [dict(address="C", chain="sol", size_sol=0.1, entry_price=1.0),
+               dict(address="C", chain="sol", size_sol=0.1, entry_price=1.0, self_custody=True)]
+        assert len(appmod._merge_dup_positions(mix)) == 2
+
+
 # ── Real-time монитор позиций (watcher): свежий pnl каждые ~2с + мгновенные стопы
 #    для бот-сессий; ручные и self-custody позиции не продаёт ──
 class TestPositionWatcher:

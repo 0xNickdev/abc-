@@ -1353,7 +1353,7 @@ function posCardHTML(p,i){
   if(posIsAlert(p)){acls+=' falert';if(!escAlertSet.has(key)){acls+=' flash';escAlertSet.add(key);}}
   else escAlertSet.delete(key);
   return `<div class="pos ${acls}">
-    <div class="top"><div><span class="ps">${p.sym}</span>${caCell(p)}${p.price?`<small class="px">${t('pos_price',fmtPrice(p.price),fmtPrice(p.entryPrice))}</small>`:''}</div>
+    <div class="top"><div><span class="ps">${p.sym}</span>${caCell(p)}<small class="px">${p.size!=null?p.size+' SOL':''}</small>${p.price?`<small class="px">${t('pos_price',fmtPrice(p.price),fmtPrice(p.entryPrice))}</small>`:''}</div>
       <span class="pnl ${p.pnl>=0?'up':'dn'}">${p.pnl>=0?'+':''}${(p.pnl*100).toFixed(1)}%</span>
       ${p.selfc?`<button class="escbtn" title="${t('ph_sell_title')}" onclick="phantomSell(${i})">${svg('zap')}${t('ph_sell')}</button>`:''}
       <button class="escbtn" onclick="escape_(${i})">${svg('door')}${p.escaping?t('escbtn_now'):t('escbtn')}</button>
