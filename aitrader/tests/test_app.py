@@ -925,6 +925,22 @@ class TestStopLossFreshness:
         out2 = appmod.monitor_positions("sol", {"CAP": row}, s)
         assert out2[0]["cur_price"] == 0.93
 
+    def test_monitor_exposes_mcap_for_card(self, tmp_path, monkeypatch):
+        # в листе → market_cap из строки; вне листа для …pump → цена × 1B (суплай фиксирован)
+        _mu_client(tmp_path, monkeypatch)
+        class _MKStub:
+            is_live_adapter = True
+            def adapter_for(self, ch): return None
+        monkeypatch.setattr(appmod, "MK", _MKStub())
+        s = appmod.get_session("McWallet1111")
+        s.positions = [dict(symbol="P", address="CAPpump", size_sol=0.1, pnl=0.0, cycles=0,
+                            entry=dict(honeypot=False), chain="sol", entry_price=1.0,
+                            cur_price=2.0, rt_ts=time.time())]
+        row = {"address": "CAPpump", "price": 2.0, "liquidity": 0, "market_cap": 7300,
+               "is_honeypot": 0, "renounced_mint": 1, "renounced_freeze_account": 1, "burn_ratio": 0}
+        assert appmod.monitor_positions("sol", {"CAPpump": row}, s)[0]["mcap"] == 7300
+        assert appmod.monitor_positions("sol", {}, s)[0]["mcap"] == 2.0e9
+
     def test_monitor_reports_failure_when_both_sources_dead(self, tmp_path, monkeypatch):
         _mu_client(tmp_path, monkeypatch)
         class _Boom:
