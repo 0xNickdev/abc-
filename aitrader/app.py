@@ -1786,8 +1786,25 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         log("BUY_BLOCK", address[:8], rnote, mode=s.mode)
         raise HTTPException(409, rnote)
     g = s.adapter_for(chain)
-    info = g.token_info(address)
-    sec  = g.token_security(address)             # 已归一化安全快照（建仓基线，逃生 diff 用）
+    try:
+        info = g.token_info(address)
+        sec  = g.token_security(address)         # 已归一化安全快照（建仓基线，逃生 diff 用）
+    except Exception as e:
+        # GMGN 429-бан/таймаут НЕ должен ронять покупку в 500 (юзер жмёт BUY — а данных нет).
+        # sol: базовые данные из бесплатного DexScreener, security-снапшот нейтральный
+        # (escape-дифф начнёт работать с первого живого чтения в мониторинге).
+        pr = {}
+        if chain == "sol":
+            try:
+                pr = dexadapter.spot_pair(address)
+            except Exception:
+                pr = {}
+        if not pr:
+            log("BUY_FAIL", address[:8], f"token data unavailable: {e}")
+            raise HTTPException(502, f"Token data unavailable (market feed rate-limited): {e}")
+        info = dict(symbol=(pr.get("baseToken") or {}).get("symbol", address[:6]),
+                    price=_f(pr.get("priceUsd")))
+        sec = {}
     entry = dict(honeypot=sec.get("honeypot", False),
                  renounced_mint=sec.get("renounced_mint", False),
                  renounced_freeze=sec.get("renounced_freeze", False),
@@ -1797,7 +1814,12 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
     try:
         entry_price = g.token_price(address)         # 建仓价（逃生监控算涨跌基准）
     except Exception:
-        entry_price = 0.0
+        try:                                         # без цены входа стоп слепой → DexScreener
+            entry_price = dexadapter.spot_price(address) if chain == "sol" else 0.0
+        except Exception:
+            entry_price = 0.0
+    if not entry_price and info.get("price"):
+        entry_price = _f(info.get("price"))
 
     # Кошельковая сессия в LIVE = self-custody: операторский серверный ключ (GMGN swap)
     # к чужим деньгам не прикасается НИКОГДА. Реальная сделка — только /api/tx/* + Phantom.

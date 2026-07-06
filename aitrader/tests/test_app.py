@@ -924,6 +924,38 @@ class TestStopLossFreshness:
         assert s.positions[0]["pnl"] == -0.2        # pnl не трогаем, честно показываем отказ
 
 
+# ── Покупка не падает в 500, когда GMGN в бане: базовые данные из DexScreener ──
+class TestBuyResilience:
+    class _Boom:
+        def token_info(self, a): raise RuntimeError("429 RATE_LIMIT_BANNED")
+        def token_security(self, a): raise RuntimeError("429")
+        def token_price(self, a): raise RuntimeError("429")
+
+    class _MKStub:
+        is_live_adapter = True
+        chain = "sol"
+        def adapter_for(self, ch): return TestBuyResilience._Boom()
+
+    def test_shadow_buy_survives_gmgn_outage_via_dexscreener(self, tmp_path, monkeypatch):
+        client = _mu_client(tmp_path, monkeypatch)
+        monkeypatch.setattr(appmod, "MK", self._MKStub())
+        monkeypatch.setattr(appmod.dexadapter, "spot_pair",
+                            lambda a: dict(baseToken=dict(symbol="GODXI"), priceUsd="0.002"))
+        monkeypatch.setattr(appmod.dexadapter, "spot_price", lambda a: 0.002)
+        r = client.post("/api/buy", json={"address": "GODXICA111", "size_sol": 0.3, "chain": "sol"})
+        assert r.status_code == 200 and r.json()["symbol"] == "GODXI"
+        pos = appmod.get_session(None).positions
+        assert pos and pos[0]["entry_price"] == 0.002    # стоп не слепой: цена входа с fallback'а
+
+    def test_buy_fails_cleanly_when_both_feeds_down(self, tmp_path, monkeypatch):
+        client = _mu_client(tmp_path, monkeypatch)
+        monkeypatch.setattr(appmod, "MK", self._MKStub())
+        monkeypatch.setattr(appmod.dexadapter, "spot_pair",
+                            lambda a: (_ for _ in ()).throw(RuntimeError("dex down")))
+        r = client.post("/api/buy", json={"address": "GODXICA222", "size_sol": 0.3, "chain": "sol"})
+        assert r.status_code == 502 and "rate-limited" in r.json()["detail"]
+
+
 # ── Admin по кошельку: ABC_ADMIN=<pubkey> — оператор только владелец после входа подписью;
 #    «сессия без кошелька» на публичном проде — прохожий, НЕ владелец ──
 class TestAdminByWallet:
