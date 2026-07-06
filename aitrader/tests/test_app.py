@@ -864,6 +864,47 @@ class TestSelfCustodyLive:
         assert r.status_code == 409
 
 
+# ── Стопы не должны замерзать: при отказе GMGN (429-бан) мониторинг берёт цену
+#    из бесплатного DexScreener — pnl обновляется и hard-stop бота может сработать ──
+class TestStopLossFreshness:
+    def test_monitor_falls_back_to_dexscreener_when_gmgn_fails(self, tmp_path, monkeypatch):
+        _mu_client(tmp_path, monkeypatch)
+        class _Boom:  # эмуляция 429-бана GMGN на точечных запросах
+            def token_security(self, a): raise RuntimeError("429 RATE_LIMIT_BANNED")
+            def token_price(self, a): raise RuntimeError("429")
+        class _MKStub:
+            is_live_adapter = True
+            def adapter_for(self, ch): return _Boom()
+        monkeypatch.setattr(appmod, "MK", _MKStub())
+        monkeypatch.setattr(appmod.dexadapter, "spot_price", lambda a: 0.5)
+        s = appmod.get_session("StopWallet1111")
+        s.positions = [dict(symbol="X", address="CAX", size_sol=0.1, pnl=0.0, cycles=0,
+                            entry=dict(honeypot=False, renounced_mint=True, renounced_freeze=True,
+                                       burn_ratio=0.0, top10=0.0),
+                            chain="sol", entry_price=1.0, entry_liq=0.0)]
+        out = appmod.monitor_positions("sol", {}, s)
+        assert s.positions[0]["pnl"] == -0.5        # цена обновилась → hard-stop бота увидит её
+        assert out[0]["cur_price"] == 0.5
+
+    def test_monitor_reports_failure_when_both_sources_dead(self, tmp_path, monkeypatch):
+        _mu_client(tmp_path, monkeypatch)
+        class _Boom:
+            def token_security(self, a): raise RuntimeError("429")
+            def token_price(self, a): raise RuntimeError("429")
+        class _MKStub:
+            is_live_adapter = True
+            def adapter_for(self, ch): return _Boom()
+        monkeypatch.setattr(appmod, "MK", _MKStub())
+        monkeypatch.setattr(appmod.dexadapter, "spot_price",
+                            lambda a: (_ for _ in ()).throw(RuntimeError("dex down")))
+        s = appmod.get_session("StopWallet2222")
+        s.positions = [dict(symbol="Y", address="CAY", size_sol=0.1, pnl=-0.2, cycles=0,
+                            entry=dict(honeypot=False), chain="sol", entry_price=1.0)]
+        out = appmod.monitor_positions("sol", {}, s)
+        assert "Monitor query failed" in out[0]["signals"][0]["t"]
+        assert s.positions[0]["pnl"] == -0.2        # pnl не трогаем, честно показываем отказ
+
+
 # ── Admin по кошельку: ABC_ADMIN=<pubkey> — оператор только владелец после входа подписью;
 #    «сессия без кошелька» на публичном проде — прохожий, НЕ владелец ──
 class TestAdminByWallet:

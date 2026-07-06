@@ -157,6 +157,21 @@ def fresh_wallet_count(mint: str, top_n: int = 20) -> dict:
     return out
 
 
+def spot_pair(addr: str) -> dict:
+    """Лучший (по ликвидности) sol-пул токена из DexScreener — бесплатно, без ключа."""
+    r = httpx.get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
+                  timeout=execution.TIMEOUT)
+    r.raise_for_status()
+    pairs = [p for p in (r.json().get("pairs") or []) if p.get("chainId") == "solana"]
+    return max(pairs, key=lambda p: _f((p.get("liquidity", {}) or {}).get("usd"))) if pairs else {}
+
+
+def spot_price(addr: str) -> float:
+    """Свежая цена по CA — fallback мониторинга позиций: стопы не должны замерзать,
+    когда GMGN в 429-бане/таймауте или монета вылетела из хот-листа."""
+    return _f(spot_pair(addr).get("priceUsd"))
+
+
 def token_twitter(address: str) -> str:
     """X-хендл токена из socials DexScreener (info.socials type=twitter) → для авто X-reuse.
     '' если нет соц-ссылок/ошибка. Бесплатно, без ключей."""
@@ -314,11 +329,7 @@ class DexAdapter:
 
     # ── точечные запросы (покупка/мониторинг): без отдельного индекса, через поиск пула ──
     def _pair(self, addr: str) -> dict:
-        r = httpx.get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
-                      timeout=execution.TIMEOUT)
-        r.raise_for_status()
-        pairs = [p for p in (r.json().get("pairs") or []) if p.get("chainId") == "solana"]
-        return max(pairs, key=lambda p: _f((p.get("liquidity", {}) or {}).get("usd"))) if pairs else {}
+        return spot_pair(addr)
 
     def token_info(self, addr: str) -> dict:
         p = self._pair(addr)

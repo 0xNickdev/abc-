@@ -1688,10 +1688,20 @@ def monitor_positions(chain: str, rows_by_addr: dict | None = None,
                     cur_sec = g.token_security(p["address"])
                     cur_price = g.token_price(p["address"])
                 except Exception as e:
-                    out.append(dict(symbol=p["symbol"], address=p["address"], size_sol=p["size_sol"],
-                                    pnl=p.get("pnl", 0), severity=0,
-                                    signals=[dict(t=f"Monitor query failed: {e}", hot=False)]))
-                    continue
+                    # GMGN недоступен (429-бан/таймаут) — цена НЕ должна замерзать: замёрзший
+                    # pnl = спящий hard-stop, пока монета валится (наблюдали закрытия −44…−51%
+                    # при стопе −35%). Fallback: бесплатный DexScreener — pnl и стоп живут дальше;
+                    # security-снапшота нет → дифф нулевой (severity считается по цене/ликвидности).
+                    try:
+                        cur_price = dexadapter.spot_price(p["address"])
+                    except Exception:
+                        cur_price = 0.0
+                    if cur_price <= 0:
+                        out.append(dict(symbol=p["symbol"], address=p["address"], size_sol=p["size_sol"],
+                                        pnl=p.get("pnl", 0), severity=0,
+                                        signals=[dict(t=f"Monitor query failed: {e}", hot=False)]))
+                        continue
+                    cur_sec = dict(p["entry"])
             cur_liq = _f(row.get("liquidity")) if row is not None else 0.0   # реальна из DexScreener, когда токен ещё в榜
             severity, sigs = assess_escape(cur_sec, p["entry"], cur_price=cur_price,
                                            entry_price=p.get("entry_price", 0.0),
