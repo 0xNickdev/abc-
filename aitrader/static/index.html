@@ -2148,6 +2148,7 @@ async function saveCfg(){
 /* ── buy modal ── */
 let buyIdx=-1;
 function openBuy(i){
+  if(window._hideTip)_hideTip();   // тултип строки не должен висеть поверх модалки
   buyIdx=i;const r=T[i];
   document.getElementById('buySym').textContent=r.sym;
   const bsz=document.getElementById('buySize');bsz.value=buyAmount;bsz.max=TRADE_CAPS.manual;
@@ -2359,12 +2360,16 @@ function fallbackCopy(tk,done){
     tip.style.left=left+'px';tip.style.top=top+'px';
   }
   host.addEventListener('mouseover',e=>{
-    const p=e.target.closest('[data-tip]');if(!p)return;
+    const p=e.target.closest('[data-tip]');
+    // навели НЕ на подсказываемый элемент → прячем: иначе тултип «застревает» поверх
+    // модалки (открыли Buy кликом — mouseout по старой строке уже не придёт)
+    if(!p){tip.classList.remove('on');return;}
     tip.textContent=p.getAttribute('data-tip');tip.classList.add('on');place(p);
   });
   host.addEventListener('mouseout',e=>{
     if(e.target.closest('[data-tip]'))tip.classList.remove('on');
   });
+  window._hideTip=()=>tip.classList.remove('on');
 })();
 
 /* ── i18n 应用：刷新所有静态文案 + 重渲染动态区 ── */

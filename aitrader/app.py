@@ -2679,13 +2679,20 @@ def api_twitter_set(cfg: TwitterCfgIn, x_wallet: str | None = WalletHeader,
     return dict(ok=True, enabled=sess.twitter["enabled"], has_key=bool(sess.twitter["bearer"]))
 
 @app.get("/api/kol/check")
-def api_kol_check(address: str, x_wallet: str | None = WalletHeader):
+def api_kol_check(address: str, x_wallet: str | None = WalletHeader,
+                  x_auth: str | None = AuthHeader):
     """Свежие упоминания CA в X + топ-авторы. Только по кнопке (квота юзера), кэш 5 мин."""
     sess = get_session(x_wallet)
-    if not (sess.twitter.get("enabled") and sess.twitter.get("bearer")):
-        raise HTTPException(400, "Twitter не подключён — включи во вкладке KOL/X настроек")
+    tw = sess.twitter
+    # Классическая ловушка партиций: оператор сохранил Bearer БЕЗ кошелька (default-сессия),
+    # а жмёт KOL-check С кошельком (своя сессия, токена нет). Для admin-сессии подхватываем
+    # его же токен из default — это один человек. Чужим кошелькам fallback не даём.
+    if not (tw.get("enabled") and tw.get("bearer")) and _is_admin(sess, x_auth):
+        tw = ST.twitter
+    if not (tw.get("enabled") and tw.get("bearer")):
+        raise HTTPException(400, "Twitter is not connected — enable it in the KOL/X settings tab")
     try:
-        res = kol.mentions(address.strip(), sess.twitter["bearer"])
+        res = kol.mentions(address.strip(), tw["bearer"])
     except Exception as e:
         raise HTTPException(502, f"Twitter API: {e}")
     if res.get("ok") and res.get("authors"):

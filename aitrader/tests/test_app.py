@@ -943,6 +943,21 @@ class TestAdminByWallet:
         monkeypatch.setattr(appmod.wallets, "set_learning", lambda v: bool(v))
         assert client.post("/api/review/learning", json={"enabled": False}).status_code == 200
 
+    def test_kol_check_admin_wallet_falls_back_to_local_bearer(self, client, monkeypatch):
+        # оператор сохранил Bearer в локальной сессии, а KOL-check жмёт с кошельком
+        assert client.post("/api/twitter/config",
+                           json={"enabled": True, "bearer": "OPTOK"}).status_code == 200
+        monkeypatch.setattr(appmod.kol, "mentions",
+                            lambda ca, bearer: dict(ok=True, count=1, authors=[], bearer_used=bearer))
+        pk, h = _wallet_auth(client)
+        monkeypatch.setattr(appmod, "ADMIN_MODE", False)
+        monkeypatch.setattr(appmod, "ADMIN_WALLETS", frozenset([pk]))
+        d = client.get("/api/kol/check?address=CA1", headers=h)
+        assert d.status_code == 200 and d.json()["bearer_used"] == "OPTOK"
+        # чужой (не-admin) кошелёк fallback НЕ получает
+        _, h2 = _wallet_auth(client)
+        assert client.get("/api/kol/check?address=CA1", headers=h2).status_code == 400
+
     def test_config_write_only_for_admin_wallet(self, client, monkeypatch):
         pk, h = _wallet_auth(client)
         monkeypatch.setattr(appmod, "ADMIN_MODE", False)
