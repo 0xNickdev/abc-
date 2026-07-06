@@ -1444,6 +1444,7 @@ async function scanCycle(){
     try{
       const reqChain=curChain;                   // 记下本次请求的链，返回后比对，切走了就丢弃
       const r=await fetch(API+'/api/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({chain:reqChain})});
+      if(r.status===429||r.status===502||r.status===503)return;   // транзиент (наш rate-limit / GMGN backoff): пропустить цикл, НЕ паузить опрос (finally снимет спиннер)
       if(!r.ok)throw new Error('HTTP '+r.status);
       const data=await r.json();
       if(source!=='backend'||reqChain!==curChain)return;   // 期间切走源/切了链 → 丢弃，不拿旧链数据覆盖
