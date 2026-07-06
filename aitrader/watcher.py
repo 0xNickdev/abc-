@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 
 import bot as botmod
 import dexadapter
@@ -97,7 +98,8 @@ class PositionWatcher:
                 p["cur_price"] = px
                 p["pnl"] = round((px - ep) / ep, 4)
                 p["peak_pnl"] = max(float(p.get("peak_pnl", p["pnl"])), p["pnl"])
-                self.stats["price_updates"] += 1
+                p["rt_ts"] = time.time()   # штамп свежести: monitor_positions не перетирает
+                self.stats["price_updates"] += 1   # RT-цену устаревшей строкой хот-листа
                 # авто-выходы: только бот-сессии, только не self-custody
                 if not getattr(sess.bot, "enabled", False) or p.get("self_custody"):
                     continue
@@ -167,6 +169,11 @@ class PositionWatcher:
 
 _started: PositionWatcher | None = None
 _start_lock = threading.Lock()
+
+
+def stats() -> dict | None:
+    """Снимок статистики контура для /api/status (None = не запущен)."""
+    return dict(_started.stats) if _started else None
 
 
 def ensure_started(sessions_fn, risk_cfg, sell_fn_factory, log_fn=None) -> PositionWatcher:

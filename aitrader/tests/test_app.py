@@ -905,6 +905,26 @@ class TestStopLossFreshness:
         assert s.positions[0]["pnl"] == -0.5        # цена обновилась → hard-stop бота увидит её
         assert out[0]["cur_price"] == 0.5
 
+    def test_monitor_prefers_fresh_rt_price_over_stale_trending_row(self, tmp_path, monkeypatch):
+        # watcher обновил цену 2с назад → строка хот-листа (кэш/диск) её НЕ перетирает
+        _mu_client(tmp_path, monkeypatch)
+        class _MKStub:
+            is_live_adapter = True
+            def adapter_for(self, ch): return None
+        monkeypatch.setattr(appmod, "MK", _MKStub())
+        s = appmod.get_session("RtWallet1111")
+        s.positions = [dict(symbol="P", address="CAP", size_sol=0.3, pnl=-0.5, cycles=0,
+                            entry=dict(honeypot=False), chain="sol", entry_price=1.0,
+                            cur_price=0.5, rt_ts=time.time())]
+        row = {"address": "CAP", "price": 0.93, "liquidity": 1000,
+               "is_honeypot": 0, "renounced_mint": 1, "renounced_freeze_account": 1, "burn_ratio": 0}
+        out = appmod.monitor_positions("sol", {"CAP": row}, s)
+        assert out[0]["cur_price"] == 0.5 and s.positions[0]["pnl"] == -0.5
+        # RT-штамп протух → берём цену строки, как раньше
+        s.positions[0]["rt_ts"] = time.time() - 60
+        out2 = appmod.monitor_positions("sol", {"CAP": row}, s)
+        assert out2[0]["cur_price"] == 0.93
+
     def test_monitor_reports_failure_when_both_sources_dead(self, tmp_path, monkeypatch):
         _mu_client(tmp_path, monkeypatch)
         class _Boom:

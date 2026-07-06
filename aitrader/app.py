@@ -1720,9 +1720,19 @@ def monitor_positions(chain: str, rows_by_addr: dict | None = None,
         p["cycles"] = p.get("cycles", 0) + 1
         if s.is_live_adapter:
             row = rows_by_addr.get(p["address"])
+            # Real-time контур (watcher) обновляет cur_price каждые ~2с. Его цена свежее
+            # строки хот-листа: та живёт в кэше 20с, а при бане GMGN — с диска (минуты).
+            # Свежий RT-штамп → цена позиции от watcher; строка остаётся источником security.
+            rt_fresh = (time.time() - float(p.get("rt_ts", 0) or 0)) < 10.0
             if row is not None:                  # 持仓币在本轮热榜里 → 复用行数据，零额外 cli
                 cur_sec = _sec_from_row(row)
-                cur_price = _f(row.get("price"))
+                cur_price = float(p.get("cur_price", 0.0)) if rt_fresh else _f(row.get("price"))
+            elif rt_fresh:                       # вне листа, но RT-цена свежая → security по возможности
+                cur_price = float(p.get("cur_price", 0.0))
+                try:
+                    cur_sec = g.token_security(p["address"])
+                except Exception:
+                    cur_sec = dict(p["entry"])   # security недоступен — дифф нулевой
             else:                                # 不在榜 → 才单独查（security + price 各一次 cli）
                 try:
                     cur_sec = g.token_security(p["address"])
@@ -2095,6 +2105,7 @@ def api_status(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHea
                 caps=dict(manual=CFG["max_per_trade_sol"],
                           bot=CFG["bot_max_per_trade_sol"],
                           auto=CFG["auto_max_per_trade_sol"]),
+                watch=watcher.stats(),
                 trending_cmd=MK.get_trending_cmd(MK.chain))
 
 @app.post("/api/config")
