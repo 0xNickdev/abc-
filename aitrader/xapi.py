@@ -19,6 +19,7 @@ import httpx
 
 BASE = "https://api.getxapi.com"
 TTL = 600.0
+LEAD_FLAG_MIN = 30.0   # (4): официала считаем «опередили» только если лид ≥ этого (мин), иначе шум ботов
 _cache: dict[tuple, tuple] = {}                       # (key_fp, ca, user) -> (ts, payload)
 
 # base58 (без 0 O I l) 32–44 символа = solana pubkey/CA
@@ -215,10 +216,21 @@ def ca_timeline(ca: str, official: str = "") -> dict:
         return payload
     posts.sort(key=lambda p: p[0])
     first_ts, first_author = posts[0]
+    have_ts = first_ts < 9e18                                      # реальные timestamp'ы распарсились
     off_ts = min([p[0] for p in posts if p[1] == official], default=None) if official else None
-    posted_before = bool(official) and first_author != official and (off_ts is None or first_ts < off_ts)
+    # lead: на сколько МИНУТ первое упоминание опередило официала (None если официал не постил/нет ts)
+    lead_min = round((off_ts - first_ts) / 60.0, 1) if (have_ts and off_ts is not None) else None
+    # (4) red_flag — НЕ на «опередили на секунды» (боты/быстрые коллеры это делают всегда), а только:
+    #   официал ВООБЩЕ не постил свой CA (а ≥3 других постили) ИЛИ его опередили СУЩЕСТВЕННО (≥LEAD_FLAG_MIN).
+    posted_before = False
+    if have_ts and official and first_author != official:
+        if off_ts is None:
+            posted_before = len(posts) >= 3
+        else:
+            posted_before = (off_ts - first_ts) >= LEAD_FLAG_MIN * 60
     payload = dict(ok=True, mentions=len(posts), communities=len(set(a for _, a in posts)),
                    first_author=first_author, first_by_official=(first_author == official),
+                   lead_min=lead_min, official_posted=(off_ts is not None),
                    posted_before_official=posted_before, red_flag=posted_before, cached=False)
     _cache[ck] = (time.monotonic(), payload)
     return payload

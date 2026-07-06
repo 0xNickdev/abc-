@@ -2180,7 +2180,7 @@ async function kolCheck(){
   }catch(e){box.textContent=e.message;}
 }
 /* независимая проверка качества токена (не GMGN-агрегаты): top10 (RPC) + свежие коши (RPC) + X-reuse (getxapi) + фермы (кластеры истории) */
-function _qtag(kind,txt){const c=kind==='bad'?'#ff5c7a':(kind==='ok'?'#4be3a0':'#8a8fb0');return `<span style="display:inline-block;padding:2px 8px;margin:3px 3px 0 0;border-radius:6px;font-size:11px;border:1px solid ${c};color:${c}">${txt}</span>`;}
+function _qtag(kind,txt){const c=kind==='bad'?'#ff5c7a':(kind==='ok'?'#4be3a0':'#8a8fb0');return `<span class="qtag" style="display:inline-block;padding:2px 8px;margin:3px 3px 0 0;border-radius:6px;font-size:11px;border:1px solid ${c};color:${c}">${txt}</span>`;}
 async function qualityCheck(){
   const r=T[buyIdx];const box=document.getElementById('qualRes');
   box.innerHTML='<span class="spin"></span>';
@@ -2200,8 +2200,9 @@ async function qualityCheck(){
       if(hr.bundled>0)h+=_qtag('bad',`bundled ${hr.bundled}`);
       (hr.danger||[]).slice(0,2).forEach(x=>h+=_qtag('bad',x));}
     if(d.ca_timeline&&d.ca_timeline.ok&&d.ca_timeline.mentions>0){const ct=d.ca_timeline;
-      h+=_qtag(ct.communities>=3?'n':'ok',`X: ${ct.communities} communities · ${ct.mentions} posts`);
-      if(ct.posted_before_official)h+=_qtag('bad',`CA posted before official (@${ct.first_author})`);}
+      h+=_qtag('n',`X: ${ct.communities} communities · ${ct.mentions} posts`);
+      if(ct.posted_before_official)h+=_qtag('bad',ct.official_posted?`CA leaked ${ct.lead_min}min before official (@${ct.first_author})`:`official never posted CA · first @${ct.first_author}`);
+      else if(!ct.first_by_official&&ct.lead_min!=null&&ct.lead_min>0)h+=_qtag('n',`first @${ct.first_author}, ${ct.lead_min}min before official`);}
     if(!h.includes('qtag')&&!d.top10&&!d.fresh)h+='<span class="hint">enable ABC_TOP10_RPC / ABC_FRESH_WALLETS_RPC / GETXAPI_KEY for signals</span>';
     h+=`<div style="margin-top:6px"><button class="mbtn ghost" onclick="farmScan()">Scan holders for farm</button><div id="farmRes" class="hint"></div></div>`;
     box.innerHTML=h;
