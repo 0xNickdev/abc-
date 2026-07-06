@@ -196,7 +196,20 @@ DATA_SOURCE = os.getenv("DATA_SOURCE", "").strip().lower()
 # 管理员/运营模式：只有运营者（你）需要从 UI 写凭据(API/LLM key)。外部交易者不应看到凭据面板，
 # 也无权写 .env —— 他们的密钥(钱包)走 non-custodial（浏览器侧），运营密钥在服务器 .env 自动加载。
 # 设 ABC_ADMIN=1 解锁凭据面板与 /api/config 写入；默认(未设)=外部用户模式，凭据面板隐藏、写入 403。
-ADMIN_MODE = os.getenv("ABC_ADMIN", "").strip().lower() in ("1", "true", "yes", "on")
+_admin_env = os.getenv("ABC_ADMIN", "").strip()
+# Legacy: ABC_ADMIN=1 → оператор ВСЕ, кто открыл URL (только для приватного/локального стенда!).
+ADMIN_MODE = _admin_env.lower() in ("1", "true", "yes", "on")
+# Прод-режим: ABC_ADMIN=<pubkey>[,<pubkey>…] — операторские права ТОЛЬКО у этих кошельков
+# и только после входа подписью (X-Auth). Для публичного URL с реальными деньгами — един-
+# ственно правильный вариант. Отличаем от legacy по длине (base58 pubkey ≥ 32 символов).
+ADMIN_WALLETS = frozenset(w.strip() for w in _admin_env.split(",") if len(w.strip()) >= 32)
+
+def _is_admin(sess, x_auth: str | None) -> bool:
+    """Оператор: legacy-флаг (все) ИЛИ кошелёк из ABC_ADMIN, вошедший подписью."""
+    if ADMIN_MODE:
+        return True
+    return (sess.pubkey in ADMIN_WALLETS
+            and sess.auth_token is not None and x_auth == sess.auth_token)
 
 # 热榜扫描命令（可在前端「筛选结果」齿轮里改）。按链给默认值：
 #   sol 用经调优的命令（含 not_wash_trading 过滤）；其他链先用通用模板（仅换 --chain）。
@@ -1927,9 +1940,9 @@ def _block_if_public():
     if PUBLIC_DEMO:
         raise HTTPException(403, "Public demo is read-only; write operations are disabled")
 
-def _block_if_not_admin():
+def _block_if_not_admin(sess, x_auth: str | None):
     """凭据写入仅限运营者：外部交易者无权改服务器 .env（运营密钥服务器侧自动加载）。"""
-    if not ADMIN_MODE:
+    if not _is_admin(sess, x_auth):
         raise HTTPException(403, "Credentials are managed by the server; users cannot configure them")
 
 # 多用户：前端连上钱包后在每个请求带 X-Wallet: <pubkey>；不带 → 默认会话(local)。
@@ -1990,23 +2003,25 @@ def api_auth_verify(a: AuthVerifyIn):
     return dict(ok=True, token=sess.auth_token)
 
 @app.get("/api/status")
-def api_status(x_wallet: str | None = WalletHeader):
+def api_status(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """前端加载时探测：后端是否已就绪（环境有 key + 已切真实适配器），免去重填。
-    chain 仅为启动默认链（前端各 tab 用自己的链，不依赖这个）。"""
+    chain 仅为启动默认链（前端各 tab 用自己的链，不依赖这个）。admin — per-request:
+    legacy ABC_ADMIN=1 → все; ABC_ADMIN=<pubkey> → только этот кошелёк после входа подписью."""
     s = get_session(x_wallet)
     return dict(live_adapter=MK.is_live_adapter, chain=MK.chain, mode=s.mode,
                 has_key=bool(load_env().get("GMGN_API_KEY")),
                 trading_locked=LIVE_TRADING_DISABLED, public_demo=PUBLIC_DEMO,
-                admin=ADMIN_MODE,
+                admin=_is_admin(s, x_auth),
                 caps=dict(manual=CFG["max_per_trade_sol"],
                           bot=CFG["bot_max_per_trade_sol"],
                           auto=CFG["auto_max_per_trade_sol"]),
                 trending_cmd=MK.get_trending_cmd(MK.chain))
 
 @app.post("/api/config")
-def api_config(cfg: ConfigIn):
+def api_config(cfg: ConfigIn, x_wallet: str | None = WalletHeader,
+               x_auth: str | None = AuthHeader):
     _block_if_public()
-    _block_if_not_admin()       # 凭据写入仅运营者；外部用户走 non-custodial，不碰服务器密钥
+    _block_if_not_admin(get_session(x_wallet), x_auth)   # 凭据写入仅运营者；外部用户走 non-custodial，不碰服务器密钥
     env = load_env()
     # api_key 留空则沿用环境已有的 key（避免空值覆盖、避免每次重填）
     if not cfg.api_key and not env.get("GMGN_API_KEY"):
@@ -2250,11 +2265,16 @@ def api_pnl_calendar(month: str = "", x_wallet: str | None = WalletHeader):
     return pnl_calendar("*", m)
 
 # ── Ночной review-loop: отчёт (read-only) + форс-прогон + применение одного предложения ──
-def _block_if_not_owner(sess: UserSession):
-    """Тюнинг конфига/эджа — house-level (влияет на общий scoring): только оператор
-    (ADMIN) или локальная сессия (127.0.0.1, без кошелька). Внешние юзеры — 403."""
-    if not (ADMIN_MODE or sess.pubkey == DEFAULT_PUBKEY):
-        raise HTTPException(403, "review-loop доступен оператору (локальная сессия/ADMIN)")
+def _block_if_not_owner(sess: UserSession, x_auth: str | None = None):
+    """Тюнинг конфига/эджа — house-level (влияет на общий scoring): только оператор.
+    Локальная сессия (без кошелька) считается владельцем ТОЛЬКО пока не настроен
+    pubkey-режим (ABC_ADMIN=<pubkey>): на публичном деплое «сессия без кошелька» —
+    это любой прохожий с URL, а не 127.0.0.1."""
+    if _is_admin(sess, x_auth):
+        return
+    if sess.pubkey == DEFAULT_PUBKEY and not ADMIN_WALLETS:
+        return
+    raise HTTPException(403, "review-loop доступен оператору (ADMIN-кошелёк / локальная сессия)")
 
 # Белый список применяемых параметров (только house-кнобы; произвольные ключи не пишем).
 _REVIEW_CFG_KEYS = {"buy_ratio_reject": "num", "buy_ratio_pass": "num",
@@ -2299,11 +2319,11 @@ def api_review(x_wallet: str | None = WalletHeader):
     return rep
 
 @app.post("/api/review/run")
-def api_review_run(x_wallet: str | None = WalletHeader):
+def api_review_run(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """Форсировать прогон + записать веса/отчёт (house-level: оператор)."""
     _block_if_public()
     sess = get_session(x_wallet)
-    _block_if_not_owner(sess)
+    _block_if_not_owner(sess, x_auth)
     return run_review_and_persist(persist=True)
 
 class ReviewApplyIn(BaseModel):
@@ -2312,11 +2332,12 @@ class ReviewApplyIn(BaseModel):
     value: float | int | str | bool
 
 @app.post("/api/review/apply")
-def api_review_apply(a: ReviewApplyIn, x_wallet: str | None = WalletHeader):
+def api_review_apply(a: ReviewApplyIn, x_wallet: str | None = WalletHeader,
+                     x_auth: str | None = AuthHeader):
     """Применить одно предложение review-loop (human-in-the-loop; только house-кнобы из白名单)."""
     _block_if_public()
     sess = get_session(x_wallet)
-    _block_if_not_owner(sess)
+    _block_if_not_owner(sess, x_auth)
     applied = _apply_review_param(a.target, a.param, a.value, sess)
     log("REVIEW_APPLY", "ABC", f"{a.target}.{a.param} → {applied}", mode=sess.mode)
     return dict(ok=True, target=a.target, param=a.param, value=applied)
@@ -2325,11 +2346,12 @@ class LearnIn(BaseModel):
     enabled: bool
 
 @app.post("/api/review/learning")
-def api_review_learning(a: LearnIn, x_wallet: str | None = WalletHeader):
+def api_review_learning(a: LearnIn, x_wallet: str | None = WalletHeader,
+                        x_auth: str | None = AuthHeader):
     """Вкл/выкл edge-weighting самообучения (owner-gated). ВЫКЛ по умолчанию (не учимся на шуме)."""
     _block_if_public()
     sess = get_session(x_wallet)
-    _block_if_not_owner(sess)
+    _block_if_not_owner(sess, x_auth)
     on = wallets.set_learning(a.enabled)
     log("REVIEW_LEARN", "ABC", f"self-learning {'ON' if on else 'OFF'}", mode=sess.mode)
     return dict(ok=True, enabled=on)

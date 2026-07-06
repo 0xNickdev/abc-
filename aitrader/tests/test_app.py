@@ -864,6 +864,53 @@ class TestSelfCustodyLive:
         assert r.status_code == 409
 
 
+# ── Admin по кошельку: ABC_ADMIN=<pubkey> — оператор только владелец после входа подписью;
+#    «сессия без кошелька» на публичном проде — прохожий, НЕ владелец ──
+class TestAdminByWallet:
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        return _mu_client(tmp_path, monkeypatch)
+
+    def test_pubkey_admin_requires_signed_session(self, client, monkeypatch):
+        pk, h = _wallet_auth(client)
+        monkeypatch.setattr(appmod, "ADMIN_MODE", False)
+        monkeypatch.setattr(appmod, "ADMIN_WALLETS", frozenset([pk]))
+        assert client.get("/api/status", headers=h).json()["admin"] is True
+        # тот же pubkey БЕЗ X-Auth → не админ (заголовок может подставить кто угодно)
+        assert client.get("/api/status", headers={"X-Wallet": pk}).json()["admin"] is False
+        # чужой вошедший кошелёк → не админ
+        _, h2 = _wallet_auth(client)
+        assert client.get("/api/status", headers=h2).json()["admin"] is False
+        # локальная сессия → не админ
+        assert client.get("/api/status").json()["admin"] is False
+
+    def test_review_owner_gate_in_pubkey_mode(self, client, monkeypatch):
+        pk, h = _wallet_auth(client)
+        monkeypatch.setattr(appmod, "ADMIN_MODE", False)
+        monkeypatch.setattr(appmod, "ADMIN_WALLETS", frozenset([pk]))
+        monkeypatch.setattr(appmod.wallets, "set_learning", lambda v: bool(v))
+        # безкошельковая сессия при настроенном pubkey-режиме — больше не владелец
+        assert client.post("/api/review/learning", json={"enabled": True}).status_code == 403
+        # владелец после входа подписью — можно
+        assert client.post("/api/review/learning", json={"enabled": True},
+                           headers=h).status_code == 200
+
+    def test_review_owner_gate_local_default_unchanged(self, client, monkeypatch):
+        # без ABC_ADMIN вовсе (локальный стенд): безкошельковая сессия остаётся владельцем
+        monkeypatch.setattr(appmod, "ADMIN_MODE", False)
+        monkeypatch.setattr(appmod, "ADMIN_WALLETS", frozenset())
+        monkeypatch.setattr(appmod.wallets, "set_learning", lambda v: bool(v))
+        assert client.post("/api/review/learning", json={"enabled": False}).status_code == 200
+
+    def test_config_write_only_for_admin_wallet(self, client, monkeypatch):
+        pk, h = _wallet_auth(client)
+        monkeypatch.setattr(appmod, "ADMIN_MODE", False)
+        monkeypatch.setattr(appmod, "ADMIN_WALLETS", frozenset([pk]))
+        body = {"api_key": "K", "signing_key": "", "chain": "sol", "mode": "SHADOW"}
+        assert client.post("/api/config", json=body).status_code == 403
+        assert client.post("/api/config", json=body, headers=h).status_code == 200
+
+
 # ── Потолки размера одной сделки по режимам исполнения:
 #    ручной 0.5 (размер выбирает человек), полуавтомат N1/N2 0.1, автопилот N3 0.05.
 #    Подкрутка: env ABC_MAX_TRADE_SOL / ABC_BOT_MAX_TRADE_SOL / ABC_AUTO_MAX_TRADE_SOL ──

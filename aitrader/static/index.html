@@ -1593,7 +1593,14 @@ async function ensureAuth(){
   if(!v.ok)throw new Error(await errDetail(v));
   authToken=(await v.json()).token;
   localStorage.setItem('abc_auth_'+walletPubkey,authToken);
+  refreshAdmin();   // admin теперь per-request (ABC_ADMIN=<pubkey> + подпись) → пересчитать
   return authToken;
+}
+/* admin-флаг зависит от сессии (кошелёк владельца после входа подписью) — обновляем
+   шестерёнку/панель при каждой смене кошелька или получении X-Auth токена. */
+async function refreshAdmin(){
+  try{const d=await(await fetch(API+'/api/status')).json();
+      document.body.classList.toggle('admin',!!d.admin);}catch(e){}
 }
 async function authedFetch(url,opts){
   await ensureAuth();
@@ -1609,6 +1616,7 @@ function _short(a){return a.slice(0,4)+'…'+a.slice(-4);}
 function copyCA(el,ca){try{navigator.clipboard.writeText(ca);}catch(e){}const o=el.textContent;el.textContent='copied';setTimeout(()=>{el.textContent=o;},900);}
 function renderWallet(){
   loadAuthToken();   // токен привязан к pubkey — обновляем при каждой смене кошелька
+  refreshAdmin();
   const btn=document.getElementById('walletBtn'),lbl=document.getElementById('walletLbl');if(!btn)return;
   if(walletPubkey){btn.classList.add('on');lbl.textContent=_short(walletPubkey);btn.title=t('wallet_disconnect')+' · '+walletPubkey;}
   else{btn.classList.remove('on');lbl.textContent=t('wallet_connect');btn.title=t('wallet_title');}
