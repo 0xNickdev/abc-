@@ -1155,14 +1155,38 @@ class TestRunRateLimit:
     def client(self, tmp_path, monkeypatch):
         return _mu_client(tmp_path, monkeypatch)
 
-    def test_second_rapid_run_429(self, client, monkeypatch):
+    def test_second_rapid_run_served_from_session_cache(self, client, monkeypatch):
         monkeypatch.setattr(appmod, "RUN_MIN_INTERVAL_S", 60.0)
         h = {"X-Wallet": "RateWallet1"}
-        assert client.post("/api/run", json={"chain": "sol"}, headers=h).status_code == 200
-        assert client.post("/api/run", json={"chain": "sol"}, headers=h).status_code == 429
+        first = client.post("/api/run", json={"chain": "sol"}, headers=h)
+        assert first.status_code == 200
+        # повторный сразу: НЕ пустой 429, а последний скан с пометкой throttled
+        # (несколько вкладок одной сессии не должны показывать "No candidates")
+        second = client.post("/api/run", json={"chain": "sol"}, headers=h)
+        assert second.status_code == 200 and second.json()["throttled"] is True
+        assert second.json()["decisions"] == first.json()["decisions"]
         # другой юзер — своя квота
         assert client.post("/api/run", json={"chain": "sol"},
                            headers={"X-Wallet": "RateWallet2"}).status_code == 200
+
+    def test_rapid_run_without_cache_still_429(self, client, monkeypatch):
+        monkeypatch.setattr(appmod, "RUN_MIN_INTERVAL_S", 60.0)
+        sess = appmod.get_session("RateWallet3")
+        sess.last_run = __import__("time").monotonic()      # окно занято, кэша скана ещё нет
+        assert client.post("/api/run", json={"chain": "sol"},
+                           headers={"X-Wallet": "RateWallet3"}).status_code == 429
+
+    def test_trending_survives_restart_via_disk(self, tmp_path, monkeypatch):
+        # деплой/рестарт: память пуста, GMGN сразу банит → отдаём последние строки с диска
+        _mu_client(tmp_path, monkeypatch)
+        rows = [dict(address="A1", symbol="T1")]
+        appmod._save_trending_disk("sol", rows)
+        mk = appmod.MarketLayer()                            # «новый контейнер»
+        class _Boom:
+            def market_trending(self, cmd=None):
+                raise RuntimeError("429 RATE_LIMIT_BANNED")
+        monkeypatch.setattr(mk, "adapter_for", lambda ch: _Boom())
+        assert mk.trending_rows("sol") == rows
 
 
 # ── Реальные данные без ключей: DexAdapter (GeckoTerminal + Solana RPC) ──

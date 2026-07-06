@@ -242,6 +242,35 @@ TRENDING_COOLDOWN_S = float(os.getenv("TRENDING_COOLDOWN_S", "60"))   # посл
 def _is_rate_limited(e: Exception) -> bool:
     s = str(e).lower()
     return "429" in s or "rate_limit" in s or "rate limit" in s or "banned" in s
+
+# Дисковый кэш трендинга (per chain): деплой/рестарт больше не означает пустой экран —
+# первые секунды после старта (пока GMGN в кулдауне/банит новый контейнер) отдаём
+# последние реальные строки с volume. Файл маленький (~100 строк на чейн).
+def _trending_disk_path() -> pathlib.Path:
+    return OUT_DIR / "trending_cache.json"
+
+def _load_trending_disk(chain: str) -> list:
+    try:
+        data = json.loads(_trending_disk_path().read_text())
+        rows = data.get(chain)
+        return rows if isinstance(rows, list) else []
+    except Exception:
+        return []
+
+def _save_trending_disk(chain: str, rows: list):
+    try:
+        p = _trending_disk_path()
+        try:
+            data = json.loads(p.read_text())
+            if not isinstance(data, dict):
+                data = {}
+        except Exception:
+            data = {}
+        data[chain] = rows
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(data, ensure_ascii=False))
+    except Exception:
+        pass                                    # кэш — best-effort, скан не роняем
 # Оценочная round-trip стоимость сделки (pool fee + priority + slippage, обе ноги) как доля
 # от размера позиции. Вычитается из реализованного PnL → «чистый» PnL в календаре/Review.
 # Дефолт 2.5%; на прямом Jupiter без bot-налога ставь ниже (ABC_FEE_PCT=0.015).
@@ -1195,6 +1224,13 @@ class MarketLayer:
     def trending_rows(self, chain: str) -> list:
         now = time.monotonic()
         hit = self._trending_cache.get(chain)
+        if hit is None:                                     # холодный старт (рестарт/деплой) → диск
+            rows = _load_trending_disk(chain)
+            if rows:
+                # ts «в прошлом»: TTL истёк (обновимся при первой возможности), но при 429-кулдауне
+                # отдаём эти строки вместо пустого экрана «No candidates» после каждого деплоя
+                hit = (now - TRENDING_CACHE_TTL - 1, rows)
+                self._trending_cache[chain] = hit
         if hit and (now - hit[0]) < TRENDING_CACHE_TTL:
             return hit[1]
         if now < self._trending_cooldown.get(chain, 0.0):   # недавно 429 → НЕ бьём GMGN (продлевает бан)
@@ -1208,6 +1244,7 @@ class MarketLayer:
             raise                                           # прочие ошибки — как раньше (502 + трейсбек)
         self._trending_cache[chain] = (now, rows)
         self._trending_cooldown.pop(chain, None)            # успех → снять кулдаун
+        _save_trending_disk(chain, rows)                    # переживаем рестарт (деплой ≠ пустой экран)
         return rows
 
 MK = MarketLayer()
@@ -1233,6 +1270,8 @@ class UserSession:
         self.auth_token = None                          # sign-in-with-wallet 会话令牌（内存态）
         self.proposals: list[dict] = []                 # N1: предложения бота, ждут клика (в памяти)
         self.last_run = 0.0                             # rate-limit /api/run (monotonic)
+        self.last_screen: dict | None = None            # последний результат скана: отдаём его
+                                                        # отлимиченным вкладкам вместо 429-пустоты
 
     def session_key_path(self) -> pathlib.Path:
         d = OUT_DIR if self._default else _user_dir(self.pubkey)
@@ -2163,11 +2202,17 @@ def api_run(r: RunIn, x_wallet: str | None = WalletHeader):
     # RUN_MIN_INTERVAL_S (сек). UI опрашивает раз в ~5.6s, честным юзерам не мешает.
     now = time.monotonic()
     if now - sess.last_run < RUN_MIN_INTERVAL_S:
-        raise HTTPException(429, "слишком часто — подожди пару секунд")
+        # несколько вкладок одной сессии делят лимит: отдаём последний скан (не пустой 429),
+        # чтобы «неудачливая» вкладка не оставалась с вечным "No candidates"
+        if sess.last_screen is not None:
+            return JSONResponse(dict(sess.last_screen, throttled=True))
+        raise HTTPException(429, "too fast — wait a couple of seconds")
     sess.last_run = now
     with sess.lock:
         try:
-            return JSONResponse(screen_once(ch, sess))
+            out = screen_once(ch, sess)
+            sess.last_screen = out
+            return JSONResponse(out)
         except Exception as e:
             import traceback
             traceback.print_exc()                        # реальная причина (gmgn-cli/timeout) → в логи Railway
