@@ -87,18 +87,18 @@ def decide_exit(pos: dict, severity, risk_cfg: dict, bot_cfg: dict | None = None
     taken = pos.get("tp_taken", []) or []
 
     if pnl <= -hard_stop:
-        return ExitDecision("SELL", 1.0, f"硬止损 PnL {pnl:+.0%} ≤ -{hard_stop:.0%}")
+        return ExitDecision("SELL", 1.0, f"Hard stop PnL {pnl:+.0%} ≤ -{hard_stop:.0%}")
     if severity is not None and float(severity) >= bc["escape_severity_exit"]:
-        return ExitDecision("SELL", 1.0, f"逃生离场 严重度 {severity}≥{bc['escape_severity_exit']}")
+        return ExitDecision("SELL", 1.0, f"Escape exit severity {severity}≥{bc['escape_severity_exit']}")
     if peak >= bc["trail_activate_pct"] and (peak - pnl) >= trail:
-        return ExitDecision("SELL", 1.0, f"移动止盈 自峰值 {peak:+.0%} 回撤 {peak - pnl:.0%}≥{trail:.0%}")
+        return ExitDecision("SELL", 1.0, f"Trailing take-profit from peak {peak:+.0%} drawdown {peak - pnl:.0%}≥{trail:.0%}")
     # TP 阶梯：命中尚未兑现的【最低未取】档，分批落袋（一轮只取一档，避免一次扫光）
     for i, rung in enumerate(ladder):
         if i in taken:
             continue
         gain, frac = rung
         if pnl >= float(gain):
-            return ExitDecision("SELL", float(frac), f"TP{i + 1} 命中 +{float(gain):.0%}，落袋 {float(frac):.0%}", rung=i)
+            return ExitDecision("SELL", float(frac), f"TP{i + 1} hit +{float(gain):.0%}, take {float(frac):.0%}", rung=i)
     return ExitDecision("HOLD", 0.0, "")
 
 
@@ -212,6 +212,6 @@ def describe() -> dict:
     """给 /api/bot 用的机器人说明（前端可直接渲染）。"""
     return dict(
         cfg=dict(CFG),
-        thesis=("自主执行回路：只对【通过全部闸门 + ABC Alpha v1 触发】的候选自动建仓；"
-                "离场按 硬止损>逃生>移动止盈>TP阶梯分批；熔断/当日上限期间只许平仓。"
-                "默认关闭、纸面优先，SHADOW 下攒 SELL 记录喂 backtest 出真胜率/R 后再考虑上线。"))
+        thesis=("Autonomous execution loop: auto-opens positions only for candidates that pass all gates + ABC Alpha v1 trigger; "
+                "exits by hard-stop > escape > trailing take-profit > TP-ladder partials; only closing is allowed during a circuit-break / daily-cap. "
+                "Off by default, paper-first; under SHADOW it accumulates SELL records to feed backtest for real win-rate/R before going live."))

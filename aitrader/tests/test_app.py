@@ -409,14 +409,14 @@ class TestBot:
         import bot
         cfg = dict(hard_stop_pct=0.35, trailing_pct=0.25, tp_ladder=[])
         ed = bot.decide_exit(dict(pnl=0.05, peak_pnl=0.05, tp_taken=[]), 80, cfg)
-        assert ed.action == "SELL" and "逃生" in ed.reason
+        assert ed.action == "SELL" and "Escape" in ed.reason
 
     def test_decide_exit_trailing_after_activate(self):
         import bot
         cfg = dict(hard_stop_pct=0.35, trailing_pct=0.25, tp_ladder=[])
         # 峰值 +40%（已过 30% 激活线），回撤到 +10% = 30% 回撤 ≥ 25% → 移动止盈
         ed = bot.decide_exit(dict(pnl=0.10, peak_pnl=0.40, tp_taken=[]), 0, cfg)
-        assert ed.action == "SELL" and "移动止盈" in ed.reason
+        assert ed.action == "SELL" and "Trailing take-profit" in ed.reason
 
     def test_decide_exit_tp_ladder_partial(self):
         import bot

@@ -186,14 +186,14 @@ def propose(records: list[dict], cfg: dict | None = None, filters: dict | None =
     props += _bad_side_proposal(
         lo, hi, hs, min_trades, target="CFG", param="buy_ratio_reject",
         current=cfg.get("buy_ratio_reject", 0.42), suggested=0.50,
-        rationale="Сделки с buy_ratio<50% проигрывают — поднять порог отбраковки派发/接盘.")
+        rationale="Сделки с buy_ratio<50% проигрывают — поднять порог отбраковки (distribution/bag-holding).")
 
     # 4) поднять требуемый консенсус, если без умных кошельков исход хуже
     lo, hi = _split(trades, "sm_confluence", 1)  # lo = 0 умных в场
     props += _bad_side_proposal(
         lo, hi, hs, min_trades, target="CFG", param="min_smart_money_confluence",
         current=cfg.get("min_smart_money_confluence", 1), suggested=2,
-        rationale="Без умных кошельков в场 исход хуже — поднять требуемый консенсус до 2.")
+        rationale="Без умных кошельков в сделке исход хуже — поднять требуемый консенсус до 2.")
 
     return props
 

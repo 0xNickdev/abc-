@@ -92,28 +92,28 @@ def evaluate(f, trig: dict | None = None, preset: dict | None = None) -> ABCSign
     reasons, score = [], 0.0
 
     ok_smart = smart >= t["min_tracked_or_smart"]
-    reasons.append(f"{'✓' if ok_smart else '✗'} 聪明钱在场 {smart}（需≥{t['min_tracked_or_smart']}）")
+    reasons.append(f"{'✓' if ok_smart else '✗'} Smart money present {smart} (need ≥{t['min_tracked_or_smart']})")
     if ok_smart:
         score += min(35, 18 + (smart - t["min_tracked_or_smart"]) * 8)
 
     ok_mom = chg5 >= t["min_chg_5m"]
-    reasons.append(f"{'✓' if ok_mom else '✗'} 5m 动能 {chg5:+.1%}（需≥{t['min_chg_5m']:+.0%}）")
+    reasons.append(f"{'✓' if ok_mom else '✗'} 5m momentum {chg5:+.1%} (need ≥{t['min_chg_5m']:+.0%})")
     if ok_mom:
         score += min(25, 12 + chg5 * 120)
 
     ok_buy = buyr >= t["min_buy_ratio"]
-    reasons.append(f"{'✓' if ok_buy else '✗'} 买盘占比 {buyr:.0%}（需≥{t['min_buy_ratio']:.0%}）")
+    reasons.append(f"{'✓' if ok_buy else '✗'} Buy ratio {buyr:.0%} (need ≥{t['min_buy_ratio']:.0%})")
     if ok_buy:
         score += min(20, (buyr - t["min_buy_ratio"]) * 100 + 10)
 
     ok_liq = liq >= t["min_liquidity"]
-    reasons.append(f"{'✓' if ok_liq else '✗'} 流动性 ${liq:,.0f}（需≥${t['min_liquidity']:,.0f}）")
+    reasons.append(f"{'✓' if ok_liq else '✗'} Liquidity ${liq:,.0f} (need ≥${t['min_liquidity']:,.0f})")
     if ok_liq:
         score += 10
 
     # 币龄窗口：理想 0–15min 给满分，到 max_age 线性衰减为 0；过老/过新都扣。
     ok_age = t["min_age_min"] <= age <= t["max_age_min"]
-    reasons.append(f"{'✓' if ok_age else '✗'} 币龄 {age:.0f}min（窗口 {t['min_age_min']:.0f}–{t['max_age_min']:.0f}）")
+    reasons.append(f"{'✓' if ok_age else '✗'} Token age {age:.0f}min (window {t['min_age_min']:.0f}–{t['max_age_min']:.0f})")
     if ok_age:
         if age <= t["ideal_age_max"]:
             score += 10
@@ -152,9 +152,9 @@ def describe() -> dict:
     """给 /api/strategy 用的策略说明（前端可直接渲染）。"""
     return dict(name=NAME, version=VERSION, trigger=TRIGGER, preset=PRESET,
                 preset_filters=PRESET_FILTERS,
-                thesis=("不抢 slot-0；盯毕业后 0–15min；避雷过关 + ≥2 聪明钱在场 + "
-                        "5m 动能向上 + 买盘占优 + 流动性达标 → 触发；"
-                        "TP 阶梯/移动止盈/硬止损/逃生预警退出；连亏熔断 + 当日上限 + 纸面先行。"))
+                thesis=("Don't fight for slot-0; watch the 0–15min window after graduation; anti-rug passed + ≥2 smart money present + "
+                        "5m momentum up + buying dominant + liquidity threshold met → trigger; "
+                        "exit via TP-ladder / trailing take-profit / hard-stop / escape alert; consecutive-loss circuit-break + daily cap + paper-first."))
 
 
 # ──────────────────────────────────────────────────────────────────────────

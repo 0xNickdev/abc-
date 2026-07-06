@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -366,15 +366,15 @@ td{padding:5px 10px;vertical-align:middle}
   <div class="bar">
     <div class="bar-l">
       <div class="logo" id="ic-logo"></div>
-      <div><h1>abc<span style="color:var(--lime)">.</span><i>//</i><span data-i18n="h1_suffix">筛选 + 一键成交</span></h1><div class="tag" data-i18n="tag">确定性规则抓全 · ML 砍狠 · LLM 只解释幸存者 · 你按下成交</div></div>
+      <div><h1>abc<span style="color:var(--lime)">.</span><i>//</i><span data-i18n="h1_suffix">Screen + One-Click Trade</span></h1><div class="tag" data-i18n="tag">Deterministic rules cast wide · ML cuts hard · LLM only explains survivors · you press to trade</div></div>
     </div>
     <div class="bar-r">
       <div class="clock" id="clock">--:--:--</div>
       <div class="pill"><span class="dot live"></span><div><span class="k">MCP</span><span class="v" id="mcpPill" style="color:var(--amber)">DEMO</span></div></div>
       <!-- селектор чейна убран: продукт SOL-only (curChain фиксирован 'sol') -->
       <div class="pill" style="display:none"><div><span class="k">P50 LAT</span><span class="v" id="lat">182ms</span></div></div>
-      <div class="pill mode clk" id="modePillWrap" onclick="toggleMode()" data-i18n-title="mode_toggle_title"><span class="dot" id="modeDot" style="background:var(--amber)"></span><div><span class="k">MODE</span><span class="v" id="modePill">模拟盘</span></div></div>
-      <div class="seg2"><button id="srcDemo" class="on" onclick="setSource('demo')">DEMO</button><button id="srcBe" onclick="setSource('backend')" data-i18n="src_backend">本地后端</button></div>
+      <div class="pill mode clk" id="modePillWrap" onclick="toggleMode()" data-i18n-title="mode_toggle_title"><span class="dot" id="modeDot" style="background:var(--amber)"></span><div><span class="k">MODE</span><span class="v" id="modePill">SHADOW</span></div></div>
+      <div class="seg2"><button id="srcDemo" class="on" onclick="setSource('demo')">DEMO</button><button id="srcBe" onclick="setSource('backend')" data-i18n="src_backend">Backend</button></div>
       <div class="wbtn" id="walletBtn" onclick="onWalletClick()" data-i18n-title="wallet_title"><span class="wdot"></span><span id="walletLbl" data-i18n="wallet_connect">Connect Wallet</span></div>
       <div class="langbtn" id="langBtn" style="display:none" onclick="switchLang()">EN</div>
       <div class="wbtn" id="pnlBtn" onclick="openPnl()" title="PnL Calendar" style="cursor:pointer"><span id="pnlBtnIc" style="display:inline-flex;width:15px;height:15px"></span> <span id="pnlBtnVal" style="font-weight:700">PnL</span></div>
@@ -387,11 +387,11 @@ td{padding:5px 10px;vertical-align:middle}
   <div class="grid">
     <div class="col">
       <div class="card" style="flex:1">
-        <h3 id="ic-pipe"><span data-i18n="pipe_h3">筛选结果 · 待你决策</span><span class="scanning" id="scanning" data-i18n="scanning">◢ 扫描中…</span><span class="amt-wrap" data-i18n-title="amt_title"><span class="amt-lbl" data-i18n="amt_lbl">买入</span><input id="amtInput" class="amt-in" type="number" step="0.01" min="0" value="0.01" oninput="onAmt(this)"><span class="amt-lbl" id="amtUnit">SOL</span></span><span class="h3gear" id="pipeGear" data-i18n-title="pipegear_title"></span></h3>
+        <h3 id="ic-pipe"><span data-i18n="pipe_h3">Screening Results · Awaiting Your Call</span><span class="scanning" id="scanning" data-i18n="scanning">◢ Scanning…</span><span class="amt-wrap" data-i18n-title="amt_title"><span class="amt-lbl" data-i18n="amt_lbl">BUY</span><input id="amtInput" class="amt-in" type="number" step="0.01" min="0" value="0.01" oninput="onAmt(this)"><span class="amt-lbl" id="amtUnit">SOL</span></span><span class="h3gear" id="pipeGear" data-i18n-title="pipegear_title"></span></h3>
         <div class="body">
           <table>
             <thead><tr>
-              <th><span data-i18n="th_token">TOKEN</span> <span class="tokf" id="tokFilter"></span></th><th data-i18n="th_pipe">规则→排序→LLM</th><th data-i18n="th_safe">安全</th><th>MCAP</th><th data-i18n="th_smart">聪明钱/KOL</th><th data-i18n="th_timing">时机</th><th>LLM</th><th data-i18n="th_pri">优先级</th><th data-i18n="th_dec">决策</th>
+              <th><span data-i18n="th_token">TOKEN</span> <span class="tokf" id="tokFilter"></span></th><th data-i18n="th_pipe">RULE→RANK→LLM</th><th data-i18n="th_safe">SAFE</th><th>MCAP</th><th data-i18n="th_smart">SMART/KOL</th><th data-i18n="th_timing">TIMING</th><th>LLM</th><th data-i18n="th_pri">PRIORITY</th><th data-i18n="th_dec">DECISION</th>
             </tr></thead>
             <tbody id="rows"></tbody>
           </table>
@@ -399,18 +399,18 @@ td{padding:5px 10px;vertical-align:middle}
         <div class="detail" id="detail"></div>
       </div>
       <div class="card logwrap">
-        <h3 id="ic-log"><span data-i18n="log_h3">实时决策日志 · trade_decisions.jsonl</span><span class="logtog" id="logTog" data-i18n-title="logtog_title"></span></h3>
+        <h3 id="ic-log"><span data-i18n="log_h3">Live Decision Log · trade_decisions.jsonl</span><span class="logtog" id="logTog" data-i18n-title="logtog_title"></span></h3>
         <div class="body logfeed" id="logfeed"></div>
       </div>
     </div>
 
     <div class="col">
       <div class="card" style="flex:1.1" id="escCard">
-        <h3 id="ic-esc"><span data-i18n="esc_h3">持仓逃生监控</span> <span class="cnt" id="escCnt"></span></h3>
+        <h3 id="ic-esc"><span data-i18n="esc_h3">Position Escape Monitor</span> <span class="cnt" id="escCnt"></span></h3>
         <div class="body" id="positions"></div>
       </div>
       <div class="card">
-        <h3 id="ic-funnel"><span data-i18n="funnel_h3">闸门漏斗 · </span><span id="funnelSub"></span></h3>
+        <h3 id="ic-funnel"><span data-i18n="funnel_h3">Gate Funnel · </span><span id="funnelSub"></span></h3>
         <div class="funnel" id="funnel"></div>
         <div class="riskmini" id="riskmini"></div>
       </div>
@@ -421,14 +421,14 @@ td{padding:5px 10px;vertical-align:middle}
 <!-- config modal -->
 <div class="scrim" id="cfgScrim">
   <div class="modal">
-    <h2><span id="ic-cog"></span><span data-i18n="cfg_h2">配置 · GMGN 凭据</span><span class="x" onclick="closeCfg()">×</span></h2>
+    <h2><span id="ic-cog"></span><span data-i18n="cfg_h2">Configure · GMGN Credentials</span><span class="x" onclick="closeCfg()">×</span></h2>
     <div class="mbody">
-      <div class="fld"><label>GMGN API KEY</label><input id="apiKey" type="password" data-i18n-ph="cfg_apikey_ph" autocomplete="off"><div class="hint" data-i18n="cfg_apikey_hint">用于认证 OpenAPI 请求。已配过就无需重填——刷新页面会自动用环境 key 连接。</div></div>
-      <div class="fld"><label data-i18n="cfg_signkey_label">GMGN SIGNING KEY · 请求签名密钥</label><textarea id="signKey" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----" autocomplete="off"></textarea><div class="hint" data-i18n="cfg_signkey_hint">Ed25519 签名密钥，非钱包私钥；仅发往本地后端</div></div>
-      <div class="fld"><label data-i18n="cfg_mode_label">成交模式</label><div class="hint" data-i18n="cfg_mode_hint" style="margin-top:7px">在右上角 MODE 图标点击切换 实盘/模拟盘；链在 CHAIN 切换（存浏览器，不写文件）</div></div>
-      <div class="mwarn" data-i18n="cfg_mwarn">⚠ 两个 key 只发送到你本机后端 (127.0.0.1)，不离开本机、不写浏览器存储。SHADOW 下「一键买入/平仓」只落日志不真实发单；切 LIVE 才会经签名密钥真实成交。</div>
+      <div class="fld"><label>GMGN API KEY</label><input id="apiKey" type="password" data-i18n-ph="cfg_apikey_ph" autocomplete="off"><div class="hint" data-i18n="cfg_apikey_hint">Used to authenticate OpenAPI requests. Already set? No need to re-enter—refreshing auto-connects with the env key.</div></div>
+      <div class="fld"><label data-i18n="cfg_signkey_label">GMGN SIGNING KEY · request signing key</label><textarea id="signKey" placeholder="-----BEGIN PRIVATE KEY-----&#10;...&#10;-----END PRIVATE KEY-----" autocomplete="off"></textarea><div class="hint" data-i18n="cfg_signkey_hint">Ed25519 signing key, not a wallet private key; sent only to the local backend</div></div>
+      <div class="fld"><label data-i18n="cfg_mode_label">Trade mode</label><div class="hint" data-i18n="cfg_mode_hint" style="margin-top:7px">Switch chain at top-right CHAIN (stored in browser, not written to file)</div></div>
+      <div class="mwarn" data-i18n="cfg_mwarn">⚠ Both keys are sent only to your local backend (127.0.0.1)—they never leave your machine or touch browser storage. In SHADOW, one-click buy/sell only logs; switch to LIVE for real settlement via the signing key.</div>
     </div>
-    <div class="mfoot"><button class="mbtn" id="saveBtn" onclick="saveCfg()" data-i18n="cfg_save">保存到本地后端</button><button class="mbtn ghost" onclick="closeCfg()" data-i18n="btn_close">关闭</button><span class="savestate" id="saveState"></span></div>
+    <div class="mfoot"><button class="mbtn" id="saveBtn" onclick="saveCfg()" data-i18n="cfg_save">Save to local backend</button><button class="mbtn ghost" onclick="closeCfg()" data-i18n="btn_close">Close</button><span class="savestate" id="saveState"></span></div>
   </div>
 </div>
 
@@ -492,48 +492,48 @@ td{padding:5px 10px;vertical-align:middle}
 </style>
 <div class="scrim" id="pipeScrim">
   <div class="modal">
-    <h2><span id="ic-pipecog"></span><span id="viewTitle">Settings</span><span class="hreset" onclick="resetSettings()" data-i18n="pipe_reset_btn" data-i18n-title="pipe_reset_btn_title">↺ 重置</span><span class="x" onclick="closePipe()">×</span></h2>
+    <h2><span id="ic-pipecog"></span><span id="viewTitle">Settings</span><span class="hreset" onclick="resetSettings()" data-i18n="pipe_reset_btn" data-i18n-title="pipe_reset_btn_title">↺ Reset</span><span class="x" onclick="closePipe()">×</span></h2>
     <div class="mbody">
       <div class="mtabs" id="pipeTabs" style="display:none"></div>
       <div class="tabpane on" id="tab_scan">
-      <div class="fld"><label data-i18n="pipe_cmd_label">GMGN-CLI 热榜命令</label><textarea id="trendCmd" rows="3" placeholder="gmgn-cli market trending ..." autocomplete="off" spellcheck="false"></textarea><div class="hint" data-i18n="pipe_cmd_hint">每轮扫描执行的完整命令；须以 <code>gmgn-cli market trending</code> 开头，自动补 <code>--raw</code>。改 --limit / --interval / --order-by / --filter / --chain 即可。</div></div>
-      <div class="fld"><label data-i18n="pipe_poll_label">轮询间隔（秒）</label><div class="szrow"><input id="pollSec" type="number" step="0.5" min="1"><span class="unit">s</span></div><div class="hint" data-i18n="pipe_poll_hint">前端每隔多久打一次 /api/run。建议 ≥30s 省配额；先感受可短些。</div></div>
+      <div class="fld"><label data-i18n="pipe_cmd_label">GMGN-CLI trending command</label><textarea id="trendCmd" rows="3" placeholder="gmgn-cli market trending ..." autocomplete="off" spellcheck="false"></textarea><div class="hint" data-i18n="pipe_cmd_hint">Full command run each scan; must start with <code>gmgn-cli market trending</code>, <code>--raw</code> auto-added. Tune --limit / --interval / --order-by / --filter / --chain.</div></div>
+      <div class="fld"><label data-i18n="pipe_poll_label">Poll interval (seconds)</label><div class="szrow"><input id="pollSec" type="number" step="0.5" min="1"><span class="unit">s</span></div><div class="hint" data-i18n="pipe_poll_hint">How often the frontend calls /api/run. ≥30s recommended to save quota; shorter for first feel.</div></div>
       </div>
       <div class="tabpane" id="tab_filters">
-      <div class="fld"><label data-i18n="pipe_filters_label">质量过滤器（0 / 空 = 关闭）</label><div id="filterFields" class="filterfields"></div><div class="hint" data-i18n="pipe_filters_hint">在「避雷」闸门之外追加的可调阈值；0 / 空 表示关闭该项，保存后下一轮生效。</div></div>
+      <div class="fld"><label data-i18n="pipe_filters_label">Quality filters (0 / empty = off)</label><div id="filterFields" class="filterfields"></div><div class="hint" data-i18n="pipe_filters_hint">Extra tunable thresholds on top of the rug gate; 0 / empty disables an item. Takes effect next scan.</div></div>
       </div>
       <div class="tabpane" id="tab_strategy"><div id="stratCards"></div></div>
       <div class="tabpane" id="tab_bot"><div id="botPane"></div></div>
       <div class="tabpane" id="tab_kol"><div id="kolPane"></div></div>
       <div class="tabpane" id="tab_positions"><div id="positionsView"></div></div>
-      <div class="mwarn" data-i18n="pipe_mwarn">⚠ 命令在你本机后端执行（127.0.0.1），仅限热榜命令。保存后立即生效：命令下一轮起用，间隔即时重设。</div>
+      <div class="mwarn" data-i18n="pipe_mwarn">⚠ The command runs on your local backend (127.0.0.1), trending commands only. Takes effect on save: command from the next round, interval reset instantly.</div>
     </div>
-    <div class="mfoot"><button class="mbtn" onclick="savePipe()" data-i18n="pipe_save">保存并立即生效</button><button class="mbtn ghost" onclick="resetPipeCmd()" data-i18n="pipe_reset">恢复默认命令</button><button class="mbtn ghost" onclick="closePipe()" data-i18n="btn_close">关闭</button><span class="savestate" id="pipeState"></span></div>
+    <div class="mfoot"><button class="mbtn" onclick="savePipe()" data-i18n="pipe_save">Save & apply now</button><button class="mbtn ghost" onclick="resetPipeCmd()" data-i18n="pipe_reset">Restore default command</button><button class="mbtn ghost" onclick="closePipe()" data-i18n="btn_close">Close</button><span class="savestate" id="pipeState"></span></div>
   </div>
 </div>
 
 <!-- buy modal -->
 <div class="scrim" id="buyScrim">
   <div class="modal">
-    <h2><span id="ic-buyz"></span><span data-i18n="buy_h2">一键买入 · </span><span id="buySym"></span><span class="x" onclick="closeBuy()">×</span></h2>
+    <h2><span id="ic-buyz"></span><span data-i18n="buy_h2">One-Click Buy · </span><span id="buySym"></span><span class="x" onclick="closeBuy()">×</span></h2>
     <div class="mbody">
-      <div class="fld"><label data-i18n="buy_size_label">买入数量（代码按固定分数法算好，可调）</label>
+      <div class="fld"><label data-i18n="buy_size_label">Buy amount (computed by fixed-fraction; adjustable)</label>
         <div class="szrow"><input id="buySize" type="number" step="0.0001" min="0"><span class="unit">SOL</span></div>
-        <div class="hint" data-i18n="buy_size_hint">仓位 = 冒险额 / 止损距离。LLM 不参与定数字。</div>
+        <div class="hint" data-i18n="buy_size_hint">Size = risk amount / stop distance. The LLM never sets the number.</div>
       </div>
       <div class="exitplan" id="buyExit"></div>
       <div class="mwarn" id="buyRiskWarn" style="display:none"></div>
       <div class="mwarn" id="buyModeNote"></div>
-      <div class="fld" id="kolWrap" style="display:none"><button class="mbtn ghost" onclick="kolCheck()" id="kolBtn">𝕏</button><div class="hint" id="kolRes"></div></div>
+      <div class="fld" id="kolWrap" style="display:none"><button class="mbtn ghost" onclick="kolCheck()" id="kolBtn"></button><div class="hint" id="kolRes"></div></div>
       <div class="fld" id="qualWrap"><button class="mbtn ghost" onclick="qualityCheck()" id="qualBtn">Verify · independent check</button><div class="hint" id="qualRes"></div></div>
     </div>
-    <div class="mfoot"><button class="mbtn" id="buyConfirm" onclick="doBuy()" data-i18n="buy_confirm">确认买入</button><button class="mbtn" id="buyPhantom" onclick="phantomBuy()" style="display:none">⚡ Phantom</button><button class="mbtn ghost" onclick="closeBuy()" data-i18n="btn_cancel">取消</button><span class="savestate" id="buyState"></span></div>
+    <div class="mfoot"><button class="mbtn" id="buyConfirm" onclick="doBuy()" data-i18n="buy_confirm">Confirm buy</button><button class="mbtn" id="buyPhantom" onclick="phantomBuy()" style="display:none">Phantom</button><button class="mbtn ghost" onclick="closeBuy()" data-i18n="btn_cancel">Cancel</button><span class="savestate" id="buyState"></span></div>
   </div>
 </div>
 
 <div class="scrim" id="pnlScrim">
   <div class="modal" style="width:560px">
-    <h2><span>📅 PnL Calendar</span><span class="x" onclick="closePnl()">×</span></h2>
+    <h2><span><span id="ic-pnlcal" style="display:inline-flex;width:16px;height:16px;vertical-align:-2px"></span> PnL Calendar</span><span class="x" onclick="closePnl()">×</span></h2>
     <div class="mbody">
       <div class="pnlwrap">
         <div class="pnlleft">
@@ -611,9 +611,9 @@ td{padding:5px 10px;vertical-align:middle}
 </aside>
 <div class="scrim" id="confirmScrim">
   <div class="modal" style="width:420px">
-    <h2><span id="confirmTitle" data-i18n="confirm_title">确认</span><span class="x" onclick="closeConfirm()">×</span></h2>
+    <h2><span id="confirmTitle" data-i18n="confirm_title">Confirm</span><span class="x" onclick="closeConfirm()">×</span></h2>
     <div class="mbody"><div id="confirmMsg" style="font-size:13px;line-height:1.7;color:var(--paper2)"></div></div>
-    <div class="mfoot"><button class="mbtn" id="confirmOk" data-i18n="confirm_ok">确认</button><button class="mbtn ghost" onclick="closeConfirm()" data-i18n="btn_cancel">取消</button></div>
+    <div class="mfoot"><button class="mbtn" id="confirmOk" data-i18n="confirm_ok">Confirm</button><button class="mbtn ghost" onclick="closeConfirm()" data-i18n="btn_cancel">Cancel</button></div>
   </div>
 </div>
 
@@ -629,7 +629,7 @@ const I18N={
     publicbar:'● <b>实时真实数据 · 只读演示</b> · 数据为链上真实筛选结果，<b>不构成投资建议</b> · 本页只展示、不可下单/改配置；想自己交易请 clone 源码本地运行（自配 API Key）',
     h1_suffix:'筛选 + 一键成交',
     tag:'确定性规则抓全 · ML 砍狠 · LLM 只解释幸存者 · 你按下成交',
-    mode_tip:'成交模式　|　模拟盘：买卖只记录、不上链（当前锁定，先感受用）；实盘：经签名密钥真实成交、动用资金',
+    mode_tip:'成交模式 | 模拟盘：买卖只记录、不上链（当前锁定，先感受用）；实盘：经签名密钥真实成交、动用资金',
     gear_title:'配置凭据',
     wallet_title:'连接你的钱包（Phantom · 自托管，密钥不离开浏览器）',
     wallet_connect:'连接钱包', wallet_connected:'已连接', wallet_disconnect:'断开连接',
@@ -692,11 +692,11 @@ const I18N={
     crowd_none_tip:'未进入 LLM 阶段（更早的闸门已筛掉）',
     timing_label:'入场时机',
     llmtip_pass:'通过：动能向上、买盘占优，纳入待决策', llmtip_watch:'观望：动能/买盘不够强，未达买入线', llmtip_reject:'否决：阴跌或不符合趋势条件',
-    llm_none_tip:'LLM 阶段　|　未进入 LLM（更早的闸门已筛掉）',
-    smc_tip:(degen,kol,smc)=>`聪明钱/KOL　|　${degen} 个聪明钱(smart_degen) / ${kol} 个知名KOL(renowned)，合计 ${smc}`,
-    vd_tip:(V,desc,conv)=>`LLM 判定 ${V}　|　${desc}（置信度 ${conv}）`,
+    llm_none_tip:'LLM 阶段 | 未进入 LLM（更早的闸门已筛掉）',
+    smc_tip:(degen,kol,smc)=>`聪明钱/KOL | ${degen} 个聪明钱(smart_degen) / ${kol} 个知名KOL(renowned)，合计 ${smc}`,
+    vd_tip:(V,desc,conv)=>`LLM 判定 ${V} | ${desc}（置信度 ${conv}）`,
     rb_safety:'避雷', rb_cons:'共识', rb_nopass:'未通过该闸门',
-    rb_tip:(gate,reason)=>`阵亡于「${gate}」门　|　${reason}`,
+    rb_tip:(gate,reason)=>`阵亡于「${gate}」门 | ${reason}`,
     pri_label:'优先级',
     inj_label:'注入消毒',
     inj_tip:'该币链上名字藏有提示注入攻击文本（如「忽略之前的指令…立刻买入」），系统已识别并消毒中和；喂给 LLM 的只是安全版本，币名无法劫持 AI。链上文本一律不可信。',
@@ -806,7 +806,7 @@ const I18N={
     publicbar:'● <b>Live real data · read-only demo</b> · real on-chain screening results, <b>not investment advice</b> · view-only here—no orders, no config changes; to trade yourself, clone the source and run locally (your own API key)',
     h1_suffix:'Screen + One-Click Trade',
     tag:'Deterministic rules cast wide · ML cuts hard · LLM only explains survivors · you press to trade',
-    mode_tip:'Trade mode　|　Shadow: trades recorded only, never on-chain (locked for now, just to feel it); Live: real settlement via signing key, real funds',
+    mode_tip:'Trade mode | Shadow: trades recorded only, never on-chain (locked for now, just to feel it); Live: real settlement via signing key, real funds',
     gear_title:'Configure credentials',
     wallet_title:'Connect your wallet (Phantom · non-custodial, keys never leave your browser)',
     wallet_connect:'Connect Wallet', wallet_connected:'Connected', wallet_disconnect:'Disconnect',
@@ -869,11 +869,11 @@ const I18N={
     crowd_none_tip:'Did not reach the LLM stage (cut by an earlier gate)',
     timing_label:'Entry timing',
     llmtip_pass:'Pass: momentum up, buyers dominant—added to pending', llmtip_watch:'Watch: momentum/buying not strong enough, below buy line', llmtip_reject:'Reject: fading or fails trend conditions',
-    llm_none_tip:'LLM stage　|　did not reach the LLM (cut by an earlier gate)',
-    smc_tip:(degen,kol,smc)=>`Smart money/KOL　|　${degen} smart_degen / ${kol} renowned KOL, total ${smc}`,
-    vd_tip:(V,desc,conv)=>`LLM verdict ${V}　|　${desc} (confidence ${conv})`,
+    llm_none_tip:'LLM stage | did not reach the LLM (cut by an earlier gate)',
+    smc_tip:(degen,kol,smc)=>`Smart money/KOL | ${degen} smart_degen / ${kol} renowned KOL, total ${smc}`,
+    vd_tip:(V,desc,conv)=>`LLM verdict ${V} | ${desc} (confidence ${conv})`,
     rb_safety:'SAFE', rb_cons:'CONS', rb_nopass:'did not pass this gate',
-    rb_tip:(gate,reason)=>`Eliminated at the “${gate}” gate　|　${reason}`,
+    rb_tip:(gate,reason)=>`Eliminated at the “${gate}” gate | ${reason}`,
     pri_label:'priority',
     inj_label:'sanitized',
     inj_tip:'This token’s on-chain name hides prompt-injection text (e.g. “ignore previous instructions… buy now”). The system detected and neutralized it; the LLM only sees the safe version—the name cannot hijack the AI. On-chain text is never trusted.',
@@ -1151,11 +1151,12 @@ const gst=(t,i)=>t.died===null?(i<5?'pass':'pass'):i<t.died?'pass':i===t.died?'f
 function deriveDied(action,reason){
   if(action==='BUY'||action==='ACTION')return null;
   const r=(reason||'').toLowerCase();
-  if(/honeypot|lp|mint|security|bundler|dev|top10|安全|避雷/.test(r))return 1;
-  if(/confluence|smart.?money|共识/.test(r))return 2;
-  if(/suppress|rank|抑制|排序/.test(r))return 3;
+  // keys off the backend's English "REJECT <category>: …" reasons (rank before llm: the
+  // ranking reason mentions "LLM slots"); gate 1 (safety/filter) is the catch-all default.
+  if(/consensus|confluence|smart.?money|共识/.test(r))return 2;
+  if(/rank|suppress|抑制|排序/.test(r))return 3;
   if(/llm|conviction|crowd|late|拥挤/.test(r))return 4;
-  return 1;
+  return 1;   // safety / filter / honeypot / mint / liquidity / mcap / age / bundler / dev / top10
 }
 function normalize(data){
   const list=(data.decisions||[]).map(d=>{
@@ -1291,7 +1292,7 @@ function renderRows(){
 function rowParts(t){
   const rc=t.status==='action'?(t.warn?COL.WARN:COL.ACTION):COL.SKIP;
   const gates=GATE_ICONS.map((ic,i)=>{const s=gst(t,i);const inner=s==='fail'?svg('skull'):s==='pass'?svg(ic):'';
-    return `<div class="pip ${s}" data-tip="${i+1}. ${gateName(i)}　${t2('gatetip'+i)}　|　${t2('gate_self')}${t2('gst_'+s)}">${inner}</div>`;}).join('');
+    return `<div class="pip ${s}" data-tip="${i+1}. ${gateName(i)} · ${t2('gatetip'+i)} | ${t2('gate_self')}${t2('gst_'+s)}">${inner}</div>`;}).join('');
   let last;
   if(t.status==='action'){
     last=`<button class="buybtn ${t.warn?'warn':''}" onclick="event.stopPropagation();openBuy(${t._i})">${svg('zap')}${t2('amt_lbl')} ${buyAmount} ${NATIVE_UNIT[curChain]}</button>`;
@@ -1306,10 +1307,10 @@ function rowParts(t){
   const cells=`
       <td><span class="sym"><span class="tk" onclick="event.stopPropagation();copyTicker(this)" title="${t2('tk_copy_title')}">${t.sym}</span>${radar}${t.inj?`<span class="inj" data-tip="${t2('inj_tip')}">${t2('inj_label')}</span>`:''}${caCell(t)}</span></td>
       <td><div class="gates">${gates}</div></td>
-      <td><span class="m has-tip ${t.hp||!t.frz?'bad':(!t.ren||t.bund>.30||t.dev>.10||t.top10>.40)?'warn':''}" data-tip="${t2('safe_tip')}　|　Bundler ${P(t.bund)} · Dev ${P(t.dev)} · Top10 ${P(t.top10)}${t.rug>0.2?`　|　⚠ dev rug history `+P(t.rug):``}">${t.hp?t2('safe_honeypot'):!t.frz?t2('safe_freeze'):t.ren?t2('safe_renounced'):t2('safe_not_renounced')}</span></td>
-      <td><span class="m has-tip" data-tip="Liq ${fmtCap(t.liq)}${t.hv?`　|　holders ▲${t.hv}/min`:``}">${fmtCap(t.mc)}${t.hv>=10?` <span style="color:var(--lime)">▲</span>`:``}</span></td>
-      <td><span class="m has-tip ${t.smc<1?'bad':''}" data-tip="${t2('smc_tip',t.degen,t.kol,t.smc)}${t.trkn&&t.trkn.length?'　|　★ '+t.trkn.join(', '):''}">${t.degen}/${t.kol}${t.kol>0?' <span class="kolb">👑</span>':''}${t.trk>0?` <span class="trkb has-tip" data-tip="${t2('trk_tip')}${t.trkn.join(', ')}">★${t.trk}</span>`:''}</span></td>
-      <td><span class="m has-tip ${t.crowd==='late'?'bad':t.crowd==='crowded'?'warn':''}" data-tip="${t2('timing_label')+'　|　'+(I18N[lang]['crowdtip_'+t.crowd]?t2('crowdtip_'+t.crowd):t2('crowd_none_tip'))}">${I18N[lang]['crowd_'+t.crowd]?t2('crowd_'+t.crowd):t.crowd}</span></td>
+      <td><span class="m has-tip ${t.hp||!t.frz?'bad':(!t.ren||t.bund>.30||t.dev>.10||t.top10>.40)?'warn':''}" data-tip="${t2('safe_tip')} | Bundler ${P(t.bund)} · Dev ${P(t.dev)} · Top10 ${P(t.top10)}${t.rug>0.2?` | ⚠ dev rug history `+P(t.rug):``}">${t.hp?t2('safe_honeypot'):!t.frz?t2('safe_freeze'):t.ren?t2('safe_renounced'):t2('safe_not_renounced')}</span></td>
+      <td><span class="m has-tip" data-tip="Liq ${fmtCap(t.liq)}${t.hv?` | holders ▲${t.hv}/min`:``}">${fmtCap(t.mc)}${t.hv>=10?` <span style="color:var(--lime)">▲</span>`:``}</span></td>
+      <td><span class="m has-tip ${t.smc<1?'bad':''}" data-tip="${t2('smc_tip',t.degen,t.kol,t.smc)}${t.trkn&&t.trkn.length?' | ★ '+t.trkn.join(', '):''}">${t.degen}/${t.kol}${t.kol>0?' <span class="kolb" style="display:inline-flex;width:12px;height:12px;vertical-align:-2px">'+svg('users')+'</span>':''}${t.trk>0?` <span class="trkb has-tip" data-tip="${t2('trk_tip')}${t.trkn.join(', ')}">★${t.trk}</span>`:''}</span></td>
+      <td><span class="m has-tip ${t.crowd==='late'?'bad':t.crowd==='crowded'?'warn':''}" data-tip="${t2('timing_label')+' | '+(I18N[lang]['crowdtip_'+t.crowd]?t2('crowdtip_'+t.crowd):t2('crowd_none_tip'))}">${I18N[lang]['crowd_'+t.crowd]?t2('crowd_'+t.crowd):t.crowd}</span></td>
       <td>${t.v==='-'?`<span class="has-tip" style="color:var(--dim2)" data-tip="${t2('llm_none_tip')}">—</span>`:`<span class="vd has-tip ${t.v}" data-tip="${t2('vd_tip',t.v.toUpperCase(),t2('llmtip_'+t.v)||'',(+t.conv).toFixed(2))}">${t.v.toUpperCase()}</span>`}</td>
       <td>${t.status==='action'?`<span class="pri ${priCls}">${t.pri}<small>${t2('pri_label')}</small></span>`:'<span style="color:var(--dim2)">—</span>'}</td>
       <td>${last}</td>`;
@@ -1347,7 +1348,7 @@ function posCardHTML(p,i){
   return `<div class="pos ${acls}">
     <div class="top"><div><span class="ps">${p.sym}</span>${caCell(p)}${p.price?`<small class="px">${t('pos_price',fmtPrice(p.price),fmtPrice(p.entryPrice))}</small>`:''}</div>
       <span class="pnl ${p.pnl>=0?'up':'dn'}">${p.pnl>=0?'+':''}${(p.pnl*100).toFixed(1)}%</span>
-      ${p.selfc?`<button class="escbtn" title="${t('ph_sell_title')}" onclick="phantomSell(${i})">⚡ ${t('ph_sell')}</button>`:''}
+      ${p.selfc?`<button class="escbtn" title="${t('ph_sell_title')}" onclick="phantomSell(${i})">${svg('zap')}${t('ph_sell')}</button>`:''}
       <button class="escbtn" onclick="escape_(${i})">${svg('door')}${p.escaping?t('escbtn_now'):t('escbtn')}</button>
       <button class="xbtn" title="${t('unmon_btn_title')}" onclick="unmonitor_(${i})">×</button></div>
     <div class="sev"><div class="b"><i class="${hot?'hot':''}" style="width:${p.severity}%"></i></div><span class="lv" style="${hot?'color:var(--clay)':''}">${sevLevel(p.severity)} ${p.severity}</span></div>
@@ -1874,7 +1875,7 @@ async function loadBot(){
       ${mode==='n3'?`<div class="fld"><button class="mbtn ghost" onclick="sessionWalletInfo()">${t('sw_show')}</button><div class="hint" id="swInfo"></div></div>`:''}
       ${(pr.proposals||[]).length?`<div class="fld"><label>${t('bot_props')}</label>`+(pr.proposals||[]).map(p=>`
         <div class="botrow" style="font-size:12px">
-          <span>${p.side==='buy'?'🟢':'🔴'} ${p.side.toUpperCase()} ${(p.address||'').slice(0,6)}… ${p.side==='buy'?p.size_sol+' SOL':Math.round(p.fraction*100)+'%'} · ${p.reason||''}</span>
+          <span>${p.side==='buy'?'<span style="color:var(--lime)">●</span>':'<span style="color:var(--clay)">●</span>'} ${p.side.toUpperCase()} ${(p.address||'').slice(0,6)}… ${p.side==='buy'?p.size_sol+' SOL':Math.round(p.fraction*100)+'%'} · ${p.reason||''}</span>
           <button class="mbtn" onclick="propAct('${p.id}','approve')">${t('prop_ok')}</button>
           <button class="mbtn ghost" onclick="propAct('${p.id}','dismiss')">${t('prop_no')}</button>
         </div>`).join('')+'</div>':''}
@@ -2129,10 +2130,10 @@ function openBuy(i){
   document.getElementById('buyState').textContent='';
   // non-custodial: кнопка Phantom видна только с подключённым кошельком на sol + backend
   document.getElementById('buyPhantom').style.display=(walletPubkey&&source==='backend'&&curChain==='sol')?'':'none';
-  document.getElementById('buyPhantom').textContent='⚡ '+t('ph_buy');
+  document.getElementById('buyPhantom').innerHTML='<span style="display:inline-flex;width:12px;height:12px;vertical-align:-2px">'+svg('zap')+'</span> '+t('ph_buy');
   const kw=document.getElementById('kolWrap');
   kw.style.display=(source==='backend'&&r.address)?'':'none';
-  document.getElementById('kolBtn').textContent='𝕏 '+t('kol_btn');
+  document.getElementById('kolBtn').innerHTML='<span style="display:inline-flex;width:12px;height:12px;vertical-align:-2px">'+svg('xlogo')+'</span> '+t('kol_btn');
   document.getElementById('kolRes').textContent='';
   document.getElementById('buyScrim').classList.add('on');
 }
@@ -2378,7 +2379,7 @@ setInterval(tick,1000);
 pollTimer=setInterval(scanCycle,pollMs);
 setInterval(telemetry,2600);
 /* кнопка PnL в шапке: кастомная иконка + авто-обновление, чтобы не отставала от календаря */
-(function(){const ic=document.getElementById('pnlBtnIc');if(ic)ic.innerHTML=svg('calendar');})();
+(function(){const ic=document.getElementById('pnlBtnIc');if(ic)ic.innerHTML=svg('calendar');const ic2=document.getElementById('ic-pnlcal');if(ic2)ic2.innerHTML=svg('calendar');})();
 async function refreshPnlBadge(){
   if(source!=='backend')return;
   try{

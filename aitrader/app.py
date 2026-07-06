@@ -469,7 +469,7 @@ class LiveGMGN(GMGNAdapter):
         """执行用户自定义的完整 gmgn-cli 命令（不经 shell，避免注入扩大）。"""
         parts = shlex.split(cmd_str)
         if parts[:1] != ["gmgn-cli"]:
-            raise RuntimeError("命令必须以 gmgn-cli 开头")
+            raise RuntimeError("Command must start with gmgn-cli")
         if "--raw" not in parts:
             parts.append("--raw")
         out = subprocess.run(parts, capture_output=True, text=True, timeout=25, env=self.env)
@@ -544,7 +544,7 @@ class LiveGMGN(GMGNAdapter):
             if w.get("chain") == self.chain and w.get("address"):
                 self._wallet_cache[self.chain] = w["address"]
                 return w["address"]
-        raise RuntimeError(f"未找到 {self.chain} 链绑定钱包（检查 API Key 绑定）")
+        raise RuntimeError(f"No bound wallet found for {self.chain} chain (check API Key binding)")
 
     def swap(self, from_wallet, input_token, output_token, amount=None,
              percent=None, slippage=0.01, condition_orders=None):
@@ -965,21 +965,21 @@ class LLMJudge:
         up5, up1h, buy = f.chg_5m, f.chg_1h, f.buy_ratio
         flags = []
         if f.sniper_count > 0:
-            flags.append(f"狙击钱包 {f.sniper_count}")
+            flags.append(f"Sniper wallets {f.sniper_count}")
         # 1) 阴跌：1h 明显跌且 5m 没反弹 → 不追
         if up1h <= CFG["momentum_reject_chg1h"] and up5 <= CFG["momentum_reject_chg5m"]:
-            flags.insert(0, "1h/5m 双跌，动能转弱")
+            flags.insert(0, "1h/5m both down, momentum weakening")
             return LLMVerdict("reject", 0.3, "fading", flags,
-                              f"正在阴跌（5m {up5:+.0%} / 1h {up1h:+.0%}），趋势向下，不追。")
+                              f"Bleeding lower (5m {up5:+.0%} / 1h {up1h:+.0%}), trend is down — not chasing.")
         # 2) 卖压主导 → 派发/接盘位（金狗 vs 接盘的分水岭：暴涨不看涨幅，看买盘撑不撑得住）
         if buy < CFG["buy_ratio_reject"]:
-            flags.insert(0, f"买占比仅 {buy:.0%}，卖压主导")
+            flags.insert(0, f"Buy ratio only {buy:.0%}, sell pressure dominant")
             return LLMVerdict("reject", round(min(0.5, 0.2 + buy), 2), "distributing", flags,
-                              f"卖压主导（买占比 {buy:.0%}），疑似拉高派发/接盘位，不追。")
+                              f"Sell pressure dominant (buy ratio {buy:.0%}), likely pump-and-distribution — not chasing.")
         # 3) 暴涨仅作高位风险标签，不再一票否决
         crowd = "late" if up1h >= 3.0 else ("early" if (up5 > 0 and up1h > 0) else "crowded")
         if crowd == "late":
-            flags.append(f"1h 已涨 {up1h:.0%}，高位追涨需谨慎")
+            flags.append(f"1h already up {up1h:.0%}, caution chasing at highs")
         s_mom = _clamp((up5 + 0.05) / 0.25)     # -5%→0, +20%→1
         s_buy = _clamp((buy - 0.45) / 0.20)     # 45%→0, 65%→1
         conv = 0.35 + 0.40 * s_mom + 0.20 * s_buy + (0.05 if up1h > 0 else 0.0)
@@ -988,9 +988,9 @@ class LLMJudge:
         conv = round(min(0.95, max(0.3, conv)), 2)
         # 买盘占优 + 5m 未走弱 → pass（即使暴涨/late，买盘撑得住就跟金狗）
         verdict = "pass" if (buy >= CFG["buy_ratio_pass"] and up5 > -0.02) else "watch"
-        thesis = (f"5m {up5:+.0%} / 1h {up1h:+.0%}，买占比 {buy:.0%}；"
-                  + ("高位但买盘仍占优，跟随金狗动能；" if crowd == "late" else "量价上行、买盘占优；")
-                  + f"{f.smart_degen} 聪明钱 + {f.renowned} KOL 在场。")
+        thesis = (f"5m {up5:+.0%} / 1h {up1h:+.0%}, buy ratio {buy:.0%}; "
+                  + ("elevated but buying still dominant, following the momentum; " if crowd == "late" else "price/volume rising, buying dominant; ")
+                  + f"{f.smart_degen} smart money + {f.renowned} KOL present.")
         return LLMVerdict(verdict, conv, crowd, flags, thesis)
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1053,7 +1053,7 @@ def position_size(conviction: float | None = None, liquidity: float | None = Non
     return round(min(size, CFG["max_per_trade_sol"]), 4)
 
 def exit_plan() -> dict:
-    tp = [f"+{int(g*100)}%→卖{int(p*100)}%" for g, p in CFG["tp_ladder"]]
+    tp = [f"+{int(g*100)}%→sell {int(p*100)}%" for g, p in CFG["tp_ladder"]]
     return dict(hard_sl=f"-{int(CFG['hard_stop_pct']*100)}%", tp_ladder=tp,
                 trailing=f"{int(CFG['trailing_pct']*100)}%")
 
@@ -1081,16 +1081,16 @@ class RiskManager:
     def gate(self, size_sol: float, n_positions: int, exposure: float):
         """组合级硬风控：返回 (allow, reason)。"""
         if self.halted:
-            return False, "BLOCK kill-switch 已触发"
+            return False, "BLOCK kill-switch triggered"
         if self.consec_losses >= CFG["kill_switch_consec_losses"]:
             self.halted = True
-            return False, "BLOCK kill-switch（连亏）"
+            return False, "BLOCK kill-switch (consecutive losses)"
         if self.realized_loss_today >= CFG["daily_loss_cap_sol"]:
-            return False, "BLOCK 当日亏损上限"
+            return False, "BLOCK daily loss cap"
         if n_positions >= CFG["max_concurrent_positions"]:
-            return False, f"BLOCK 已达最大并发持仓 ({CFG['max_concurrent_positions']})"
+            return False, f"BLOCK max concurrent positions reached ({CFG['max_concurrent_positions']})"
         if exposure + size_sol > CFG["max_total_exposure_sol"]:
-            return False, "BLOCK 超出总敞口上限"
+            return False, "BLOCK total exposure cap exceeded"
         return True, "ok"
 
 SUPPORTED_CHAINS = ("sol", "bsc", "base", "eth")
@@ -1263,7 +1263,7 @@ ST = get_session(DEFAULT_PUBKEY)    # 默认会话：兼容既有 ST.* 引用与
 def valid_chain(ch: str) -> str:
     ch = (ch or "").lower()
     if ch not in SUPPORTED_CHAINS:
-        raise HTTPException(400, f"不支持的链：{ch}")
+        raise HTTPException(400, f"Unsupported chain: {ch}")
     return ch
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1718,12 +1718,12 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
                            condition_orders=cond)
         except Exception as e:                       # gmgn-cli 报错(如缺签名密钥)→ 不建仓，回清晰错误
             log("BUY_FAIL", symbol, str(e))
-            raise HTTPException(502, f"链上买入失败：{e}")
+            raise HTTPException(502, f"On-chain buy failed: {e}")
         # swap 直接带错误码 → 失败，不记仓
         err = order.get("error_code") or order.get("error_status")
         if err:
             log("BUY_FAIL", symbol, str(err))
-            raise HTTPException(502, f"链上买入失败：{err}")
+            raise HTTPException(502, f"On-chain buy failed: {err}")
         oid = order.get("order_id"); h = order.get("hash") or ""
         status = order.get("status", "pending")
         # 轮询订单直到终态（最多 ~6s）；不再"提交即报成功"
@@ -1739,7 +1739,7 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         filled = status in ("confirmed", "processed", "successful")
         if status in ("failed", "expired"):          # 明确未成交 → 不记仓、回清晰错误
             log("BUY_FAIL", symbol, f"swap {status} {h}")
-            raise HTTPException(502, f"链上买入未成交（{status}）" + (f" · {h}" if h else ""))
+            raise HTTPException(502, f"On-chain buy not filled ({status})" + (f" · {h}" if h else ""))
         status_msg = ("Filled" if filled else "Submitted · pending") + (f" · {h}" if h else "")
     else:
         filled = False
@@ -1765,7 +1765,7 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
     s = s or ST
     idx = next((i for i, p in enumerate(s.positions) if p["address"] == address), None)
     if idx is None:
-        raise HTTPException(404, "未找到该持仓")
+        raise HTTPException(404, "Position not found")
     p = s.positions[idx]
     pchain = p.get("chain", "sol")               # 用持仓自带链，避免用错链的 adapter/原生币
     frac = max(0.0, min(1.0, float(fraction)))
@@ -1780,7 +1780,7 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
                    output_token=native_token(pchain), percent=pct, slippage=0.02)
         except Exception as e:                       # 卖出失败→保留持仓，回清晰错误
             log("SELL_FAIL", p["symbol"], str(e))
-            raise HTTPException(502, f"链上卖出失败：{e}")
+            raise HTTPException(502, f"On-chain sell failed: {e}")
     pnl = p.get("pnl", 0)
     sold_sol = round(p["size_sol"] * frac, 6)        # 本次了结的本金（按比例）
     tag = (f" · {reason}" if reason else "")
@@ -1814,9 +1814,9 @@ def do_unmonitor(address: str, s: UserSession | None = None) -> dict:
     s = s or ST
     idx = next((i for i, p in enumerate(s.positions) if p["address"] == address), None)
     if idx is None:
-        raise HTTPException(404, "未找到该持仓")
+        raise HTTPException(404, "Position not found")
     sym = s.positions[idx]["symbol"]
-    log("UNMONITOR", sym, "取消监控（未卖出）", mode=s.mode)
+    log("UNMONITOR", sym, "Monitoring canceled (not sold)", mode=s.mode)
     s.positions.pop(idx)
     s.save_positions()
     return dict(ok=True, symbol=sym)
@@ -1884,12 +1884,12 @@ class ModeIn(BaseModel):
 def _block_if_public():
     """公开演示为只读：所有写操作（含触发 CLI / 改配置 / 买卖）一律拒绝。"""
     if PUBLIC_DEMO:
-        raise HTTPException(403, "公开演示为只读模式，已禁用写操作")
+        raise HTTPException(403, "Public demo is read-only; write operations are disabled")
 
 def _block_if_not_admin():
     """凭据写入仅限运营者：外部交易者无权改服务器 .env（运营密钥服务器侧自动加载）。"""
     if not ADMIN_MODE:
-        raise HTTPException(403, "凭据由服务器管理，用户无需也无权配置")
+        raise HTTPException(403, "Credentials are managed by the server; users cannot configure them")
 
 # 多用户：前端连上钱包后在每个请求带 X-Wallet: <pubkey>；不带 → 默认会话(local)。
 # 读接口仍只按 pubkey 分区；【секреты и построение tx】дополнительно требуют X-Auth —
@@ -1966,7 +1966,7 @@ def api_config(cfg: ConfigIn):
     env = load_env()
     # api_key 留空则沿用环境已有的 key（避免空值覆盖、避免每次重填）
     if not cfg.api_key and not env.get("GMGN_API_KEY"):
-        raise HTTPException(400, "缺少 api_key（环境也没有）")
+        raise HTTPException(400, "Missing api_key (not set in environment either)")
     # 只要这次提交了 api_key 或 signing_key 之一，就落盘；各字段留空=沿用环境已有，不空值覆盖。
     # （支持「只补签名密钥、API Key 留空」的常见流程）
     if cfg.api_key or cfg.signing_key:
@@ -2018,10 +2018,10 @@ def api_settings(s: SettingsIn):
             try:
                 parts = shlex.split(cmd)
             except ValueError as e:
-                raise HTTPException(400, f"命令解析失败：{e}")
+                raise HTTPException(400, f"Command parse failed: {e}")
             # 安全护栏：只允许热榜命令，禁止借此执行任意命令
             if parts[:3] != ["gmgn-cli", "market", "trending"]:
-                raise HTTPException(400, "命令必须以 `gmgn-cli market trending` 开头")
+                raise HTTPException(400, "Command must start with `gmgn-cli market trending`")
             MK.set_trending_cmd(ch, cmd)         # set_trending_cmd 内已落盘
             MK._trending_cache.pop(ch, None)     # 命令变了，作废该链缓存
     return dict(ok=True, trending_cmd=MK.get_trending_cmd(ch))
@@ -2051,7 +2051,7 @@ def api_filters(patch: dict, x_wallet: str | None = WalletHeader):
     """合并写入过滤器（只收已知键，类型清洗，落盘持久）。每用户独立。"""
     _block_if_public()
     if not isinstance(patch, dict):
-        raise HTTPException(400, "请求体须为对象")
+        raise HTTPException(400, "Request body must be an object")
     s = get_session(x_wallet)
     with s.lock:
         flt = s.set_filters(patch)
@@ -2377,7 +2377,7 @@ def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader):
         sell_fn=_bot_sell_fn(sess),
         positions_fn=lambda: sess.positions, risk_cfg=CFG, lock=sess.lock,
         halted_fn=lambda: sess.risk.halted or sess.risk.realized_loss_today >= CFG["daily_loss_cap_sol"])
-    log("BOT", "ABC", "启动自主回路" if started else "已在运行（忽略重复启动）", mode=sess.mode)
+    log("BOT", "ABC", "Autonomous loop started" if started else "Already running (duplicate start ignored)", mode=sess.mode)
     return dict(ok=True, started=started, **sess.bot.status())
 
 @app.post("/api/bot/stop")
@@ -2386,7 +2386,7 @@ def api_bot_stop(x_wallet: str | None = WalletHeader):
     _block_if_public()
     sess = get_session(x_wallet)
     sess.bot.stop()
-    log("BOT", "ABC", "停止自主回路", mode=sess.mode)
+    log("BOT", "ABC", "Autonomous loop stopped", mode=sess.mode)
     return dict(ok=True, **sess.bot.status())
 
 @app.post("/api/bot/config")
@@ -2673,7 +2673,7 @@ def index():
     f = STATIC_DIR / "index.html"
     if f.exists():
         return FileResponse(str(f))
-    return JSONResponse(dict(msg="把 dashboard 存为 static/index.html 后刷新"), status_code=200)
+    return JSONResponse(dict(msg="Save the dashboard as static/index.html and refresh"), status_code=200)
 
 if __name__ == "__main__":
     import uvicorn

@@ -77,7 +77,7 @@ def realized(records: list[dict], hard_stop_pct: float | None = None) -> dict:
             total_sol += p * float(size)
     n = len(pnls)
     if n == 0:
-        return dict(trades=0, note="无平仓记录可复盘（先在 SHADOW 跑出 SELL 再看真账）")
+        return dict(trades=0, note="No closed trades to review (run SELL under SHADOW first, then check real results)")
     wins = [x for x in pnls if x > 0]
     rs = [x / hs for x in pnls]
     avg_pnl = sum(pnls) / n
@@ -112,7 +112,7 @@ def paper(records: list[dict], trig: dict | None = None) -> dict:
     用于上线前判断"这套打法在历史候选上会不会频繁触发、预期 R 是否为正"。非实盘业绩。"""
     feats = [f for f in (_features_of(r) for r in records) if f]
     if not feats:
-        return dict(candidates=0, note="日志中无特征快照（运行 screen_once 后再复盘）")
+        return dict(candidates=0, note="No feature snapshots in log (run screen_once first, then review)")
     sigs = [strategy.evaluate(f, trig) for f in feats]
     trig_sigs = [s for s in sigs if s.triggered]
     n = len(sigs)
