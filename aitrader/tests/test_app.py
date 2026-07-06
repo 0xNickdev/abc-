@@ -864,6 +864,59 @@ class TestSelfCustodyLive:
         assert r.status_code == 409
 
 
+# ── Потолки размера одной сделки по режимам исполнения:
+#    ручной 0.5 (размер выбирает человек), полуавтомат N1/N2 0.1, автопилот N3 0.05.
+#    Подкрутка: env ABC_MAX_TRADE_SOL / ABC_BOT_MAX_TRADE_SOL / ABC_AUTO_MAX_TRADE_SOL ──
+class TestPerModeTradeCaps:
+    ADDR = "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        return _mu_client(tmp_path, monkeypatch)
+
+    def test_defaults(self):
+        assert appmod.CFG["max_per_trade_sol"] == 0.5
+        assert appmod.CFG["bot_max_per_trade_sol"] == 0.1
+        assert appmod.CFG["auto_max_per_trade_sol"] == 0.05
+
+    def test_manual_buy_capped_but_size_is_users_choice(self, client):
+        # выше ручного потолка → жёсткий блок гейта
+        r = client.post("/api/buy", json={"address": self.ADDR, "size_sol": 0.6, "chain": "sol"})
+        assert r.status_code == 409 and "per-trade cap" in r.json()["detail"]
+        # в пределах потолка человек волен выбрать любой размер
+        assert client.post("/api/buy", json={"address": self.ADDR, "size_sol": 0.4,
+                                             "chain": "sol"}).status_code == 200
+
+    def test_semiauto_n2_clamped_to_bot_cap(self, client, monkeypatch):
+        sess = appmod.get_session("CapWalletN2xxxx")
+        seen = {}
+        monkeypatch.setattr(appmod, "do_buy",
+                            lambda ch, a, sz, s=None: seen.update(size=sz) or dict(ok=True))
+        appmod._bot_buy_fn(sess)("sol", "ADDRN2", 0.4)      # дефолтный режим бота = n2
+        assert seen["size"] == appmod.CFG["bot_max_per_trade_sol"]
+
+    def test_n1_proposal_clamped_to_bot_cap(self, client):
+        sess = appmod.get_session("CapWalletN1xxxx")
+        sess.bot.cfg["mode"] = "n1"
+        appmod._bot_buy_fn(sess)("sol", "ADDRN1", 0.4)
+        assert sess.proposals[0]["size_sol"] == appmod.CFG["bot_max_per_trade_sol"]
+
+    def test_n3_autopilot_clamped_to_auto_cap(self, client, monkeypatch):
+        sess = appmod.get_session("CapWalletN3xxxx")
+        sess.bot.cfg["mode"] = "n3"
+        seen = {}
+        monkeypatch.setattr(appmod, "do_buy",
+                            lambda ch, a, sz, s=None: seen.update(size=sz) or dict(ok=True))
+        appmod._bot_buy_fn(sess)("sol", "ADDRN3", 0.4)      # замок закрыт → бумажный fallback
+        assert seen["size"] == appmod.CFG["auto_max_per_trade_sol"]
+
+    def test_status_exposes_caps(self, client):
+        caps = client.get("/api/status").json()["caps"]
+        assert caps == dict(manual=appmod.CFG["max_per_trade_sol"],
+                            bot=appmod.CFG["bot_max_per_trade_sol"],
+                            auto=appmod.CFG["auto_max_per_trade_sol"])
+
+
 # ── Этап 6: режимы бота N1 (предложения) / N2 (полуавтомат) ──
 class TestBotModes:
     ADDR = "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"

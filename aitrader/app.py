@@ -88,7 +88,13 @@ CFG = {
     "equity_sol": 10.0,
     "risk_per_trade": 0.01,
     "hard_stop_pct": 0.35,
-    "max_per_trade_sol": 0.5,
+    # Потолки размера ОДНОЙ сделки по режимам исполнения (решение юзера, 2026-07-06):
+    # ручной клик — 0.5 (размер выбирает человек, это только потолок); полуавтомат
+    # (бот N1-предложения / N2) — 0.1; автопилот N3 — 0.05 «для начала, потом подкрутим».
+    # Подкрутка без кода: env ABC_MAX_TRADE_SOL / ABC_BOT_MAX_TRADE_SOL / ABC_AUTO_MAX_TRADE_SOL.
+    "max_per_trade_sol": float(os.getenv("ABC_MAX_TRADE_SOL", "0.5") or 0.5),
+    "bot_max_per_trade_sol": float(os.getenv("ABC_BOT_MAX_TRADE_SOL", "0.1") or 0.1),
+    "auto_max_per_trade_sol": float(os.getenv("ABC_AUTO_MAX_TRADE_SOL", "0.05") or 0.05),
     "max_total_exposure_sol": 1.0,
     "max_concurrent_positions": 20,   # 感受阶段放宽（SHADOW 不动真钱）；真实上线前按纪律调回（如 2~3）
     "daily_loss_cap_sol": 0.5,
@@ -1108,6 +1114,8 @@ class RiskManager:
             return False, "BLOCK kill-switch (consecutive losses)"
         if self.realized_loss_today >= CFG["daily_loss_cap_sol"]:
             return False, "BLOCK daily loss cap"
+        if size_sol > CFG["max_per_trade_sol"]:
+            return False, f"BLOCK size above per-trade cap ({CFG['max_per_trade_sol']} SOL)"
         if n_positions >= CFG["max_concurrent_positions"]:
             return False, f"BLOCK max concurrent positions reached ({CFG['max_concurrent_positions']})"
         if exposure + size_sol > CFG["max_total_exposure_sol"]:
@@ -1990,6 +1998,9 @@ def api_status(x_wallet: str | None = WalletHeader):
                 has_key=bool(load_env().get("GMGN_API_KEY")),
                 trading_locked=LIVE_TRADING_DISABLED, public_demo=PUBLIC_DEMO,
                 admin=ADMIN_MODE,
+                caps=dict(manual=CFG["max_per_trade_sol"],
+                          bot=CFG["bot_max_per_trade_sol"],
+                          auto=CFG["auto_max_per_trade_sol"]),
                 trending_cmd=MK.get_trending_cmd(MK.chain))
 
 @app.post("/api/config")
@@ -2354,7 +2365,7 @@ def _n3_execute(sess: UserSession, side: str, chain: str, address: str,
     kp = sessionwallet.keypair_for(sess.session_key_path())
     spk = str(kp.pubkey())
     if side == "buy":
-        size_sol = min(size_sol, CFG["max_per_trade_sol"])
+        size_sol = min(size_sol, CFG["auto_max_per_trade_sol"])   # автопилот: самый строгий потолок
         built = execution.build_buy(spk, address, size_sol)
         sig = sessionwallet.sign_and_send(built["tx"], kp)
         g = MK.adapter_for("sol")
@@ -2383,9 +2394,14 @@ def _n3_execute(sess: UserSession, side: str, chain: str, address: str,
     return do_sell(address, fraction, f"N3 · tx {sig[:16]}… · {reason or ''}", sess)
 
 def _bot_buy_fn(sess: UserSession):
-    """buy-колбэк бота: режим читается на каждом вызове — переключение на лету."""
+    """buy-колбэк бота: режим читается на каждом вызове — переключение на лету.
+    Размер зажимается потолком РЕЖИМА: N1/N2 (полуавтомат) ≤ bot_max_per_trade_sol,
+    N3 (автопилот) ≤ auto_max_per_trade_sol. Ручной потолок (max_per_trade_sol) — только
+    для кликов человека и всё равно проверяется в risk.gate."""
     def fn(chain, address, size_sol):
         mode = sess.bot.cfg.get("mode")
+        cap = CFG["auto_max_per_trade_sol"] if mode == "n3" else CFG["bot_max_per_trade_sol"]
+        size_sol = round(min(size_sol, cap), 4)
         if mode == "n1":
             _propose(sess, "buy", chain, address, size_sol=size_sol, reason="вход по стратегии")
             return dict(ok=True, proposed=True)

@@ -519,6 +519,7 @@ td{padding:5px 10px;vertical-align:middle}
     <div class="mbody">
       <div class="fld"><label data-i18n="buy_size_label">Buy amount (computed by fixed-fraction; adjustable)</label>
         <div class="szrow"><input id="buySize" type="number" step="0.0001" min="0"><span class="unit">SOL</span></div>
+        <div class="hint" id="buyCapHint"></div>
         <div class="hint" data-i18n="buy_size_hint">Size = risk amount / stop distance. The LLM never sets the number.</div>
       </div>
       <div class="exitplan" id="buyExit"></div>
@@ -709,7 +710,8 @@ const I18N={
     strat_active:'✓ 当前使用', strat_use:'使用此策略', strat_apply:'并入过滤器预设',
     strat_applied:'策略预设已并入过滤器', strat_selected:'策略已切换',
     bot_on:'机器人运行中', bot_off:'机器人已停止', bot_start:'▶ 启动机器人', bot_stop:'■ 停止机器人',
-    bot_save:'保存参数', bot_hint:'自动执行回路：只买【过全部闸门+策略触发】的候选；纸面优先，LIVE 需另行解锁。',
+    bot_save:'保存参数', bot_hint:(b,a)=>`自动执行回路：只买【过全部闸门+策略触发】的候选；纸面优先，LIVE 需另行解锁。单笔上限：半自动 N1/N2 ≤ ${b} SOL · 自动驾驶 N3 ≤ ${a} SOL。`,
+    buy_cap_hint:(m)=>`手动单笔上限 ${m} SOL（金额自选）`,
     bot_stats:(t,b,s,bl)=>`轮次 ${t} · 买 ${b} · 卖 ${s} · 风控拦截 ${bl}`,
     bot_f_max_new_per_tick:'每轮最多新开仓', bot_f_poll_s:'轮询间隔(秒)', bot_f_escape_severity_exit:'逃生严重度≥即清仓',
     bot_f_trail_activate_pct:'浮盈≥启用移动止盈', bot_f_require_abc_trigger:'仅策略触发才建仓', bot_f_mode:'模式',
@@ -888,7 +890,8 @@ const I18N={
     strat_active:'✓ active', strat_use:'Use this strategy', strat_apply:'Merge preset into filters',
     strat_applied:'Strategy preset merged into filters', strat_selected:'Strategy switched',
     bot_on:'Bot running', bot_off:'Bot stopped', bot_start:'▶ Start bot', bot_stop:'■ Stop bot',
-    bot_save:'Save params', bot_hint:'Autonomous loop: buys only candidates passing all gates + strategy trigger; paper-first, LIVE needs separate unlock.',
+    bot_save:'Save params', bot_hint:(b,a)=>`Autonomous loop: buys only candidates passing all gates + strategy trigger; paper-first, LIVE needs separate unlock. Per-trade caps: semi-auto N1/N2 ≤ ${b} SOL · autopilot N3 ≤ ${a} SOL.`,
+    buy_cap_hint:(m)=>`Manual per-trade cap ${m} SOL (you choose the size)`,
     bot_stats:(t,b,s,bl)=>`ticks ${t} · buys ${b} · sells ${s} · risk-blocked ${bl}`,
     bot_f_max_new_per_tick:'Max new entries/tick', bot_f_poll_s:'Poll interval (s)', bot_f_escape_severity_exit:'Exit at escape severity ≥',
     bot_f_trail_activate_pct:'Trailing activates at PnL ≥', bot_f_require_abc_trigger:'Only strategy-triggered entries', bot_f_mode:'Mode',
@@ -1892,10 +1895,11 @@ async function loadBot(){
           :`<div class="ff"><label>${t('bot_f_'+k)}</label><input type="number" step="any" id="bot_${k}" value="${v}"></div>`;
       }).join('')}</div>
       <div class="scbtns"><button class="mbtn ghost" onclick="botSaveCfg()">${t('bot_save')}</button></div>
-      <div class="hint">${t('bot_hint')}</div>`;
+      <div class="hint">${t('bot_hint',TRADE_CAPS.bot,TRADE_CAPS.auto)}</div>`;
   }catch(e){box.innerHTML='<div class="hint">'+t('pipe_be_off')+'</div>';}
 }
 let _BOTPROPS=[];   // последняя очередь N1-предложений (нужна propAct для Phantom-исполнения)
+let TRADE_CAPS={manual:0.5,bot:0.1,auto:0.05};   // потолки/сделку по режимам; обновляется из /api/status
 async function botSetMode(m){
   try{
     const r=await fetch(API+'/api/bot/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:m})});
@@ -2138,7 +2142,8 @@ let buyIdx=-1;
 function openBuy(i){
   buyIdx=i;const r=T[i];
   document.getElementById('buySym').textContent=r.sym;
-  document.getElementById('buySize').value=buyAmount;
+  const bsz=document.getElementById('buySize');bsz.value=buyAmount;bsz.max=TRADE_CAPS.manual;
+  document.getElementById('buyCapHint').textContent=t('buy_cap_hint',TRADE_CAPS.manual);
   document.getElementById('buyExit').innerHTML=t('buy_exit_html',exitOf(r),thesisOf(r));
   const rw=document.getElementById('buyRiskWarn');
   if(r.warn){rw.style.display='block';rw.className='mwarn danger';rw.textContent=t('buy_riskwarn');}
@@ -2443,6 +2448,7 @@ async function autoConnect(){
   try{
     const r=await fetch(API+'/api/status'); if(!r.ok)throw 0;
     const d=await r.json(); beReady=!!d.has_key; tradingLocked=!!d.trading_locked;
+    if(d.caps)TRADE_CAPS=d.caps;   // потолки размера сделки по режимам (сервер — источник истины)
     if(d.admin){document.body.classList.add('admin');}   // 运营者模式：显示凭据面板（外部用户不显示）
     if(d.public_demo){
       // 公开只读演示：后端定时广播真实筛选缓存。锁定 UI 为只读，链跟随后端。
