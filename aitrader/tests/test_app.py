@@ -742,6 +742,25 @@ class TestWalletAuth:
         g = client.get("/api/twitter/config").json()
         assert g == {"enabled": True, "has_key": True}   # сам bearer наружу не уходит
 
+    def test_kol_check_uses_getxapi_without_bearer(self, client, monkeypatch):
+        # личный Bearer не настроен, но у оператора есть GETXAPI_KEY → работает через него
+        monkeypatch.setattr(appmod.xapi, "key", lambda: "OPKEY")
+        monkeypatch.setattr(appmod.xapi, "ca_mentions",
+                            lambda ca: dict(ok=True, count=3, authors=[], source="getxapi"))
+        d = client.get("/api/kol/check?address=CAZ")
+        assert d.status_code == 200 and d.json()["count"] == 3
+
+    def test_kol_check_falls_back_when_x_tier_rejects(self, client, monkeypatch):
+        # Bearer есть, но free-тариф X отклоняет recent search → фоллбэк на getxapi
+        client.post("/api/twitter/config", json={"enabled": True, "bearer": "FREE_TIER_TOKEN"})
+        monkeypatch.setattr(appmod.kol, "mentions",
+                            lambda ca, b: dict(ok=False, error="auth", detail="tier"))
+        monkeypatch.setattr(appmod.xapi, "key", lambda: "OPKEY")
+        monkeypatch.setattr(appmod.xapi, "ca_mentions",
+                            lambda ca: dict(ok=True, count=2, authors=[], source="getxapi"))
+        d = client.get("/api/kol/check?address=CAZ").json()
+        assert d["ok"] is True and d["count"] == 2 and d["source"] == "getxapi"
+
     def test_kol_check_needs_enabled_then_uses_module(self, client, monkeypatch):
         assert client.get("/api/kol/check?address=CA1").status_code == 400
         client.post("/api/twitter/config", json={"enabled": True, "bearer": "tok"})

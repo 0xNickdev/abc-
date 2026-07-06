@@ -2689,12 +2689,21 @@ def api_kol_check(address: str, x_wallet: str | None = WalletHeader,
     # его же токен из default — это один человек. Чужим кошелькам fallback не даём.
     if not (tw.get("enabled") and tw.get("bearer")) and _is_admin(sess, x_auth):
         tw = ST.twitter
-    if not (tw.get("enabled") and tw.get("bearer")):
-        raise HTTPException(400, "Twitter is not connected — enable it in the KOL/X settings tab")
-    try:
-        res = kol.mentions(address.strip(), tw["bearer"])
-    except Exception as e:
-        raise HTTPException(502, f"Twitter API: {e}")
+    bearer = (tw.get("bearer") or "") if tw.get("enabled") else ""
+    if bearer:
+        try:
+            res = kol.mentions(address.strip(), bearer)
+        except Exception as e:
+            raise HTTPException(502, f"Twitter API: {e}")
+        # free-тариф X не даёт recent search (401/403) → операторский getxapi, если настроен
+        if res.get("error") == "auth" and xapi.key():
+            res = xapi.ca_mentions(address.strip())
+    elif xapi.key():
+        # личный Bearer не обязателен вовсе: у оператора есть getxapi-ключ
+        res = xapi.ca_mentions(address.strip())
+    else:
+        raise HTTPException(400, "Twitter is not connected — add a Bearer in the KOL/X tab "
+                                 "(or set GETXAPI_KEY on the server)")
     if res.get("ok") and res.get("authors"):
         try:
             price = MK.adapter_for("sol").token_price(address.strip())

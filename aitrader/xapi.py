@@ -114,6 +114,48 @@ def reuse_check(ca: str, username: str) -> dict:
     return payload
 
 
+def ca_mentions(ca: str) -> dict:
+    """KOL-fallback: свежие упоминания CA через getxapi advanced_search (ключ ОПЕРАТОРА),
+    когда личный Twitter Bearer отсутствует или отклонён (free-тариф X не даёт recent
+    search). Форма ответа = kol.mentions: {ok, count, authors[{username, followers,
+    verified}]} — фронт и рейтинг KOL работают без изменений."""
+    api_key = key()
+    if not api_key:
+        return dict(ok=False, error="no_key", detail="GETXAPI_KEY not set")
+    ca = (ca or "").strip()
+    ck = ("kol", hash(api_key) & 0xFFFF, ca)
+    hit = _cache.get(ck)
+    if hit and time.monotonic() - hit[0] < TTL:
+        return dict(hit[1], cached=True)
+    try:
+        j = _get("/twitter/tweet/advanced_search", {"q": ca, "product": "Latest"}, api_key)
+        if j.get("_err"):
+            return dict(ok=False, error=j["_err"], detail=f"getxapi: {j['_err']}")
+    except Exception as e:
+        return dict(ok=False, error="net", detail=f"getxapi: {e}")
+    seen, authors, n = set(), [], 0
+    for tw in _tweet_rows(j):
+        if not isinstance(tw, dict):
+            continue
+        n += 1
+        u = tw.get("author") or tw.get("user") or {}
+        name = str(u.get("userName") or u.get("username") or u.get("screen_name") or "").lstrip("@")
+        if not name or name.lower() in seen:
+            continue
+        seen.add(name.lower())
+        try:
+            followers = int(u.get("followers") or u.get("followersCount")
+                            or u.get("followers_count") or 0)
+        except (TypeError, ValueError):
+            followers = 0
+        authors.append(dict(username=name, followers=followers,
+                            verified=bool(u.get("isBlueVerified") or u.get("verified"))))
+    authors.sort(key=lambda a: -a["followers"])
+    payload = dict(ok=True, count=n, authors=authors[:5], source="getxapi", cached=False)
+    _cache[ck] = (time.monotonic(), payload)
+    return payload
+
+
 MEMORY_LOL = "https://api.memory.lol/v1/tw/"
 _hist_cache: dict[str, tuple] = {}
 
