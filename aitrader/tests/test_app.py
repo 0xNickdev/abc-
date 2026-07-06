@@ -567,10 +567,11 @@ class TestMultiUserSessions:
         appmod.SESSIONS.pop("WalletAAAA1111")     # имитация рестарта: кэш сессий пуст → чтение с диска
         assert client.get("/api/filters", headers=self.H_A).json()["filters"]["min_liquidity"] == 777
 
-    def test_mode_isolated_per_wallet(self, client, monkeypatch):
-        monkeypatch.setattr(appmod, "LIVE_TRADING_DISABLED", False)
-        assert client.post("/api/mode", json={"mode": "LIVE"}, headers=self.H_A).json()["mode"] == "LIVE"
-        assert client.get("/api/status", headers=self.H_A).json()["mode"] == "LIVE"
+    def test_mode_isolated_per_wallet(self, client):
+        # кошельковая сессия: LIVE = self-custody → не требует env-замка, но требует входа подписью
+        _, ha = _wallet_auth(client)
+        assert client.post("/api/mode", json={"mode": "LIVE"}, headers=ha).json()["mode"] == "LIVE"
+        assert client.get("/api/status", headers=ha).json()["mode"] == "LIVE"
         assert client.get("/api/status", headers=self.H_B).json()["mode"] == "SHADOW"
         assert client.get("/api/status").json()["mode"] == "SHADOW"
 
@@ -789,6 +790,78 @@ class TestTxEndpoints:
             headers=headers)
         assert r2.status_code == 200 and r2.json()["closed"] is True
         assert client.get("/api/positions", headers=headers).json()["positions"] == []
+
+
+# ── Self-custody LIVE: кошельковая сессия торгует своим кошельком (Phantom),
+#    серверный env-замок (ENABLE_LIVE_TRADING) её не касается и не требуется ──
+class TestSelfCustodyLive:
+    ADDR = "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        return _mu_client(tmp_path, monkeypatch)
+
+    def test_wallet_live_without_env_unlock(self, client):
+        # env-замок закрыт (дефолт) — кошелёк всё равно может в LIVE (self-custody)
+        assert appmod.LIVE_TRADING_DISABLED is True
+        _, h = _wallet_auth(client)
+        r = client.post("/api/mode", json={"mode": "LIVE"}, headers=h).json()
+        assert r["mode"] == "LIVE" and r["self_custody"] is True
+
+    def test_wallet_live_requires_auth_shadow_does_not(self, client):
+        # включение LIVE без входа подписью → 401; выключение (SHADOW) — всегда свободно
+        h = {"X-Wallet": "NoAuthWallet111"}
+        assert client.post("/api/mode", json={"mode": "LIVE"}, headers=h).status_code == 401
+        assert client.post("/api/mode", json={"mode": "SHADOW"}, headers=h).json()["mode"] == "SHADOW"
+
+    def test_default_session_still_env_locked(self, client):
+        # локальная/операторская сессия: LIVE только при открытом env-замке (как раньше)
+        assert client.post("/api/mode", json={"mode": "LIVE"}).json()["mode"] == "SHADOW"
+
+    def test_wallet_mode_persists_across_restart(self, client):
+        pk, h = _wallet_auth(client)
+        client.post("/api/mode", json={"mode": "LIVE"}, headers=h)
+        appmod.SESSIONS.pop(pk)          # имитация рестарта бэкенда: сессия пересоздаётся
+        assert client.get("/api/status", headers=h).json()["mode"] == "LIVE"
+        client.post("/api/mode", json={"mode": "SHADOW"}, headers=h)
+        appmod.SESSIONS.pop(pk)
+        assert client.get("/api/status", headers=h).json()["mode"] == "SHADOW"
+
+    def test_wallet_live_buy_rejected_toward_phantom(self, client):
+        # кошелёк в LIVE: /api/buy (бумажный/операторский путь) → честный 400 в сторону Phantom
+        _, h = _wallet_auth(client)
+        client.post("/api/mode", json={"mode": "LIVE"}, headers=h)
+        r = client.post("/api/buy", json={"address": self.ADDR, "size_sol": 0.1, "chain": "sol"},
+                        headers=h)
+        assert r.status_code == 400 and "Phantom" in r.json()["detail"]
+        # в SHADOW бумажная запись работает как раньше
+        client.post("/api/mode", json={"mode": "SHADOW"}, headers=h)
+        assert client.post("/api/buy", json={"address": self.ADDR, "size_sol": 0.1, "chain": "sol"},
+                           headers=h).status_code == 200
+
+    def test_paper_sell_refused_for_self_custody_position(self, client):
+        # self_custody позицию нельзя закрыть «бумажно»: только Wallet sell (Phantom) / Unmonitor
+        pk, h = _wallet_auth(client)
+        client.post("/api/tx/confirm", json={
+            "address": self.ADDR, "side": "buy", "size_sol": 0.1,
+            "token_amount": 5, "signature": "SIG", "symbol": "CLEANCAT"}, headers=h)
+        r = client.post("/api/sell", json={"address": self.ADDR}, headers=h)
+        assert r.status_code == 400 and "Wallet sell" in r.json()["detail"]
+        # Unmonitor (без продажи) остаётся доступен
+        assert client.post("/api/unmonitor", json={"address": self.ADDR},
+                           headers=h).status_code == 200
+
+    def test_tx_build_respects_risk_gate(self, client, monkeypatch):
+        # реальная покупка через tx/build проходит тот же портфельный риск-гейт, что и do_buy
+        pk, h = _wallet_auth(client)
+        sess = appmod.get_session(pk)
+        sess.positions.append(dict(symbol="X", address="XADDR", size_sol=appmod.CFG["max_total_exposure_sol"],
+                                   pnl=0.0, cycles=0, entry={}, chain="sol"))
+        monkeypatch.setattr(appmod.execution, "build_buy",
+                            lambda *a, **k: (_ for _ in ()).throw(AssertionError("gate must block before build")))
+        r = client.post("/api/tx/build", json={"address": "A", "side": "buy", "size_sol": 0.1},
+                        headers=h)
+        assert r.status_code == 409
 
 
 # ── Этап 6: режимы бота N1 (предложения) / N2 (полуавтомат) ──

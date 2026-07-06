@@ -418,6 +418,27 @@ def save_user_twitter(pubkey: str, cfg: dict):
     except Exception:
         pass
 
+def load_user_mode(pubkey: str) -> str:
+    """Режим кошельковой сессии (SHADOW|LIVE) с диска: переживает редеплой/рестарт.
+    Безопасно: LIVE у кошельковой сессии = self-custody, каждая сделка всё равно
+    подписывается владельцем в Phantom; серверные ключи не задействованы."""
+    p = _user_dir(pubkey) / "mode.json"
+    if p.exists():
+        try:
+            m = str(json.loads(p.read_text()).get("mode", "")).upper()
+            if m in ("SHADOW", "LIVE"):
+                return m
+        except Exception:
+            pass
+    return "SHADOW"
+
+def save_user_mode(pubkey: str, mode: str):
+    try:
+        d = _user_dir(pubkey); d.mkdir(parents=True, exist_ok=True)
+        (d / "mode.json").write_text(json.dumps(dict(mode=mode)))
+    except Exception:
+        pass
+
 def save_positions(lst: list):
     """默认会话(local)持仓落盘到顶层 positions.json（重启/reload 不丢）。"""
     try:
@@ -1179,7 +1200,9 @@ class UserSession:
         self.pubkey = pubkey
         self._default = (pubkey == DEFAULT_PUBKEY)
         self.lock = threading.Lock()
-        self.mode = "SHADOW"          # SHADOW | LIVE（每用户独立）
+        # SHADOW | LIVE（每用户独立）。Кошельковая сессия читает режим с диска (переживает
+        # рестарт); default-сессия всегда стартует в SHADOW (операторский путь, env-замок).
+        self.mode = "SHADOW" if self._default else load_user_mode(pubkey)
         self.risk = RiskManager()
         self.bot = bot.BotRunner()    # 每用户一个自主回路（默认关闭）
         self.filters = load_filters() if self._default else load_user_filters(pubkey)
@@ -1706,6 +1729,13 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
     except Exception:
         entry_price = 0.0
 
+    # Кошельковая сессия в LIVE = self-custody: операторский серверный ключ (GMGN swap)
+    # к чужим деньгам не прикасается НИКОГДА. Реальная сделка — только /api/tx/* + Phantom.
+    # Честная ошибка вместо тихой paper-записи «под видом LIVE».
+    if s.mode == "LIVE" and s.pubkey != DEFAULT_PUBKEY:
+        log("BUY_BLOCK", address[:8], "self-custody LIVE: buy must go through Phantom signing", mode=s.mode)
+        raise HTTPException(400, "LIVE here is self-custody: use the Phantom buy button "
+                                 "(your wallet signs the transaction). Switch to SHADOW for paper records.")
     # LIVE 且未锁：真实买入（input=本链原生币，output=目标币，amount=最小单位）。
     if s.mode == "LIVE" and not LIVE_TRADING_DISABLED:
         try:
@@ -1771,8 +1801,11 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
     frac = max(0.0, min(1.0, float(fraction)))
     full = frac >= 0.999
     pct = 100 if full else max(1, int(round(frac * 100)))
-    # self_custody-позиции исполняются в Phantom (см. /api/tx/*) — GMGN-swap оператора не трогаем
-    if s.mode == "LIVE" and not LIVE_TRADING_DISABLED and not p.get("self_custody"):
+    # self_custody-позиции исполняются в Phantom (см. /api/tx/*) — GMGN-swap оператора не трогаем.
+    # Кошельковые сессии тоже не трогают операторский ключ: их бумажные позиции закрываются
+    # учётно, реальные (self_custody) — через Phantom.
+    if (s.mode == "LIVE" and not LIVE_TRADING_DISABLED
+            and s.pubkey == DEFAULT_PUBKEY and not p.get("self_custody")):
         g = s.adapter_for(pchain)
         # 清仓：input=持仓币(非 currency，可用 percent)，output=该链原生币，percent 按比例。
         try:
@@ -1985,14 +2018,27 @@ def api_config(cfg: ConfigIn):
                 trading_locked=LIVE_TRADING_DISABLED)
 
 @app.post("/api/mode")
-def api_mode(m: ModeIn, x_wallet: str | None = WalletHeader):
-    """切实盘/模拟盘（右上角图标按钮）。LIVE 仅在未锁时生效；不写 env。每用户独立。"""
+def api_mode(m: ModeIn, x_wallet: str | None = WalletHeader,
+             x_auth: str | None = AuthHeader):
+    """切实盘/模拟盘（右上角图标按钮）。每用户独立。
+    Default-сессия: LIVE только при открытом env-замке (операторский GMGN-ключ на сервере).
+    Кошельковая сессия: LIVE = self-custody (каждая сделка подписывается в Phantom, серверные
+    ключи не участвуют) → env-замок не требуется, но включение LIVE требует входа подписью
+    (X-Auth). Выключение (SHADOW) — всегда без препятствий. Режим кошелька персистится."""
     _block_if_public()
     s = get_session(x_wallet)
     want_live = m.mode.upper() == "LIVE"
-    with s.lock:
-        s.mode = "LIVE" if (want_live and not LIVE_TRADING_DISABLED) else "SHADOW"
-    return dict(ok=True, mode=s.mode, trading_locked=LIVE_TRADING_DISABLED)
+    if s.pubkey == DEFAULT_PUBKEY:
+        with s.lock:
+            s.mode = "LIVE" if (want_live and not LIVE_TRADING_DISABLED) else "SHADOW"
+    else:
+        if want_live:
+            require_auth(s, x_auth)          # в «горячий» режим — только владелец подписью
+        with s.lock:
+            s.mode = "LIVE" if want_live else "SHADOW"
+            save_user_mode(s.pubkey, s.mode)
+    return dict(ok=True, mode=s.mode, trading_locked=LIVE_TRADING_DISABLED,
+                self_custody=(s.pubkey != DEFAULT_PUBKEY))
 
 @app.post("/api/chain")
 def api_chain(c: ChainIn):
@@ -2104,6 +2150,13 @@ def api_sell(s: SellIn, x_wallet: str | None = WalletHeader):
     _block_if_public()
     sess = get_session(x_wallet)
     with sess.lock:
+        # self_custody-позиция куплена реальными деньгами через Phantom: «бумажное» закрытие
+        # здесь стёрло бы запись, а токены остались бы в кошельке. Только Wallet sell (Phantom)
+        # либо Unmonitor (убрать из мониторинга без продажи). tx/confirm зовёт do_sell напрямую.
+        p = next((x for x in sess.positions if x["address"] == s.address), None)
+        if p is not None and p.get("self_custody"):
+            raise HTTPException(400, "Self-custody position: sell via the Wallet sell button "
+                                     "(Phantom signs), or Unmonitor to stop tracking without selling.")
         return do_sell(s.address, s=sess)
 
 @app.post("/api/unmonitor")
@@ -2463,6 +2516,11 @@ def api_tx_build(r: TxBuildIn, x_wallet: str | None = WalletHeader,
         if r.side == "buy":
             if not (0 < r.size_sol <= CFG["max_per_trade_sol"]):
                 raise HTTPException(400, f"размер 0–{CFG['max_per_trade_sol']} SOL")
+            # тот же портфельный риск-гейт, что и в do_buy: реальные деньги — те же лимиты
+            allow, rnote = sess.risk.gate(r.size_sol, len(sess.positions), sess.exposure())
+            if not allow:
+                log("BUY_BLOCK", r.address[:8], rnote, mode=sess.mode, pubkey=sess.pubkey)
+                raise HTTPException(409, rnote)
             out = execution.build_buy(sess.pubkey, r.address, r.size_sol, slippage)
         else:
             pos = next((p for p in sess.positions if p["address"] == r.address), None)

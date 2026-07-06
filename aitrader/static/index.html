@@ -779,17 +779,19 @@ const I18N={
     mode_toggle_title:'点击切换 实盘/模拟盘', toast_mode_live:'已切到实盘 · 买卖将真实成交、动用资金', toast_mode_shadow:'已切到模拟盘 · 买卖只记录、不上链', toast_mode_fail:(m)=>`切换失败：${m}`,
     confirm_live_title:'切到 LIVE 模式',
     confirm_live_msg:'之后「一键买入 / 平仓」会经签名密钥<b>真实成交、动用资金</b>。<br>确定开启吗？',
+    confirm_live_wallet_msg:'LIVE（自托管）：买卖<b>真实成交、动用你钱包的资金</b>——每笔交易都需你在 Phantom 里签名确认。<br>确定开启吗？',
     toast_need_key:'请先填 API Key', cfg_saved:'✓ 已写入 ~/.config/gmgn/.env', toast_cfg_fail:(m)=>`保存失败：后端未启动？(${m})`,
     buy_exit_html:(exit,thesis)=>`<b>退出预案（成交后由策略单挂出）</b><br>${exit}<br><span style="color:var(--dim)">理由：${thesis||'—'}</span>`,
     buy_riskwarn:'⚠ 组合风控：买入后将达到并发/敞口上限。建议先平掉一个持仓再买，或调小数量。',
     buy_mode_live:'当前 LIVE 模式：确认后将经签名密钥真实下单。', buy_mode_shadow:'当前 SHADOW 模式：确认后只记录意图、不真实发单。',
+    buy_mode_live_wallet:'LIVE · 自托管：点「确认买入」将构建真实交易，由你在 Phantom 里签名后上链——动用真实资金。',
     toast_buy:(live,sym,size)=>`${live?'已真实下单 ':'已记录(SHADOW) '}${sym} ${size} SOL`,
     toast_buy_v2:(kind,sym,size,st)=>kind==='sh'?`已记录(SHADOW，未上链) ${sym} ${size}`:kind==='live'?`✓ 已成交 ${sym} ${size} · ${st}`:`已提交·待确认（尚未成交）${sym} ${size} · ${st}`,
     toast_mode_reverted:'后端已回到 SHADOW（可能重启过）：买卖只记录、不上链。要真实交易请重新切 LIVE。',
     toast_buy_demo:(live,sym,size)=>`${live?'已真实下单 ':'已记录(SHADOW) '}${sym} ${size} SOL · 已加入逃生监控`,
     buy_log_reason:(live,size,exit)=>`${live?'LIVE 真实成交 ':'SHADOW 记录 '}${size} SOL · ${exit}`,
     toast_buy_fail:(m)=>`下单失败：${m}`, buy_ordering:'下单中…',
-    toast_trade_locked:'链上交易已锁（LIVE_TRADING_DISABLED），无法切到 LIVE。后端始终走 SHADOW。',
+    toast_trade_locked:'服务器签名交易已锁（LIVE_TRADING_DISABLED）。连接 Phantom 钱包即可用自己的钱包切 LIVE（自托管，每笔你签名）。',
     sell_title:(sym)=>`平仓 ${sym}`,
     sell_msg:(sym,size,esc)=>`平仓 <b>${sym}</b>（${size} SOL）？`+(esc?'<br><span style="color:var(--clay)">⚠ 已触发逃生信号，建议立即平仓。</span>':'')+'<br><span style="color:var(--dim2);font-size:11.5px">SHADOW 模式下仅记录、不真实发单。</span>',
     toast_sell_sent:(sym)=>`已发送平仓 ${sym}`, toast_sell_fail:(m)=>`平仓失败：${m}`,
@@ -956,17 +958,19 @@ const I18N={
     mode_toggle_title:'Click to toggle Live / Shadow', toast_mode_live:'Switched to LIVE · trades settle for real, real funds', toast_mode_shadow:'Switched to SHADOW · trades only logged, no on-chain', toast_mode_fail:(m)=>`Switch failed: ${m}`,
     confirm_live_title:'Switch to LIVE mode',
     confirm_live_msg:'After this, one-click buy/sell settles for <b>real via the signing key, using real funds</b>.<br>Enable it?',
+    confirm_live_wallet_msg:'LIVE (self-custody): buys/sells settle for <b>real with funds from YOUR wallet</b> — every trade must be signed by you in Phantom.<br>Enable it?',
     toast_need_key:'Enter your API Key first', cfg_saved:'✓ Written to ~/.config/gmgn/.env', toast_cfg_fail:(m)=>`Save failed: backend not running? (${m})`,
     buy_exit_html:(exit,thesis)=>`<b>Exit plan (placed as strategy orders after fill)</b><br>${exit}<br><span style="color:var(--dim)">Thesis: ${thesis||'—'}</span>`,
     buy_riskwarn:'⚠ Portfolio risk: buying will hit the concurrency/exposure cap. Close a position first or reduce the size.',
     buy_mode_live:'LIVE mode: confirm to place a real order via the signing key.', buy_mode_shadow:'SHADOW mode: confirm to record intent only, no real order.',
+    buy_mode_live_wallet:'LIVE · self-custody: "Confirm buy" builds a real Jupiter swap that YOU sign in Phantom — real funds from your wallet.',
     toast_buy:(live,sym,size)=>`${live?'Order placed ':'Recorded (SHADOW) '}${sym} ${size} SOL`,
     toast_buy_v2:(kind,sym,size,st)=>kind==='sh'?`Recorded (SHADOW, not on-chain) ${sym} ${size}`:kind==='live'?`✓ Filled ${sym} ${size} · ${st}`:`Submitted · pending (not yet filled) ${sym} ${size} · ${st}`,
     toast_mode_reverted:'Backend is back to SHADOW (likely restarted): buy/sell only logs, no on-chain. Switch to LIVE again for real trades.',
     toast_buy_demo:(live,sym,size)=>`${live?'Order placed ':'Recorded (SHADOW) '}${sym} ${size} SOL · added to escape monitor`,
     buy_log_reason:(live,size,exit)=>`${live?'LIVE filled ':'SHADOW logged '}${size} SOL · ${exit}`,
     toast_buy_fail:(m)=>`Order failed: ${m}`, buy_ordering:'Placing order…',
-    toast_trade_locked:'On-chain trading is locked (LIVE_TRADING_DISABLED); cannot switch to LIVE. The backend always runs SHADOW.',
+    toast_trade_locked:'Server-signed trading is locked (LIVE_TRADING_DISABLED). Connect your Phantom wallet to go LIVE self-custodially (you sign every trade).',
     sell_title:(sym)=>`Close ${sym}`,
     sell_msg:(sym,size,esc)=>`Close <b>${sym}</b> (${size} SOL)?`+(esc?'<br><span style="color:var(--clay)">⚠ Escape signal triggered, close now.</span>':'')+'<br><span style="color:var(--dim2);font-size:11.5px">In SHADOW, records only, no real order.</span>',
     toast_sell_sent:(sym)=>`Sell sent ${sym}`, toast_sell_fail:(m)=>`Close failed: ${m}`,
@@ -1861,6 +1865,7 @@ async function loadBot(){
   try{
     const d=await (await fetch(API+'/api/bot')).json();
     const pr=await (await fetch(API+'/api/bot/proposals')).json();
+    _BOTPROPS=pr.proposals||[];   // для propAct: self-custody LIVE исполняет предложение через Phantom
     const st=d.stats||{},cfg=d.cfg||{},mode=cfg.mode||'n2';
     box.innerHTML=`
       <div class="botrow">
@@ -1890,6 +1895,7 @@ async function loadBot(){
       <div class="hint">${t('bot_hint')}</div>`;
   }catch(e){box.innerHTML='<div class="hint">'+t('pipe_be_off')+'</div>';}
 }
+let _BOTPROPS=[];   // последняя очередь N1-предложений (нужна propAct для Phantom-исполнения)
 async function botSetMode(m){
   try{
     const r=await fetch(API+'/api/bot/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:m})});
@@ -1899,6 +1905,15 @@ async function botSetMode(m){
 }
 async function propAct(id,action){
   try{
+    // Кошелёк + LIVE: N1-предложение исполняется СВОИМ кошельком (Phantom), затем убирается
+    // из очереди (dismiss). Бумажный approve на бэке для self-custody LIVE отклоняется.
+    const p=(_BOTPROPS||[]).find(x=>x.id===id);
+    if(action==='approve'&&p&&walletPubkey&&liveMode&&(p.chain||'sol')==='sol'){
+      const sig=await phantomTrade(p.side,p.address,p.size_sol||0,p.fraction||1.0,'');
+      await fetch(API+'/api/bot/proposals/act',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,action:'dismiss'})});
+      toast(t('ph_sent',(p.address||'').slice(0,6),sig.slice(0,8)),'ok');
+      loadBot();scanCycle();return;
+    }
     const r=await fetch(API+'/api/bot/proposals/act',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,action})});
     if(!r.ok)throw new Error(await errDetail(r));
     toast(action==='approve'?t('prop_done'):t('prop_gone'),'ok');
@@ -2078,9 +2093,12 @@ function applyLiveLabel(){
   const dot=document.getElementById('modeDot'); if(dot)dot.style.background=liveMode?'var(--clay)':'var(--amber)';
 }
 // 右上角 MODE 图标点击切换：→LIVE 需二次确认(动真钱)，→SHADOW 直接切。均通知后端 /api/mode。
+// С кошельком LIVE = self-custody (каждая сделка подписывается в Phantom) → серверный замок
+// не мешает; включение LIVE идёт через authedFetch (вход подписью кошелька). Без кошелька —
+// как раньше: LIVE только при открытом серверном замке.
 function toggleMode(){
   const goLive=!liveMode;
-  if(goLive&&tradingLocked){toast(t('toast_trade_locked'),'err');return;}   // 硬锁时不让切 LIVE
+  if(goLive&&tradingLocked&&!walletPubkey){toast(t('toast_trade_locked'),'err');return;}   // 硬锁 + 无钱包 → 不让切 LIVE
   if(source!=='backend'){                       // DEMO 无后端：仅本地翻转
     if(goLive){confirmDialog(t('confirm_live_title'),t('confirm_live_msg'),()=>{liveMode=true;applyLiveLabel();});}
     else{liveMode=false;applyLiveLabel();}
@@ -2088,14 +2106,15 @@ function toggleMode(){
   }
   const apply=async(target)=>{
     try{
-      const r=await fetch(API+'/api/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:target?'LIVE':'SHADOW'})});
+      const doF=(target&&walletPubkey)?authedFetch:fetch;   // в LIVE — только после входа подписью
+      const r=await doF(API+'/api/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:target?'LIVE':'SHADOW'})});
       if(!r.ok)throw new Error(await errDetail(r));
       const d=await r.json();
       liveMode=(d.mode==='LIVE');applyLiveLabel();
       toast(liveMode?t('toast_mode_live'):t('toast_mode_shadow'),liveMode?'err':'ok');
     }catch(e){toast(t('toast_mode_fail',e.message),'err');}
   };
-  if(goLive)confirmDialog(t('confirm_live_title'),t('confirm_live_msg'),()=>apply(true));
+  if(goLive)confirmDialog(t('confirm_live_title'),walletPubkey?t('confirm_live_wallet_msg'):t('confirm_live_msg'),()=>apply(true));
   else apply(false);
 }
 const val=id=>document.getElementById(id).value.trim();
@@ -2126,10 +2145,11 @@ function openBuy(i){
   else rw.style.display='none';
   const mn=document.getElementById('buyModeNote');
   mn.className='mwarn'+(liveMode?' danger':'');
-  mn.textContent=liveMode?t('buy_mode_live'):t('buy_mode_shadow');
+  mn.textContent=liveMode?(walletPubkey&&curChain==='sol'?t('buy_mode_live_wallet'):t('buy_mode_live')):t('buy_mode_shadow');
   document.getElementById('buyState').textContent='';
-  // non-custodial: кнопка Phantom видна только с подключённым кошельком на sol + backend
-  document.getElementById('buyPhantom').style.display=(walletPubkey&&source==='backend'&&curChain==='sol')?'':'none';
+  // non-custodial: кнопка Phantom — только кошелёк + sol + backend + LIVE.
+  // Тумблер — источник истины: SHADOW = никаких реальных покупок из UI (выходы — всегда можно).
+  document.getElementById('buyPhantom').style.display=(walletPubkey&&liveMode&&source==='backend'&&curChain==='sol')?'':'none';
   document.getElementById('buyPhantom').innerHTML='<span style="display:inline-flex;width:12px;height:12px;vertical-align:-2px">'+svg('zap')+'</span> '+t('ph_buy');
   const kw=document.getElementById('kolWrap');
   kw.style.display=(source==='backend'&&r.address)?'':'none';
@@ -2137,34 +2157,38 @@ function openBuy(i){
   document.getElementById('kolRes').textContent='';
   document.getElementById('buyScrim').classList.add('on');
 }
-/* ── этап 5: покупка своим кошельком (Jupiter build → Phantom sign) ── */
+/* ── этап 5: сделка своим кошельком (Jupiter build → Phantom sign → confirm).
+   Единый helper: покупка из окна BUY, продажа позиции, исполнение N1-предложения. ── */
+async function phantomTrade(side,address,size_sol,fraction,symbol,onSigning){
+  const body=side==='buy'?{address,side:'buy',size_sol}:{address,side:'sell',fraction:fraction||1.0};
+  const b=await authedFetch(API+'/api/tx/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!b.ok)throw new Error(await errDetail(b));
+  const j=await b.json();
+  const vtx=solanaWeb3.VersionedTransaction.deserialize(Uint8Array.from(atob(j.tx),ch=>ch.charCodeAt(0)));
+  if(onSigning)onSigning();
+  const res=await _provider().signAndSendTransaction(vtx);
+  const sig=String(res.signature||res);
+  const cbody=side==='buy'
+    ?{address,side:'buy',size_sol,token_amount:j.out_amount||0,signature:sig,symbol:symbol||''}
+    :{address,side:'sell',fraction:fraction||1.0,signature:sig};
+  await authedFetch(API+'/api/tx/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cbody)});
+  return sig;
+}
 async function phantomBuy(){
   const r=T[buyIdx];const size=parseFloat(document.getElementById('buySize').value)||r.size;
   const bs=document.getElementById('buyState');
   try{
     bs.innerHTML='<span class="spin"></span>'+t('ph_building');
-    const b=await authedFetch(API+'/api/tx/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:r.address,side:'buy',size_sol:size})});
-    if(!b.ok)throw new Error(await errDetail(b));
-    const j=await b.json();
-    const vtx=solanaWeb3.VersionedTransaction.deserialize(Uint8Array.from(atob(j.tx),ch=>ch.charCodeAt(0)));
-    bs.innerHTML='<span class="spin"></span>'+t('ph_signing');
-    const res=await _provider().signAndSendTransaction(vtx);
-    const sig=res.signature||res;
-    await authedFetch(API+'/api/tx/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:r.address,side:'buy',size_sol:size,token_amount:j.out_amount||0,signature:String(sig),symbol:r.sym})});
-    toast(t('ph_sent',r.sym,String(sig).slice(0,8)),'ok');closeBuy();scanCycle();
+    const sig=await phantomTrade('buy',r.address,size,1.0,r.sym,
+      ()=>{bs.innerHTML='<span class="spin"></span>'+t('ph_signing');});
+    toast(t('ph_sent',r.sym,sig.slice(0,8)),'ok');closeBuy();scanCycle();
   }catch(e){bs.textContent='';toast(t('ph_fail',e.message),'err');}
 }
 async function phantomSell(i){
   const p=POS[i];if(!p)return;
   try{
-    const b=await authedFetch(API+'/api/tx/build',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:p.address,side:'sell',fraction:1.0})});
-    if(!b.ok)throw new Error(await errDetail(b));
-    const j=await b.json();
-    const vtx=solanaWeb3.VersionedTransaction.deserialize(Uint8Array.from(atob(j.tx),ch=>ch.charCodeAt(0)));
-    const res=await _provider().signAndSendTransaction(vtx);
-    const sig=res.signature||res;
-    await authedFetch(API+'/api/tx/confirm',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:p.address,side:'sell',fraction:1.0,signature:String(sig)})});
-    toast(t('ph_sent',p.sym,String(sig).slice(0,8)),'ok');scanCycle();
+    const sig=await phantomTrade('sell',p.address,0,1.0,p.sym);
+    toast(t('ph_sent',p.sym,sig.slice(0,8)),'ok');scanCycle();
   }catch(e){toast(t('ph_fail',e.message),'err');}
 }
 /* ── KOL/𝕏: свежие упоминания CA (по кнопке, квота юзера) ── */
@@ -2226,6 +2250,10 @@ function closeBuy(){document.getElementById('buyScrim').classList.remove('on');}
 dismissOnBackdrop('buyScrim',closeBuy);
 async function doBuy(){
   const r=T[buyIdx];const size=parseFloat(document.getElementById('buySize').value)||r.size;
+  // Кошелёк + LIVE + sol → реальная сделка СВОИМ кошельком (Jupiter build → подпись Phantom).
+  // «Confirm buy» и «Phantom» в этом состоянии делают одно и то же — исключаем случайный
+  // бумажный/операторский путь, когда юзер думает, что торгует вживую.
+  if(walletPubkey&&liveMode&&source==='backend'&&curChain==='sol'){return phantomBuy();}
   if(source==='backend'){
     const bs=document.getElementById('buyState');bs.innerHTML='<span class="spin"></span>'+t('buy_ordering');
     try{
@@ -2256,6 +2284,9 @@ function escape_(i){
 }
 function doSellPos(i){
   const p=POS[i];if(!p)return;
+  // Реальная (self-custody) позиция продаётся только реально: строим tx → подпись в Phantom.
+  // Бумажный /api/sell для неё бэкенд всё равно отклонит (защита от стирания живой позиции).
+  if(p.selfc&&walletPubkey&&source==='backend'){return phantomSell(i);}
   if(source==='backend'){
     fetch(API+'/api/sell',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({address:p.address||p.addr})})
       .then(async r=>{if(!r.ok)throw new Error(await errDetail(r));toast(t('toast_sell_sent',p.sym),'ok');scanCycle();})
