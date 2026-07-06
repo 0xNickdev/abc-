@@ -77,3 +77,40 @@ def detect(address: str, get_traders, get_activity, *,
     if not histories:
         return {}
     return cluster_wallets(histories, min_common, farm_min)
+
+
+# ── Фронтранеры/боты среди топ-покупателей (по тегам GMGN) ──
+FRONTRUN_TAGS = {"sniper", "rat_trader", "bundler", "dex_bot", "frontrun", "front_run", "mev"}
+
+
+def _trader_tags(t: dict) -> list:
+    """Теги трейдера из строки GMGN (поле варьирует: tags/maker_token_tags/wallet_tag_v2/tag_rank)."""
+    for k in ("tags", "maker_token_tags", "wallet_tag_v2", "tag_rank", "tag"):
+        v = t.get(k)
+        if isinstance(v, list):
+            return [str(x).lower() for x in v]
+        if isinstance(v, dict):
+            return [str(x).lower() for x in v.keys()]
+        if isinstance(v, str) and v:
+            return [v.lower()]
+    return []
+
+
+def frontrunners(traders: list, tags: set | None = None) -> dict:
+    """Доля фронтранеров/снайперов/ботов среди топ-покупателей (по тегам GMGN).
+    red_flag при доле ≥30% — токен фармят боты/снайперы, органики мало."""
+    tags = tags or FRONTRUN_TAGS
+    checked = hits = 0
+    kinds: dict[str, int] = {}
+    for t in traders or []:
+        if not isinstance(t, dict):
+            continue
+        checked += 1
+        hit = [x for x in _trader_tags(t) if x in tags]
+        if hit:
+            hits += 1
+            for x in hit:
+                kinds[x] = kinds.get(x, 0) + 1
+    return dict(checked=checked, frontrunners=hits, by_tag=kinds,
+                ratio=round(hits / checked, 3) if checked else 0.0,
+                red_flag=(checked > 0 and hits / checked >= 0.3))

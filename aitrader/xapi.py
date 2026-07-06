@@ -149,3 +149,76 @@ def handle_history(username: str) -> dict:
                    red_flag=len(uniq) >= 4, cached=False)          # 4+ разных хендлов = ферма-флаг
     _hist_cache[username] = (time.monotonic(), payload)
     return payload
+
+
+def _parse_ts(s) -> float | None:
+    """created_at → epoch для сравнения; None если формат не распознан."""
+    if not s:
+        return None
+    import datetime
+    for fmt in ("%a %b %d %H:%M:%S %z %Y", "%Y-%m-%dT%H:%M:%S.%fZ",
+                "%Y-%m-%dT%H:%M:%SZ", "%Y-%m-%dT%H:%M:%S%z"):
+        try:
+            dt = datetime.datetime.strptime(str(s), fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=datetime.timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def _tweet_rows(payload: dict) -> list:
+    node = payload.get("tweets") or payload.get("data") or payload.get("list") or payload
+    if isinstance(node, list):
+        return node
+    return (node.get("tweets") if isinstance(node, dict) else []) or []
+
+
+def ca_timeline(ca: str, official: str = "") -> dict:
+    """Соц-таймлайн контракта через getxapi advanced_search: кто и когда постил CA.
+    (2) сколько РАЗНЫХ авторов/сообществ + было ли раннее упоминание;
+    (4) если самый ранний пост НЕ от официального хендла (или раньше него) → red_flag
+        («CA слили до официалов» = копия/инсайд/не тот твиттер). {} при отсутствии ключа/сбое."""
+    api_key = key()
+    if not api_key:
+        return dict(ok=False, detail="GETXAPI_KEY не задан")
+    ca = (ca or "").strip()
+    official = (official or "").lstrip("@").strip().lower()
+    if not ca:
+        return {}
+    ck = ("tl", hash(api_key) & 0xFFFF, ca)
+    hit = _cache.get(ck)
+    if hit and time.monotonic() - hit[0] < TTL:
+        return dict(hit[1], cached=True)
+    try:
+        j = _get("/twitter/tweet/advanced_search", {"q": ca, "product": "Latest"}, api_key)
+        if j.get("_err"):
+            return dict(ok=False, detail=f"getxapi: {j['_err']}")
+    except Exception as e:
+        return dict(ok=False, detail=f"getxapi: {e}")
+    posts = []                                                     # (ts, author)
+    for tw in _tweet_rows(j):
+        if not isinstance(tw, dict):
+            continue
+        u = tw.get("author") or tw.get("user") or {}
+        name = (u.get("userName") or u.get("username") or u.get("screen_name")
+                or tw.get("userName") or tw.get("username") or "").lstrip("@").lower()
+        if not name:
+            continue
+        ts = _parse_ts(tw.get("createdAt") or tw.get("created_at") or tw.get("time"))
+        posts.append((ts if ts is not None else 9e18, name))      # без ts → в конец (не «первый»)
+    if not posts:
+        payload = dict(ok=True, mentions=0, communities=0, first_author=None,
+                       posted_before_official=False, red_flag=False, cached=False)
+        _cache[ck] = (time.monotonic(), payload)
+        return payload
+    posts.sort(key=lambda p: p[0])
+    first_ts, first_author = posts[0]
+    off_ts = min([p[0] for p in posts if p[1] == official], default=None) if official else None
+    posted_before = bool(official) and first_author != official and (off_ts is None or first_ts < off_ts)
+    payload = dict(ok=True, mentions=len(posts), communities=len(set(a for _, a in posts)),
+                   first_author=first_author, first_by_official=(first_author == official),
+                   posted_before_official=posted_before, red_flag=posted_before, cached=False)
+    _cache[ck] = (time.monotonic(), payload)
+    return payload

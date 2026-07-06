@@ -1200,6 +1200,30 @@ class TestXReuse:
         xapi = self._mem(monkeypatch, {"a": [], "b": [], "c": [], "d": []})
         assert xapi.handle_history("d")["red_flag"] is True           # 4+ хендлов = ферма-флаг
 
+    def test_ca_timeline_posted_before_official_flags(self, monkeypatch):
+        import xapi
+        xapi._cache.clear()
+        monkeypatch.setenv("GETXAPI_KEY", "k")
+        tweets = {"data": [
+            {"author": {"userName": "leaker"}, "createdAt": "2026-07-06T10:00:00Z", "text": "CA1"},
+            {"author": {"userName": "official"}, "createdAt": "2026-07-06T11:00:00Z", "text": "CA1"},
+            {"author": {"userName": "comm2"}, "createdAt": "2026-07-06T12:00:00Z", "text": "CA1"}]}
+        monkeypatch.setattr(xapi, "_get", lambda p, params, k: tweets)
+        d = xapi.ca_timeline("CA1", "official")
+        assert d["ok"] and d["mentions"] == 3 and d["communities"] == 3
+        assert d["first_author"] == "leaker" and d["posted_before_official"] is True and d["red_flag"] is True
+
+    def test_ca_timeline_official_first_ok(self, monkeypatch):
+        import xapi
+        xapi._cache.clear()
+        monkeypatch.setenv("GETXAPI_KEY", "k")
+        tweets = {"data": [
+            {"author": {"userName": "official"}, "createdAt": "2026-07-06T10:00:00Z"},
+            {"author": {"userName": "fan"}, "createdAt": "2026-07-06T11:00:00Z"}]}
+        monkeypatch.setattr(xapi, "_get", lambda p, params, k: tweets)
+        d = xapi.ca_timeline("CA1", "official")
+        assert d["first_by_official"] is True and d["posted_before_official"] is False and d["red_flag"] is False
+
 
 # ── Резолв X-хендла токена из socials DexScreener (для авто X-reuse) ──
 class TestTokenTwitter:
@@ -1252,6 +1276,16 @@ class TestFarmCluster:
         def boom(a, n):
             raise RuntimeError("gmgn down")
         assert farm.detect("CA", boom, lambda w: []) == {}           # сбой источника → пусто
+
+    def test_frontrunners_by_tags(self):
+        import farm
+        traders = [{"address": "W1", "tags": ["sniper"]},
+                   {"address": "W2", "maker_token_tags": ["rat_trader"]},
+                   {"address": "W3", "tags": ["renowned"]}, {"address": "W4"}]
+        r = farm.frontrunners(traders)
+        assert r["checked"] == 4 and r["frontrunners"] == 2 and r["ratio"] == 0.5 and r["red_flag"] is True
+        clean = [{"address": "X", "tags": ["renowned"]} for _ in range(5)]
+        assert farm.frontrunners(clean)["red_flag"] is False       # 0 ботов → не флаг
 
 
 # ── Он-чейн риск холдеров (бандлеры/инсайдеры/danger) — белый лейбл ──

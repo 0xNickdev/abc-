@@ -2634,11 +2634,14 @@ def api_token_quality(address: str):
         out["x_reuse"] = xapi.reuse_check(address, handle)
     if handle:
         out["renames"] = xapi.handle_history(handle) or None   # memory.lol (бесплатно, без ключа)
+    if xapi.key():
+        out["ca_timeline"] = xapi.ca_timeline(address, handle)  # (2)+(4): кто/когда постил CA, раньше ли официала
     out["holders_risk"] = rugcheck.check(address) or None      # бандлеры/инсайдеры/danger (белый лейбл)
     # единый флаг качества: любой независимый красный сигнал → watch
     fresh_ratio = (out["fresh"] or {}).get("ratio", 0.0)
     red = bool((out.get("x_reuse") or {}).get("red_flag")) \
         or bool((out.get("renames") or {}).get("red_flag")) \
+        or bool((out.get("ca_timeline") or {}).get("red_flag")) \
         or bool((out.get("holders_risk") or {}).get("red_flag")) \
         or (fresh_ratio >= 0.5) or ((out["top10"] or 0) >= 0.6)
     out["red_flag"] = red
@@ -2658,11 +2661,27 @@ def _farm_fns(g):
 
 @app.get("/api/token/farm")
 def api_token_farm(address: str, max_wallets: int = 30):
-    """Детектор ферм: топ-покупатели по объёму → история каждого (gmgn) → кластеры одинаковой
-    истории (ферма). Тяжело по rate-limit → по кнопке, бюджет max_wallets. Нужен live-gmgn."""
+    """Детектор ферм + фронтранеры: топ-покупатели по объёму → (1) доля снайперов/ботов по тегам
+    GMGN + (2) история каждого → кластеры одинаковой истории. Тяжело по rate-limit → по кнопке. Live-gmgn."""
     _block_if_public()
-    gt, ga = _farm_fns(MK.adapter_for("sol"))
-    return farm.detect(address.strip(), gt, ga, max_wallets=min(int(max_wallets), 100))
+    address = address.strip()
+    n = min(int(max_wallets), 100)
+    g = MK.adapter_for("sol")
+    rows = []
+    _tt = getattr(g, "token_traders", None)
+    if _tt:
+        try:
+            rows = list(_tt(address, order_by="buy_volume_cur", limit=n) or [])
+        except Exception:
+            rows = []
+
+    def _gt(a, k):   # переиспользуем уже полученные строки трейдеров (не дёргаем GMGN дважды)
+        return [r.get("address") or r.get("wallet_address") for r in rows[:k] if isinstance(r, dict)]
+
+    _, ga = _farm_fns(g)
+    out = farm.detect(address, _gt, ga, max_wallets=n)
+    out["frontrunners"] = farm.frontrunners(rows) or None   # (1) снайперы/боты среди топ-покупателей
+    return out
 
 # 静态前端（同源，避免 CORS）。把上一版 dashboard 存为 static/index.html
 if STATIC_DIR.exists():

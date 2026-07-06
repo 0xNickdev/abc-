@@ -2199,6 +2199,9 @@ async function qualityCheck(){
       if(hr.insiders>0)h+=_qtag(hr.insiders>=3?'bad':'n',`insiders ${hr.insiders}`);
       if(hr.bundled>0)h+=_qtag('bad',`bundled ${hr.bundled}`);
       (hr.danger||[]).slice(0,2).forEach(x=>h+=_qtag('bad',x));}
+    if(d.ca_timeline&&d.ca_timeline.ok&&d.ca_timeline.mentions>0){const ct=d.ca_timeline;
+      h+=_qtag(ct.communities>=3?'n':'ok',`X: ${ct.communities} communities · ${ct.mentions} posts`);
+      if(ct.posted_before_official)h+=_qtag('bad',`CA posted before official (@${ct.first_author})`);}
     if(!h.includes('qtag')&&!d.top10&&!d.fresh)h+='<span class="hint">enable ABC_TOP10_RPC / ABC_FRESH_WALLETS_RPC / GETXAPI_KEY for signals</span>';
     h+=`<div style="margin-top:6px"><button class="mbtn ghost" onclick="farmScan()">Scan holders for farm</button><div id="farmRes" class="hint"></div></div>`;
     box.innerHTML=h;
@@ -2211,8 +2214,11 @@ async function farmScan(){
     const resp=await fetch(API+'/api/token/farm?address='+encodeURIComponent(r.address));
     if(!resp.ok)throw new Error(await errDetail(resp));
     const d=await resp.json();
-    if(!d.checked){box.innerHTML='<span class="hint">no data (needs live gmgn)</span>';return;}
-    box.innerHTML=_qtag(d.red_flag?'bad':'ok',`farm cluster ${d.largest_cluster}/${d.checked}${d.red_flag?' · LIKELY FARM':' · looks organic'}`);
+    const fr=d.frontrunners;
+    if(!d.checked&&!(fr&&fr.checked)){box.innerHTML='<span class="hint">no data (needs live gmgn)</span>';return;}
+    let fh=d.checked?_qtag(d.red_flag?'bad':'ok',`farm cluster ${d.largest_cluster}/${d.checked}${d.red_flag?' · LIKELY FARM':' · looks organic'}`):'';
+    if(fr&&fr.checked)fh+=_qtag(fr.red_flag?'bad':'n',`frontrunners/bots ${fr.frontrunners}/${fr.checked}`);
+    box.innerHTML=fh;
   }catch(e){box.textContent=e.message;}
 }
 function closeBuy(){document.getElementById('buyScrim').classList.remove('on');}
