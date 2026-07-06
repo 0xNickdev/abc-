@@ -172,6 +172,31 @@ def spot_price(addr: str) -> float:
     return _f(spot_pair(addr).get("priceUsd"))
 
 
+def spot_prices(mints: list[str]) -> dict[str, float]:
+    """Цены пачкой (DexScreener принимает до 30 CA через запятую) — real-time монитор
+    позиций дёргает это раз в ~2с ОДНИМ запросом на все открытые позиции. По каждому
+    минту берём пул с максимальной ликвидностью (как spot_pair)."""
+    out: dict[str, float] = {}
+    for i in range(0, len(mints), 30):
+        chunk = [m for m in mints[i:i + 30] if m]
+        if not chunk:
+            continue
+        r = httpx.get("https://api.dexscreener.com/latest/dex/tokens/" + ",".join(chunk),
+                      timeout=8.0)
+        r.raise_for_status()
+        best: dict[str, float] = {}                      # mint -> liq лучшего пула
+        for p in (r.json().get("pairs") or []):
+            if p.get("chainId") != "solana":
+                continue
+            mint = (p.get("baseToken") or {}).get("address")
+            px = _f(p.get("priceUsd"))
+            liq = _f((p.get("liquidity", {}) or {}).get("usd"))
+            if mint in chunk and px > 0 and liq >= best.get(mint, -1.0):
+                best[mint] = liq
+                out[mint] = px
+    return out
+
+
 def token_twitter(address: str) -> str:
     """X-хендл токена из socials DexScreener (info.socials type=twitter) → для авто X-reuse.
     '' если нет соц-ссылок/ошибка. Бесплатно, без ключей."""

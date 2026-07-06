@@ -924,6 +924,68 @@ class TestStopLossFreshness:
         assert s.positions[0]["pnl"] == -0.2        # pnl не трогаем, честно показываем отказ
 
 
+# ── Real-time монитор позиций (watcher): свежий pnl каждые ~2с + мгновенные стопы
+#    для бот-сессий; ручные и self-custody позиции не продаёт ──
+class TestPositionWatcher:
+    def _sess(self, entry=1.0, bot_on=True, selfc=False):
+        import threading as th
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            lock=th.Lock(),
+            bot=SimpleNamespace(enabled=bot_on, cfg=dict(appmod.bot.CFG)),
+            positions=[dict(symbol="W", address="MINT1", size_sol=0.1, pnl=0.0,
+                            cycles=0, entry={}, chain="sol", entry_price=entry,
+                            self_custody=selfc)])
+
+    def test_hard_stop_fires_realtime_for_bot_session(self, monkeypatch):
+        import watcher as w
+        s = self._sess()
+        sold = {}
+        pw = w.PositionWatcher(
+            lambda: [s], appmod.CFG,
+            lambda sess: (lambda addr, fraction=1.0, reason=None:
+                          sold.update(addr=addr, fraction=fraction, reason=reason)))
+        monkeypatch.setattr(w.dexadapter, "spot_prices", lambda m: {"MINT1": 0.6})
+        pw.poll_once()
+        assert s.positions[0]["pnl"] == -0.4          # −40% ≤ hard stop −35%
+        assert sold["addr"] == "MINT1" and sold["fraction"] == 1.0
+        assert "Hard stop" in sold["reason"]
+
+    def test_manual_session_prices_updated_but_never_sold(self, monkeypatch):
+        import watcher as w
+        s = self._sess(bot_on=False)
+        pw = w.PositionWatcher(lambda: [s], appmod.CFG,
+                               lambda sess: (lambda *a, **k:
+                                             (_ for _ in ()).throw(AssertionError("no sell"))))
+        monkeypatch.setattr(w.dexadapter, "spot_prices", lambda m: {"MINT1": 0.5})
+        pw.poll_once()
+        assert s.positions[0]["pnl"] == -0.5 and len(s.positions) == 1
+
+    def test_self_custody_never_auto_sold(self, monkeypatch):
+        import watcher as w
+        s = self._sess(bot_on=True, selfc=True)
+        pw = w.PositionWatcher(lambda: [s], appmod.CFG,
+                               lambda sess: (lambda *a, **k:
+                                             (_ for _ in ()).throw(AssertionError("no sell"))))
+        monkeypatch.setattr(w.dexadapter, "spot_prices", lambda m: {"MINT1": 0.1})
+        pw.poll_once()
+        assert s.positions[0]["pnl"] == -0.9          # цена обновлена, но продажи нет
+
+    def test_spot_prices_batch_picks_best_pool(self, monkeypatch):
+        import dexadapter as dx
+        class _R:
+            def raise_for_status(self): pass
+            def json(self): return {"pairs": [
+                {"chainId": "solana", "baseToken": {"address": "M1"},
+                 "priceUsd": "1.0", "liquidity": {"usd": "100"}},
+                {"chainId": "solana", "baseToken": {"address": "M1"},
+                 "priceUsd": "2.0", "liquidity": {"usd": "900"}},
+                {"chainId": "bsc", "baseToken": {"address": "M2"},
+                 "priceUsd": "9.0", "liquidity": {"usd": "999"}}]}
+        monkeypatch.setattr(dx.httpx, "get", lambda url, timeout=None: _R())
+        assert dx.spot_prices(["M1", "M2"]) == {"M1": 2.0}   # лучший пул по ликвидности; чужой чейн мимо
+
+
 # ── Покупка не падает в 500, когда GMGN в бане: базовые данные из DexScreener ──
 class TestBuyResilience:
     class _Boom:

@@ -61,6 +61,7 @@ import rugcheck  # он-чейн риск холдеров (бандлеры/и�
 import sessionwallet  # N3: session-кошелёк с ограниченным балансом (этап 7)
 import strategy  # ABC Alpha v1：具名策略预设 + 入场信号评估
 import wallets  # 私有 smart-money 跟踪钱包（信号，非跟单）
+import watcher  # real-time монитор позиций (DexScreener batch + Helius WS-пинок)
 import xapi  # X reuse-детектор (getxapi.com), ключ оператора в env GETXAPI_KEY
 
 random.seed(7)
@@ -1968,6 +1969,14 @@ async def _lifespan(_app: FastAPI):
     # Первый прогон при старте подтянет веса кошельков сразу, далее раз в сутки.
     if NIGHTLY_REVIEW:
         threading.Thread(target=_nightly_review_loop, daemon=True).start()
+    # Real-time монитор позиций (дефолт ON, ABC_WATCH=0 выключить): батч-цены DexScreener
+    # ~2с + WS-пинок Helius (logsSubscribe по минтам) → свежий pnl и мгновенные стопы
+    # для бот-сессий. Ручные/self-custody позиции не продаёт — только обновляет цену.
+    if os.getenv("ABC_WATCH", "1").strip().lower() in ("1", "true", "yes", "on"):
+        def _all_sessions():
+            with _sessions_lock:
+                return list(SESSIONS.values())
+        watcher.ensure_started(_all_sessions, CFG, _bot_sell_fn, log)
     yield
 
 app = FastAPI(title="GMGN AI Trader (local)", lifespan=_lifespan)
