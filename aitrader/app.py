@@ -454,9 +454,9 @@ class LiveGMGN(GMGNAdapter):
     def _cli(self, *args) -> dict:
         cmd = ["gmgn-cli", *args, "--chain", self.chain, "--raw"]
         out = subprocess.run(cmd, capture_output=True, text=True,
-                             timeout=25, env=self.env)
+                             timeout=float(os.getenv("GMGN_CLI_TIMEOUT", "12")), env=self.env)  # fail-fast, не 25с
         if out.returncode != 0:
-            raise RuntimeError(f"gmgn-cli error: {out.stderr.strip()}")
+            raise RuntimeError(f"gmgn-cli {' '.join(args[:2])} rc={out.returncode}: {out.stderr.strip()[:400]}")
         return json.loads(out.stdout)
 
     def _run_cmd(self, cmd_str: str) -> dict:
@@ -2061,7 +2061,9 @@ def api_run(r: RunIn, x_wallet: str | None = WalletHeader):
         try:
             return JSONResponse(screen_once(ch, sess))
         except Exception as e:
-            raise HTTPException(502, f"扫描失败：{e}")
+            import traceback
+            traceback.print_exc()                        # реальная причина (gmgn-cli/timeout) → в логи Railway
+            raise HTTPException(502, f"scan failed: {type(e).__name__}: {e}")
 
 @app.post("/api/buy")
 def api_buy(b: BuyIn, x_wallet: str | None = WalletHeader):
