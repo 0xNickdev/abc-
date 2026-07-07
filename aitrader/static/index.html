@@ -1104,7 +1104,7 @@ const gateName=i=>t('gate'+i);
    DEMO 模式有 reasonK 直接取词。 */
 function buildReason(r){
   switch(r.died){
-    case 1:{const iss=[];if(r.hp)iss.push('honeypot');if(r.bund>0.30)iss.push('bundler '+P(r.bund));if(r.dev>0.10)iss.push('dev '+P(r.dev));if(r.top10>0.40)iss.push('top10 '+P(r.top10));return t('bk_safety',iss.length?iss.join(' / '):t('bk_safety_generic'));}
+    case 1:{const iss=[];if(r.hp)iss.push('honeypot');if(!r.ren)iss.push('mint not renounced');if(r.btax>0.10)iss.push('buy tax '+P(r.btax));if(r.stax>0.10)iss.push('sell tax '+P(r.stax));if(r.rug>0.60)iss.push('rug ratio '+P(r.rug));if(r.bund>0.30)iss.push('bundler '+P(r.bund));if(r.dev>0.10)iss.push('dev '+P(r.dev));if(r.top10>0.40)iss.push('top10 '+P(r.top10));return t('bk_safety',iss.length?iss.join(' / '):t('bk_safety_generic'));}
     case 2:return t('bk_consensus',r.smc,r.degen,r.kol);
     case 3:return t('bk_rank');
     case 4:return r.crowd==='late'?t('bk_llm_late'):t('bk_llm_reject');
@@ -1177,6 +1177,7 @@ function normalize(data){
       frz:(f.renounced_freeze!==undefined?!!f.renounced_freeze:true),
       trk:f.tracked_hits||0,trkn:f.tracked_names||[],
       bund:f.bundler||0,dev:f.dev_hold||0,top10:f.top10||0,mc:f.mcap||0,liq:f.liquidity||0,hv:f.holder_velocity||0,rug:f.rug_ratio||0,
+      btax:f.buy_tax||0,stax:f.sell_tax||0,
       smc:f.sm_confluence||0,degen:f.smart_degen||0,kol:f.renowned||0,age:f.age_min,crowd:v.crowdedness||'-',
       v:v.verdict||'-',conv:v.conviction||0,status:isAct?'action':'reject',
       warn:!!dec.risk_warn,size:dec.size_sol||0,died:deriveDied(dec.action,dec.reason),
