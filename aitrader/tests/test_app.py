@@ -1055,6 +1055,57 @@ class TestPositionWatcher:
         assert dx.spot_prices(["M1", "M2"]) == {"M1": 2.0}   # лучший пул по ликвидности; чужой чейн мимо
 
 
+# ── Bonding curve reader: цена свежего pump.fun-токена напрямую из аккаунта кривой ──
+class TestPumpCurve:
+    def _acc(self, vtok, vsol, complete=False):
+        import base64 as b64
+        raw = b"\x00" * 8 + vtok.to_bytes(8, "little") + vsol.to_bytes(8, "little") \
+            + b"\x00" * 24 + (b"\x01" if complete else b"\x00")
+        return b64.b64encode(raw).decode()
+
+    def test_parse_price_and_complete_flag(self):
+        import pumpcurve as pc
+        # 30 SOL виртуальных резервов на 1_000_000 токенов (raw: lamports / 1e6-decimals)
+        px, done = pc._parse_curve(self._acc(1_000_000 * 10**6, 30 * 10**9))
+        assert abs(px - 30 / 1_000_000) < 1e-12 and done is False
+        _, done2 = pc._parse_curve(self._acc(1, 1, complete=True))
+        assert done2 is True
+
+    def test_usd_prices_batch_and_units(self, monkeypatch):
+        import pumpcurve as pc
+        acc_live = self._acc(1_000_000 * 10**6, 30 * 10**9)          # цена 3e-05 SOL
+        acc_done = self._acc(1_000_000 * 10**6, 30 * 10**9, True)    # мигрировал → пропуск
+        class _R:
+            def raise_for_status(self): pass
+            def json(self): return {"result": {"value": [
+                {"data": [acc_live, "base64"]}, {"data": [acc_done, "base64"]}, None]}}
+        monkeypatch.setattr(pc.httpx, "post", lambda url, json=None, timeout=None: _R())
+        monkeypatch.setattr(pc, "sol_usd", lambda: 200.0)
+        from solders.pubkey import Pubkey
+        m1, m2, m3 = (str(Pubkey.new_unique()) for _ in range(3))
+        out = pc.usd_prices([m1, m2, m3])
+        assert out == {m1: round(3e-05 * 200.0, 12)}                 # живая кривая × курс SOL
+        # курс SOL недоступен → НЕ отдаём цены в неправильных единицах
+        monkeypatch.setattr(pc, "sol_usd", lambda: 0.0)
+        assert pc.usd_prices([m1]) == {}
+
+    def test_watcher_uses_curve_for_unindexed_pump_token(self, monkeypatch):
+        import threading as th
+        from types import SimpleNamespace
+
+        import watcher as w
+        s = SimpleNamespace(lock=th.Lock(),
+                            bot=SimpleNamespace(enabled=False, cfg=dict(appmod.bot.CFG)),
+                            positions=[dict(symbol="F", address="FRESHpump", size_sol=0.1,
+                                            pnl=0.0, cycles=0, entry={}, chain="sol",
+                                            entry_price=1.0)])
+        pw = w.PositionWatcher(lambda: [s], appmod.CFG, lambda sess: (lambda *a, **k: None))
+        monkeypatch.setattr(w.dexadapter, "spot_prices", lambda m: {})     # DexScreener ещё не знает
+        monkeypatch.setattr(w.pumpcurve, "usd_prices", lambda m: {"FRESHpump": 0.55})
+        pw.poll_once()
+        assert s.positions[0]["pnl"] == -0.45                              # стоп не слеп
+
+
 # ── Покупка не падает в 500, когда GMGN в бане: базовые данные из DexScreener ──
 class TestBuyResilience:
     class _Boom:

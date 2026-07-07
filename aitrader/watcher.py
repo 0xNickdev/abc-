@@ -25,6 +25,7 @@ import time
 
 import bot as botmod
 import dexadapter
+import pumpcurve
 
 WATCH_POLL_S = float(os.getenv("ABC_WATCH_POLL_S", "2.0") or 2.0)
 WS_ENABLED = os.getenv("ABC_WATCH_WS", "1").strip().lower() in ("1", "true", "yes", "on")
@@ -82,10 +83,23 @@ class PositionWatcher:
         pairs = self._open_pairs()
         if not pairs:
             return
+        mints = sorted({p["address"] for _, p in pairs})
         try:
-            prices = dexadapter.spot_prices(sorted({p["address"] for _, p in pairs}))
+            prices = dexadapter.spot_prices(mints)
         except Exception:
-            return                                  # источник лёг — просто ждём следующего круга
+            prices = {}
+        # Свежие pump.fun-токены до индексации DexScreener: цена напрямую из bonding curve
+        # (RPC) — watcher видит токен с первой секунды, стоп не слепнет на самых молодых.
+        missing = [m for m in mints if not prices.get(m) and m.endswith("pump")]
+        if missing:
+            try:
+                got = pumpcurve.usd_prices(missing)
+                prices.update(got)
+                self.stats["curve_prices"] = self.stats.get("curve_prices", 0) + len(got)
+            except Exception:
+                pass
+        if not prices:
+            return                                  # оба источника легли — ждём следующего круга
         self.stats["polls"] += 1
         for sess, p in pairs:
             px = float(prices.get(p["address"]) or 0.0)

@@ -56,6 +56,7 @@ import dexadapter  # реальные данные без ключей (GeckoTer
 import execution  # non-custodial：服务器只构建 tx，签名在浏览器（Phantom）
 import farm  # детектор ферм по кластеризации истории кошельков (gmgn portfolio activity)
 import kol  # Twitter/X KOL 信号（per-user opt-in）
+import pumpcurve  # цена pump.fun из bonding curve по RPC (fallback для свежих токенов)
 import review  # офлайн review-loop: эдж кошельков/KOL + предложения по конфигу (обучение на своих данных)
 import rugcheck  # он-чейн риск холдеров (бандлеры/инсайдеры/danger) — белый лейбл, без бренда
 import sessionwallet  # N3: session-кошелёк с ограниченным балансом (этап 7)
@@ -1768,12 +1769,17 @@ def monitor_positions(chain: str, rows_by_addr: dict | None = None,
                 except Exception as e:
                     # GMGN недоступен (429-бан/таймаут) — цена НЕ должна замерзать: замёрзший
                     # pnl = спящий hard-stop, пока монета валится (наблюдали закрытия −44…−51%
-                    # при стопе −35%). Fallback: бесплатный DexScreener — pnl и стоп живут дальше;
-                    # security-снапшота нет → дифф нулевой (severity считается по цене/ликвидности).
+                    # при стопе −35%). Fallback: DexScreener, а для свежих pump.fun ещё без
+                    # пары — bonding curve по RPC; security-снапшота нет → дифф нулевой.
                     try:
                         cur_price = dexadapter.spot_price(p["address"])
                     except Exception:
                         cur_price = 0.0
+                    if cur_price <= 0 and str(p["address"]).endswith("pump"):
+                        try:
+                            cur_price = pumpcurve.usd_prices([p["address"]]).get(p["address"], 0.0)
+                        except Exception:
+                            cur_price = 0.0
                     if cur_price <= 0:
                         out.append(dict(symbol=p["symbol"], address=p["address"], size_sol=p["size_sol"],
                                         pnl=p.get("pnl", 0), severity=0,
