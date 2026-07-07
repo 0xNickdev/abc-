@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -29,7 +30,10 @@ CFG = {
     "escape_severity_exit": 60,   # 逃生严重度 ≥ 此值即清仓离场（比人工 escape_severity 略激进）
     "trail_activate_pct": 0.30,   # 浮盈达此幅度后才启用移动止盈（避免刚建仓就被噪声扫出）
     "require_abc_trigger": True,  # 只对 ABC Alpha v1 触发的候选自动建仓
-    "min_priority": 0,            # 最低优先级分才自主建仓（0=关闭；качество: подними до ~70）
+    # 最低优先级分才自主建仓（0=关闭；качество: ~70）. Env-дефолт нужен house-боту
+    # (BOT_AUTOSTART): его cfg живёт в памяти и слетает при рестарте контейнера —
+    # ABC_BOT_MIN_PRIORITY на Railway переживает деплой.
+    "min_priority": float(os.getenv("ABC_BOT_MIN_PRIORITY", "0") or 0),
 }
 
 
