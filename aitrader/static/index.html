@@ -1324,7 +1324,7 @@ function rowParts(t){
   return {cls:(`${t._i===sel?'sel':''} ${t.status==='action'?'act':''}`).trim(),style:`--rc:${rc}`,cells};
 }
 /* renderRows 内部把行对象命名为 t（沿用旧代码），与取词函数 t() 撞名，故行内取词改用别名 t2 = 全局 t */
-function fmtCap(v){v=+v||0;return v>=1e6?'$'+(v/1e6).toFixed(1)+'M':v>=1e3?'$'+(v/1e3).toFixed(0)+'k':'$'+v.toFixed(0);}
+function fmtCap(v){v=+v||0;return v>=1e6?'$'+(v/1e6).toFixed(2)+'M':v>=1e3?'$'+(v/1e3).toFixed(2)+'K':'$'+v.toFixed(0);}
 const t2=(k,...a)=>I18N[lang]&&typeof (I18N[lang][k])==='function'?I18N[lang][k](...a):(I18N[lang]&&I18N[lang][k]!==undefined?I18N[lang][k]:t(k,...a));
 function renderDetail(){
   const r=(sel>=0?T[sel]:null); if(!r){document.getElementById('detail').innerHTML='';return;}

@@ -939,7 +939,11 @@ class TestStopLossFreshness:
         row = {"address": "CAPpump", "price": 2.0, "liquidity": 0, "market_cap": 7300,
                "is_honeypot": 0, "renounced_mint": 1, "renounced_freeze_account": 1, "burn_ratio": 0}
         assert appmod.monitor_positions("sol", {"CAPpump": row}, s)[0]["mcap"] == 7300
-        assert appmod.monitor_positions("sol", {}, s)[0]["mcap"] == 2.0e9
+        # строка листа застыла (цена в ней 2.0), а RT-цена уже 3.0 → капа масштабируется
+        s.positions[0]["cur_price"] = 3.0
+        s.positions[0]["rt_ts"] = time.time()
+        assert appmod.monitor_positions("sol", {"CAPpump": row}, s)[0]["mcap"] == 10950
+        assert appmod.monitor_positions("sol", {}, s)[0]["mcap"] == 3.0e9
 
     def test_monitor_reports_failure_when_both_sources_dead(self, tmp_path, monkeypatch):
         _mu_client(tmp_path, monkeypatch)

@@ -1797,10 +1797,16 @@ def monitor_positions(chain: str, rows_by_addr: dict | None = None,
             ep = p.get("entry_price", 0.0)
             if ep > 0:
                 p["cur_price"] = round(ep * (1 + p["pnl"]), 10)
-        # Маркет-кап для карточки (у мемов цена нечитаема, трейдеры думают в «7k MC»):
-        # из строки хот-листа, а вне листа для pump.fun считаем от цены (суплай фикс. 1B).
+        # Маркет-кап для карточки (у мемов цена нечитаема, трейдеры думают в «7k MC»).
+        # Строка листа даёт капу НА МОМЕНТ строки (при бане GMGN — застывшую) → масштабируем
+        # свежей ценой (watcher/RT): суплай не меняется, MC = row_mc × cur_price/row_price.
         _row = rows_by_addr.get(p["address"])
         mc = _f(_row.get("market_cap") or _row.get("mcap")) if _row is not None else 0.0
+        if mc and _row is not None:
+            _rp = _f(_row.get("price"))
+            _cp = float(p.get("cur_price", 0.0) or 0.0)
+            if _rp > 0 and _cp > 0:
+                mc = mc * _cp / _rp
         if not mc and p.get("cur_price") and str(p.get("address", "")).endswith("pump"):
             mc = float(p["cur_price"]) * 1e9
         out.append(dict(symbol=p["symbol"], address=p["address"], size_sol=p["size_sol"],
