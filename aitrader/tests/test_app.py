@@ -1106,6 +1106,66 @@ class TestPumpCurve:
         assert s.positions[0]["pnl"] == -0.45                              # стоп не слеп
 
 
+# ── Smart-Exit Mirror: инсайдеры из атрибуции входа сливают → выходим вместе с ними ──
+class TestSmartExitMirror:
+    def test_token_amounts_parse_and_closed_account(self, monkeypatch):
+        import base64 as b64
+
+        import pumpcurve as pc
+        raw = b"\x00" * 64 + (777).to_bytes(8, "little") + b"\x00" * 20
+        acc = {"data": [b64.b64encode(raw).decode(), "base64"]}
+        class _R:
+            def raise_for_status(self): pass
+            def json(self): return {"result": {"value": [acc, None]}}
+        monkeypatch.setattr(pc.httpx, "post", lambda *a, **k: _R())
+        # существующий аккаунт → amount по оффсету 64; закрытый (None) → 0 (слил всё)
+        assert pc.token_amounts(["A1", "A2"]) == {"A1": 777, "A2": 0}
+
+    def test_insiders_dump_triggers_exit_for_bot_session(self, monkeypatch):
+        import threading as th
+        from types import SimpleNamespace
+
+        import watcher as w
+        monkeypatch.setattr(w, "SMART_EXIT", True)
+        monkeypatch.setattr(w.wallets, "TRACKED",
+                            {"W1addr": {"name": "whale1"}, "W2addr": {"name": "whale2"}})
+        monkeypatch.setattr(w.pumpcurve, "ata_address", lambda o, m: f"ATA_{o}")
+        s = SimpleNamespace(lock=th.Lock(),
+                            bot=SimpleNamespace(enabled=True, cfg=dict(appmod.bot.CFG)),
+                            positions=[dict(symbol="X", address="MINTX", size_sol=0.1, pnl=0.0,
+                                            cycles=0, entry={}, chain="sol", entry_price=1.0,
+                                            entry_attrib=dict(tracked=["whale1", "whale2"]))])
+        sold = {}
+        pw = w.PositionWatcher(lambda: [s], appmod.CFG,
+                               lambda sess: (lambda addr, fraction=1.0, reason=None:
+                                             sold.update(addr=addr, reason=reason)))
+        bal = {"ATA_W1addr": 1000, "ATA_W2addr": 1000}
+        monkeypatch.setattr(w.pumpcurve, "token_amounts", lambda atas: dict(bal))
+        pw.smart_exit_once()                                   # первый проход: только базлайн
+        assert not sold
+        bal["ATA_W1addr"] = 100                                # кит-1 слил 90% (> DROP 50%)
+        pw.smart_exit_once()
+        assert sold["addr"] == "MINTX" and "SMART-EXIT" in sold["reason"] and "1/2" in sold["reason"]
+        sold.clear(); pw.smart_exit_once()                     # один выстрел на позицию
+        assert not sold
+
+    def test_manual_session_never_smart_exited(self, monkeypatch):
+        import threading as th
+        from types import SimpleNamespace
+
+        import watcher as w
+        monkeypatch.setattr(w, "SMART_EXIT", True)
+        s = SimpleNamespace(lock=th.Lock(),
+                            bot=SimpleNamespace(enabled=False, cfg=dict(appmod.bot.CFG)),
+                            positions=[dict(symbol="X", address="MINTX", size_sol=0.1, pnl=0.0,
+                                            cycles=0, entry={}, chain="sol", entry_price=1.0,
+                                            entry_attrib=dict(tracked=["whale1"]))])
+        pw = w.PositionWatcher(lambda: [s], appmod.CFG,
+                               lambda sess: (lambda *a, **k:
+                                             (_ for _ in ()).throw(AssertionError("no sell"))))
+        pw.smart_exit_once()                                   # бот выключен → зеркалу нельзя
+
+
 # ── Покупка не падает в 500, когда GMGN в бане: базовые данные из DexScreener ──
 class TestBuyResilience:
     class _Boom:

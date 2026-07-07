@@ -107,6 +107,43 @@ def curve_prices_sol(mints: list[str]) -> dict[str, float]:
     return out
 
 
+TOKEN_PROGRAM = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+ATA_PROGRAM = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+
+
+def ata_address(owner: str, mint: str) -> str:
+    """Associated Token Account кошелька для минта (детерминированно, без сети)."""
+    pda, _ = Pubkey.find_program_address(
+        [bytes(Pubkey.from_string(owner)), bytes(TOKEN_PROGRAM), bytes(Pubkey.from_string(mint))],
+        ATA_PROGRAM)
+    return str(pda)
+
+
+def token_amounts(atas: list[str]) -> dict[str, int]:
+    """Сырые балансы SPL токен-аккаунтов батчом (amount = u64 LE по оффсету 64).
+    Несуществующий аккаунт (продал всё и закрыл) → 0. Для Smart-Exit Mirror."""
+    out: dict[str, int] = {}
+    atas = [a for a in atas if a]
+    for i in range(0, len(atas), 100):
+        chunk = atas[i:i + 100]
+        r = httpx.post(RPC_URL, json=dict(
+            jsonrpc="2.0", id=1, method="getMultipleAccounts",
+            params=[chunk, {"encoding": "base64", "commitment": "confirmed"}]),
+            timeout=TIMEOUT)
+        r.raise_for_status()
+        vals = (r.json().get("result") or {}).get("value") or []
+        for ata, acc in zip(chunk, vals):
+            if not acc:
+                out[ata] = 0                      # аккаунт закрыт → баланс 0 (слил всё)
+                continue
+            try:
+                raw = base64.b64decode((acc.get("data") or [""])[0])
+                out[ata] = int.from_bytes(raw[64:72], "little")
+            except Exception:
+                continue                          # не парсится → пропуск (не считаем нулём)
+    return out
+
+
 def usd_prices(mints: list[str]) -> dict[str, float]:
     """mint → цена в USD (кривая × курс SOL). Пусто, если курс SOL недоступен —
     не подмешиваем цены в неправильных единицах."""

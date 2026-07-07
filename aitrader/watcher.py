@@ -26,6 +26,13 @@ import time
 import bot as botmod
 import dexadapter
 import pumpcurve
+import wallets
+
+# Smart-Exit Mirror: выходим, когда сливают смарт-кошельки, ради которых входили.
+# ABC_SMART_EXIT=0 выключить; DROP — доля от базового баланса, ниже которой кошелёк
+# считается «слившим» (0.5 = слил больше половины своей позиции).
+SMART_EXIT = os.getenv("ABC_SMART_EXIT", "1").strip().lower() in ("1", "true", "yes", "on")
+SMART_EXIT_DROP = float(os.getenv("ABC_SMART_EXIT_DROP", "0.5") or 0.5)
 
 WATCH_POLL_S = float(os.getenv("ABC_WATCH_POLL_S", "2.0") or 2.0)
 WS_ENABLED = os.getenv("ABC_WATCH_WS", "1").strip().lower() in ("1", "true", "yes", "on")
@@ -130,10 +137,71 @@ class PositionWatcher:
                 except Exception as e:              # 404 гонка с ботом и т.п. — не роняем цикл
                     self._log("WATCH_ERR", p.get("symbol", "?"), str(e))
 
+    # ── Smart-Exit Mirror: инсайдеры (кошельки из атрибуции входа) сливают → выходим ──
+    def _insider_atas(self, p: dict) -> list[str]:
+        """ATA отслеживаемых кошельков из атрибуции входа (кэш в позиции).
+        Имена из entry_attrib.tracked резолвятся в адреса через реестр wallets.TRACKED."""
+        if "_ins_atas" in p:
+            return p["_ins_atas"]
+        names = set((p.get("entry_attrib") or {}).get("tracked") or [])
+        atas = []
+        if names:
+            for addr, w in wallets.TRACKED.items():
+                if w.get("name") in names:
+                    try:
+                        atas.append(pumpcurve.ata_address(addr, p["address"]))
+                    except Exception:
+                        continue
+        p["_ins_atas"] = atas
+        return atas
+
+    def smart_exit_once(self):
+        """Один проход зеркала: балансы инсайдеров по нашим позициям одним батчом;
+        ≥половина инсайдеров слила >DROP своей позиции → выходим (только бот-сессии)."""
+        if not SMART_EXIT:
+            return
+        targets = [(s, p) for s, p in self._open_pairs()
+                   if getattr(s.bot, "enabled", False) and not p.get("self_custody")
+                   and not p.get("smart_exit_done") and self._insider_atas(p)]
+        if not targets:
+            return
+        all_atas = sorted({a for _, p in targets for a in p["_ins_atas"]})
+        try:
+            bal = pumpcurve.token_amounts(all_atas)
+        except Exception:
+            return
+        for sess, p in targets:
+            with sess.lock:
+                if p not in sess.positions:
+                    continue
+                base = p.setdefault("insider_base", {})
+                dumped = total = 0
+                for ata in p["_ins_atas"]:
+                    cur = bal.get(ata)
+                    if cur is None:
+                        continue
+                    if ata not in base:
+                        base[ata] = cur                    # базовый баланс на первом наблюдении
+                    if base[ata] <= 0:
+                        continue
+                    total += 1
+                    if cur < base[ata] * (1.0 - SMART_EXIT_DROP):
+                        dumped += 1
+                if total == 0 or dumped < max(1, (total + 1) // 2):
+                    continue
+                p["smart_exit_done"] = True                # один выстрел на позицию
+                try:
+                    self._sell_for(sess)(p["address"], fraction=1.0,
+                                         reason=f"SMART-EXIT insiders dumping {dumped}/{total}")
+                    self.stats["smart_exits"] = self.stats.get("smart_exits", 0) + 1
+                except Exception as e:
+                    self._log("WATCH_ERR", p.get("symbol", "?"), f"smart-exit: {e}")
+
     def _loop(self):
         while not self._stop.is_set():
             try:
                 self.poll_once()
+                self.smart_exit_once()
             except Exception:
                 pass
             timeout = WATCH_POLL_S if self._open_pairs() else 5.0
