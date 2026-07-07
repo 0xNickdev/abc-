@@ -715,6 +715,7 @@ const I18N={
     bot_stats:(t,b,s,bl)=>`轮次 ${t} · 买 ${b} · 卖 ${s} · 风控拦截 ${bl}`,
     bot_f_max_new_per_tick:'每轮最多新开仓', bot_f_poll_s:'轮询间隔(秒)', bot_f_escape_severity_exit:'逃生严重度≥即清仓',
     bot_f_trail_activate_pct:'浮盈≥启用移动止盈', bot_f_require_abc_trigger:'仅策略触发才建仓', bot_f_mode:'模式',
+    bot_f_min_priority:'最低优先级分（0=关闭；建议 70）',
     bot_mode_n1:'N1 · 机器人提议，你点确认', bot_mode_n2:'N2 · 半自动（纸面/LIVE 锁）',
     bot_mode_n3:'N3 · 自动驾驶（session 钱包）',
     bot_props:'待确认提议', prop_ok:'✓ 执行', prop_no:'✗', prop_done:'已执行', prop_gone:'已忽略',
@@ -895,6 +896,7 @@ const I18N={
     bot_stats:(t,b,s,bl)=>`ticks ${t} · buys ${b} · sells ${s} · risk-blocked ${bl}`,
     bot_f_max_new_per_tick:'Max new entries/tick', bot_f_poll_s:'Poll interval (s)', bot_f_escape_severity_exit:'Exit at escape severity ≥',
     bot_f_trail_activate_pct:'Trailing activates at PnL ≥', bot_f_require_abc_trigger:'Only strategy-triggered entries', bot_f_mode:'Mode',
+    bot_f_min_priority:'Min priority score (0 = off; 70 recommended)',
     bot_mode_n1:'N1 · bot proposes, you confirm', bot_mode_n2:'N2 · semi-auto (paper/LIVE locks)',
     bot_mode_n3:'N3 · autopilot (session wallet)',
     bot_props:'Pending proposals', prop_ok:'✓ execute', prop_no:'✗', prop_done:'Executed', prop_gone:'Dismissed',
@@ -1869,7 +1871,7 @@ async function applyStrategy(){
 }
 
 /* ── 机器人面板（每用户一个回路；参数即时可改）── */
-const BOT_FIELDS=['max_new_per_tick','poll_s','escape_severity_exit','trail_activate_pct','require_abc_trigger'];
+const BOT_FIELDS=['max_new_per_tick','poll_s','escape_severity_exit','trail_activate_pct','min_priority','require_abc_trigger'];
 async function loadBot(){
   const box=document.getElementById('botPane');
   if(source!=='backend'){box.innerHTML='<div class="hint">'+t('pipe_be_off')+'</div>';return;}
