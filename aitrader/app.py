@@ -1184,37 +1184,61 @@ def _utc_week() -> str:
     y, w, _ = datetime.datetime.now(datetime.timezone.utc).isocalendar()
     return f"{y}-W{w:02d}"
 
+class _WeekBudget:
+    """ОБЩИЙ недельный банкролл (решение юзера: партнёр наблюдает — котёл один):
+    единый счётчик потерь на ВСЕ сессии сразу — house-бот, ручные сделки, личные боты.
+    Сгорел → входы стоят у всех до новой ISO-недели (понедельник UTC)."""
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.loss = 0.0
+        self._week = _utc_week()
+
+    def _roll(self):
+        w = _utc_week()
+        if w != self._week:
+            self._week = w
+            self.loss = 0.0
+
+    def add(self, sol: float):
+        with self.lock:
+            self._roll()
+            self.loss = round(self.loss + max(0.0, sol), 4)
+
+    def current(self) -> float:
+        with self.lock:
+            self._roll()
+            return self.loss
+
+    def exhausted(self) -> bool:
+        return self.current() >= CFG["week_budget_sol"]
+
+WEEK_BUDGET = _WeekBudget()
+
 class RiskManager:
     def __init__(self):
         self.realized_loss_today = 0.0
-        self.realized_loss_week = 0.0   # недельный банкролл: сгорел → торги до понедельника
         self.consec_losses = 0
         self.halted = False
         self._day = _utc_day()
-        self._week = _utc_week()
 
     def roll_day(self):
         """Новый UTC-день → дневные предохранители обнуляются (стандарт индустрии):
         kill-switch, серия поражений и «убыток за сегодня» не должны жить вечно —
         раньше их снимал только рестарт процесса (частые деплои это маскировали).
-        Новая ISO-неделя (понедельник UTC) → обнуляется и недельный бюджет."""
+        Недельный банкролл — ОБЩИЙ (WEEK_BUDGET), катится сам по ISO-неделе."""
         d = _utc_day()
         if d != self._day:
             self._day = d
             self.realized_loss_today = 0.0
             self.consec_losses = 0
             self.halted = False
-        w = _utc_week()
-        if w != self._week:
-            self._week = w
-            self.realized_loss_week = 0.0
 
     def halted_now(self, daily_cap: float) -> bool:
         """Для halted_fn бота: сброс дня и здесь — замерший на kill-switch бот не доходит
         до gate() и иначе никогда не увидел бы новый день."""
         self.roll_day()
         return (self.halted or self.realized_loss_today >= daily_cap
-                or self.realized_loss_week >= CFG["week_budget_sol"])
+                or WEEK_BUDGET.exhausted())
 
     def gate(self, size_sol: float, n_positions: int, exposure: float):
         """组合级硬风控：返回 (allow, reason)。"""
@@ -1226,7 +1250,7 @@ class RiskManager:
             return False, "BLOCK kill-switch (consecutive losses)"
         if self.realized_loss_today >= CFG["daily_loss_cap_sol"]:
             return False, "BLOCK daily loss cap"
-        if self.realized_loss_week >= CFG["week_budget_sol"]:
+        if WEEK_BUDGET.exhausted():
             return False, f"BLOCK week budget exhausted ({CFG['week_budget_sol']} SOL)"
         if size_sol > CFG["max_per_trade_sol"]:
             return False, f"BLOCK size above per-trade cap ({CFG['max_per_trade_sol']} SOL)"
@@ -1770,7 +1794,7 @@ def _portfolio(s: UserSession | None = None):
     return dict(open_positions=len(s.positions), max_concurrent=CFG["max_concurrent_positions"],
                 total_exposure=s.exposure(), max_total_exposure=CFG["max_total_exposure_sol"],
                 realized_loss_today=s.risk.realized_loss_today, daily_loss_cap=CFG["daily_loss_cap_sol"],
-                realized_loss_week=s.risk.realized_loss_week, week_budget=CFG["week_budget_sol"],
+                realized_loss_week=WEEK_BUDGET.current(), week_budget=CFG["week_budget_sol"],
                 consec_losses=s.risk.consec_losses, kill_switch_consec=CFG["kill_switch_consec_losses"],
                 kill_switch=s.risk.halted)
 
@@ -2042,7 +2066,7 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         if pnl < 0:
             s.risk.consec_losses += 1
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * p["size_sol"], 4)
-            s.risk.realized_loss_week = round(s.risk.realized_loss_week + abs(pnl) * p["size_sol"], 4)
+            WEEK_BUDGET.add(abs(pnl) * p["size_sol"])   # общий недельный котёл (все сессии)
         else:
             s.risk.consec_losses = 0
         log("SELL", p["symbol"], f"{s.mode} closed PnL {pnl:+.1%}{tag}",
@@ -2053,7 +2077,7 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
     else:
         if pnl < 0:                                  # 分批离场若为亏损也按比例入账当日亏损
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * sold_sol, 4)
-            s.risk.realized_loss_week = round(s.risk.realized_loss_week + abs(pnl) * sold_sol, 4)
+            WEEK_BUDGET.add(abs(pnl) * sold_sol)        # общий недельный котёл (все сессии)
         p["size_sol"] = round(p["size_sol"] - sold_sol, 6)
         log("SELL", p["symbol"], f"{s.mode} partial {pct}% PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac,

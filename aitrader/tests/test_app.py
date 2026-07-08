@@ -184,19 +184,21 @@ class TestRiskManager:
         assert rm.gate(0.1, 0, 0)[0] is False        # тот же день → держит
         assert rm.halted_now(0.5) is True
 
-    def test_week_budget_blocks_until_new_week(self):
-        rm = appmod.RiskManager()
-        rm.realized_loss_week = appmod.CFG["week_budget_sol"]     # банкролл недели сгорел
-        allow, reason = rm.gate(0.1, 0, 0.0)
+    def test_week_budget_is_global_and_blocks_all_sessions(self, monkeypatch):
+        # общий котёл: сгорел → блокируются ВСЕ сессии (house-бот, ручные, личные)
+        monkeypatch.setattr(appmod.WEEK_BUDGET, "loss", appmod.CFG["week_budget_sol"])
+        rm_house, rm_user = appmod.RiskManager(), appmod.RiskManager()
+        allow, reason = rm_house.gate(0.1, 0, 0.0)
         assert not allow and "week budget" in reason
-        assert rm.halted_now(appmod.CFG["daily_loss_cap_sol"]) is True
+        assert rm_user.gate(0.1, 0, 0.0)[0] is False
+        assert rm_user.halted_now(appmod.CFG["daily_loss_cap_sol"]) is True
         # новый день той же недели НЕ спасает
-        rm._day = "2020-01-01"
-        assert rm.gate(0.1, 0, 0.0)[0] is False
-        # новая ISO-неделя → бюджет заново
-        rm._week = "2020-W01"
-        allow2, _ = rm.gate(0.1, 0, 0.0)
-        assert allow2 and rm.realized_loss_week == 0.0
+        rm_house._day = "2020-01-01"
+        assert rm_house.gate(0.1, 0, 0.0)[0] is False
+        # новая ISO-неделя → котёл заново для всех
+        monkeypatch.setattr(appmod.WEEK_BUDGET, "_week", "2020-W01")
+        allow2, _ = rm_house.gate(0.1, 0, 0.0)
+        assert allow2 and appmod.WEEK_BUDGET.current() == 0.0
 
     def test_kill_switch_on_consec_losses(self):
         rm = appmod.RiskManager()
