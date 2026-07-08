@@ -1171,13 +1171,36 @@ def build_condition_orders() -> list[dict]:
 # ──────────────────────────────────────────────────────────────────────────
 # 9. 全局状态（单进程单用户；持仓 + 风控有状态）
 # ──────────────────────────────────────────────────────────────────────────
+def _utc_day() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+
 class RiskManager:
     def __init__(self):
         self.realized_loss_today = 0.0
         self.consec_losses = 0
         self.halted = False
+        self._day = _utc_day()
+
+    def roll_day(self):
+        """Новый UTC-день → дневные предохранители обнуляются (стандарт индустрии):
+        kill-switch, серия поражений и «убыток за сегодня» не должны жить вечно —
+        раньше их снимал только рестарт процесса (частые деплои это маскировали)."""
+        d = _utc_day()
+        if d != self._day:
+            self._day = d
+            self.realized_loss_today = 0.0
+            self.consec_losses = 0
+            self.halted = False
+
+    def halted_now(self, daily_cap: float) -> bool:
+        """Для halted_fn бота: сброс дня и здесь — замерший на kill-switch бот не доходит
+        до gate() и иначе никогда не увидел бы новый день."""
+        self.roll_day()
+        return self.halted or self.realized_loss_today >= daily_cap
+
     def gate(self, size_sol: float, n_positions: int, exposure: float):
         """组合级硬风控：返回 (allow, reason)。"""
+        self.roll_day()
         if self.halted:
             return False, "BLOCK kill-switch triggered"
         if self.consec_losses >= CFG["kill_switch_consec_losses"]:
@@ -1723,6 +1746,7 @@ def _feat(f):
 
 def _portfolio(s: UserSession | None = None):
     s = s or ST
+    s.risk.roll_day()   # UI не должен показывать вчерашний kill-switch/дневной убыток
     return dict(open_positions=len(s.positions), max_concurrent=CFG["max_concurrent_positions"],
                 total_exposure=s.exposure(), max_total_exposure=CFG["max_total_exposure_sol"],
                 realized_loss_today=s.risk.realized_loss_today, daily_loss_cap=CFG["daily_loss_cap_sol"],
@@ -2043,7 +2067,7 @@ async def _lifespan(_app: FastAPI):
         ST.bot.start("sol", screen_fn=lambda c: screen_once(c, ST),
                      buy_fn=_bot_buy_fn(ST), sell_fn=_bot_sell_fn(ST),
                      positions_fn=lambda: ST.positions, risk_cfg=CFG, lock=ST.lock,
-                     halted_fn=lambda: ST.risk.halted or ST.risk.realized_loss_today >= CFG["daily_loss_cap_sol"])
+                     halted_fn=lambda: ST.risk.halted_now(CFG["daily_loss_cap_sol"]))
         log("BOT", "ABC", f"автозапуск режим {_auto} (BOT_AUTOSTART)", mode=ST.mode)
     # Ночной review-loop (офлайн-обучение): opt-in через ABC_NIGHTLY_REVIEW=1.
     # Первый прогон при старте подтянет веса кошельков сразу, далее раз в сутки.
@@ -2634,7 +2658,7 @@ def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader):
         buy_fn=_bot_buy_fn(sess),
         sell_fn=_bot_sell_fn(sess),
         positions_fn=lambda: sess.positions, risk_cfg=CFG, lock=sess.lock,
-        halted_fn=lambda: sess.risk.halted or sess.risk.realized_loss_today >= CFG["daily_loss_cap_sol"])
+        halted_fn=lambda: sess.risk.halted_now(CFG["daily_loss_cap_sol"]))
     log("BOT", "ABC", "Autonomous loop started" if started else "Already running (duplicate start ignored)", mode=sess.mode)
     return dict(ok=True, started=started, **sess.bot.status())
 

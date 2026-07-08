@@ -163,6 +163,27 @@ class TestRiskManager:
                            exposure=appmod.CFG["max_total_exposure_sol"])
         assert not allow
 
+    def test_new_utc_day_resets_daily_breakers(self):
+        rm = appmod.RiskManager()
+        rm.halted = True
+        rm.consec_losses = 5
+        rm.realized_loss_today = 0.4
+        rm._day = "2020-01-01"                       # «вчера»
+        allow, _ = rm.gate(0.1, 0, 0.0)
+        assert allow is True
+        assert rm.halted is False and rm.consec_losses == 0 and rm.realized_loss_today == 0.0
+        # halted_now тоже катит день (бот, замерший на kill-switch, не доходит до gate)
+        rm.halted = True
+        rm._day = "2020-01-01"
+        assert rm.halted_now(0.5) is False
+
+    def test_same_day_killswitch_stays(self):
+        rm = appmod.RiskManager()
+        rm.consec_losses = appmod.CFG["kill_switch_consec_losses"]
+        assert rm.gate(0.1, 0, 0)[0] is False        # взводится
+        assert rm.gate(0.1, 0, 0)[0] is False        # тот же день → держит
+        assert rm.halted_now(0.5) is True
+
     def test_kill_switch_on_consec_losses(self):
         rm = appmod.RiskManager()
         rm.consec_losses = appmod.CFG["kill_switch_consec_losses"]
