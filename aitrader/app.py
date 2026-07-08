@@ -2606,6 +2606,33 @@ def _n3_execute(sess: UserSession, side: str, chain: str, address: str,
     sig = sessionwallet.sign_and_send(built["tx"], kp)
     return do_sell(address, fraction, f"N3 · tx {sig[:16]}… · {reason or ''}", sess)
 
+# Авто-Verify перед входом БОТА (ABC_BOT_VERIFY=0 выключить): только бесплатные
+# RPC-детекторы — не жгут квоты GMGN/getxapi и не зависят от их банов. Ручных покупок
+# не касается: человек решает сам (ему кнопка Verify). Цель юзера: «меньше рагов».
+BOT_VERIFY = os.getenv("ABC_BOT_VERIFY", "1").strip().lower() in ("1", "true", "yes", "on")
+
+def preentry_red_flags(address: str) -> str | None:
+    """Red flag по независимым он-чейн сигналам: top10-концентрация (RPC) и доля свежих
+    кошельков среди топ-холдеров (RPC). Пороги = те же, что в /api/token/quality.
+    Детектор недоступен/выключен → пропуск (fail-open по детектору, т.к. базовые
+    safety-гейты уже отработали); сработал → причина строкой."""
+    try:
+        top10 = dexadapter._top10_concentration(address)
+        if top10 and top10 >= 0.6:
+            return f"top10 {top10:.0%} >= 60%"
+    except Exception:
+        pass
+    try:
+        fw = dexadapter.fresh_wallet_count(address) or {}
+        checked = int(fw.get("checked") or 0)
+        if checked:
+            ratio = float(fw.get("ratio") or (fw.get("fresh", 0) / checked))
+            if ratio >= 0.5:
+                return f"fresh wallets {fw.get('fresh', 0)}/{checked}"
+    except Exception:
+        pass
+    return None
+
 def _bot_buy_fn(sess: UserSession):
     """buy-колбэк бота: режим читается на каждом вызове — переключение на лету.
     Размер зажимается потолком РЕЖИМА: N1/N2 (полуавтомат) ≤ bot_max_per_trade_sol,
@@ -2615,6 +2642,13 @@ def _bot_buy_fn(sess: UserSession):
         mode = sess.bot.cfg.get("mode")
         cap = CFG["auto_max_per_trade_sol"] if mode == "n3" else CFG["bot_max_per_trade_sol"]
         size_sol = round(min(size_sol, cap), 4)
+        # авто-Verify: red flag → входа нет (bot.stats считает как blocked, не error)
+        if BOT_VERIFY and chain == "sol":
+            flag = preentry_red_flags(address)
+            if flag:
+                log("BUY_BLOCK", address[:8], f"auto-verify: {flag}", mode=sess.mode,
+                    pubkey=sess.pubkey)
+                raise HTTPException(409, f"auto-verify red flag: {flag}")
         if mode == "n1":
             _propose(sess, "buy", chain, address, size_sol=size_sol, reason="вход по стратегии")
             return dict(ok=True, proposed=True)

@@ -1127,6 +1127,40 @@ class TestPumpCurve:
         assert s.positions[0]["pnl"] == -0.45                              # стоп не слеп
 
 
+# ── Авто-Verify перед входом бота: red flag по он-чейн детекторам → входа нет ──
+class TestAutoVerifyPreEntry:
+    def test_red_flag_blocks_bot_entry(self, tmp_path, monkeypatch):
+        _mu_client(tmp_path, monkeypatch)
+        monkeypatch.setattr(appmod, "BOT_VERIFY", True)
+        monkeypatch.setattr(appmod, "preentry_red_flags", lambda a: "top10 72% >= 60%")
+        sess = appmod.get_session("AVWallet11111")
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as e:
+            appmod._bot_buy_fn(sess)("sol", "RUGCA", 0.05)
+        assert e.value.status_code == 409 and "auto-verify" in e.value.detail
+
+    def test_clean_token_passes_to_buy(self, tmp_path, monkeypatch):
+        _mu_client(tmp_path, monkeypatch)
+        monkeypatch.setattr(appmod, "BOT_VERIFY", True)
+        monkeypatch.setattr(appmod, "preentry_red_flags", lambda a: None)
+        seen = {}
+        monkeypatch.setattr(appmod, "do_buy",
+                            lambda ch, a, sz, s=None: seen.update(addr=a) or dict(ok=True))
+        appmod._bot_buy_fn(appmod.get_session("AVWallet22222"))("sol", "CLEANCA", 0.05)
+        assert seen["addr"] == "CLEANCA"
+
+    def test_manual_buy_not_gated_by_auto_verify(self, tmp_path, monkeypatch):
+        # человек решает сам: ручной /api/buy не проходит авто-Verify (ему кнопка Verify)
+        client = _mu_client(tmp_path, monkeypatch)
+        monkeypatch.setattr(appmod, "BOT_VERIFY", True)
+        monkeypatch.setattr(appmod, "preentry_red_flags",
+                            lambda a: (_ for _ in ()).throw(AssertionError("manual must skip")))
+        r = client.post("/api/buy", json={
+            "address": "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "size_sol": 0.1, "chain": "sol"})
+        assert r.status_code == 200
+
+
 # ── Smart-Exit Mirror: инсайдеры из атрибуции входа сливают → выходим вместе с ними ──
 class TestSmartExitMirror:
     def test_token_amounts_parse_and_closed_account(self, monkeypatch):
