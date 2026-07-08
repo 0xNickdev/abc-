@@ -97,10 +97,16 @@ CFG = {
     "max_per_trade_sol": float(os.getenv("ABC_MAX_TRADE_SOL", "0.5") or 0.5),
     "bot_max_per_trade_sol": float(os.getenv("ABC_BOT_MAX_TRADE_SOL", "0.1") or 0.1),
     "auto_max_per_trade_sol": float(os.getenv("ABC_AUTO_MAX_TRADE_SOL", "0.05") or 0.05),
-    "max_total_exposure_sol": 1.0,
+    # Недельный банкролл-эксперимент (решение юзера 2026-07-08): выделяем 10 бумажных SOL
+    # до конца недели — сгорели раньше → торги стоят до понедельника (UTC ISO-неделя).
+    # Дневной лимит поднят до 2.0 (≈10/неделя дыхания), kill-switch 5 стопов подряд.
+    # Всё крутится env'ами без кода: ABC_MAX_EXPOSURE_SOL / ABC_WEEK_BUDGET_SOL /
+    # ABC_DAILY_CAP_SOL / ABC_KILL_CONSEC.
+    "max_total_exposure_sol": float(os.getenv("ABC_MAX_EXPOSURE_SOL", "10") or 10),
     "max_concurrent_positions": 20,   # 感受阶段放宽（SHADOW 不动真钱）；真实上线前按纪律调回（如 2~3）
-    "daily_loss_cap_sol": 0.5,
-    "kill_switch_consec_losses": 3,
+    "week_budget_sol": float(os.getenv("ABC_WEEK_BUDGET_SOL", "10") or 10),
+    "daily_loss_cap_sol": float(os.getenv("ABC_DAILY_CAP_SOL", "2.0") or 2.0),
+    "kill_switch_consec_losses": int(os.getenv("ABC_KILL_CONSEC", "5") or 5),
     # 避雷硬门槛（真实字段，无合成安全分；用户决策：直接用布尔/数值字段判）
     "require_renounced_mint": True,   # 必须放弃增发权
     "max_buy_tax": 0.10,
@@ -1174,29 +1180,41 @@ def build_condition_orders() -> list[dict]:
 def _utc_day() -> str:
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
+def _utc_week() -> str:
+    y, w, _ = datetime.datetime.now(datetime.timezone.utc).isocalendar()
+    return f"{y}-W{w:02d}"
+
 class RiskManager:
     def __init__(self):
         self.realized_loss_today = 0.0
+        self.realized_loss_week = 0.0   # недельный банкролл: сгорел → торги до понедельника
         self.consec_losses = 0
         self.halted = False
         self._day = _utc_day()
+        self._week = _utc_week()
 
     def roll_day(self):
         """Новый UTC-день → дневные предохранители обнуляются (стандарт индустрии):
         kill-switch, серия поражений и «убыток за сегодня» не должны жить вечно —
-        раньше их снимал только рестарт процесса (частые деплои это маскировали)."""
+        раньше их снимал только рестарт процесса (частые деплои это маскировали).
+        Новая ISO-неделя (понедельник UTC) → обнуляется и недельный бюджет."""
         d = _utc_day()
         if d != self._day:
             self._day = d
             self.realized_loss_today = 0.0
             self.consec_losses = 0
             self.halted = False
+        w = _utc_week()
+        if w != self._week:
+            self._week = w
+            self.realized_loss_week = 0.0
 
     def halted_now(self, daily_cap: float) -> bool:
         """Для halted_fn бота: сброс дня и здесь — замерший на kill-switch бот не доходит
         до gate() и иначе никогда не увидел бы новый день."""
         self.roll_day()
-        return self.halted or self.realized_loss_today >= daily_cap
+        return (self.halted or self.realized_loss_today >= daily_cap
+                or self.realized_loss_week >= CFG["week_budget_sol"])
 
     def gate(self, size_sol: float, n_positions: int, exposure: float):
         """组合级硬风控：返回 (allow, reason)。"""
@@ -1208,6 +1226,8 @@ class RiskManager:
             return False, "BLOCK kill-switch (consecutive losses)"
         if self.realized_loss_today >= CFG["daily_loss_cap_sol"]:
             return False, "BLOCK daily loss cap"
+        if self.realized_loss_week >= CFG["week_budget_sol"]:
+            return False, f"BLOCK week budget exhausted ({CFG['week_budget_sol']} SOL)"
         if size_sol > CFG["max_per_trade_sol"]:
             return False, f"BLOCK size above per-trade cap ({CFG['max_per_trade_sol']} SOL)"
         if n_positions >= CFG["max_concurrent_positions"]:
@@ -1750,6 +1770,7 @@ def _portfolio(s: UserSession | None = None):
     return dict(open_positions=len(s.positions), max_concurrent=CFG["max_concurrent_positions"],
                 total_exposure=s.exposure(), max_total_exposure=CFG["max_total_exposure_sol"],
                 realized_loss_today=s.risk.realized_loss_today, daily_loss_cap=CFG["daily_loss_cap_sol"],
+                realized_loss_week=s.risk.realized_loss_week, week_budget=CFG["week_budget_sol"],
                 consec_losses=s.risk.consec_losses, kill_switch_consec=CFG["kill_switch_consec_losses"],
                 kill_switch=s.risk.halted)
 
@@ -2021,6 +2042,7 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         if pnl < 0:
             s.risk.consec_losses += 1
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * p["size_sol"], 4)
+            s.risk.realized_loss_week = round(s.risk.realized_loss_week + abs(pnl) * p["size_sol"], 4)
         else:
             s.risk.consec_losses = 0
         log("SELL", p["symbol"], f"{s.mode} closed PnL {pnl:+.1%}{tag}",
@@ -2031,6 +2053,7 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
     else:
         if pnl < 0:                                  # 分批离场若为亏损也按比例入账当日亏损
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * sold_sol, 4)
+            s.risk.realized_loss_week = round(s.risk.realized_loss_week + abs(pnl) * sold_sol, 4)
         p["size_sol"] = round(p["size_sol"] - sold_sol, 6)
         log("SELL", p["symbol"], f"{s.mode} partial {pct}% PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac,

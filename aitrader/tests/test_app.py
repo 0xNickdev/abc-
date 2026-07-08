@@ -184,6 +184,20 @@ class TestRiskManager:
         assert rm.gate(0.1, 0, 0)[0] is False        # тот же день → держит
         assert rm.halted_now(0.5) is True
 
+    def test_week_budget_blocks_until_new_week(self):
+        rm = appmod.RiskManager()
+        rm.realized_loss_week = appmod.CFG["week_budget_sol"]     # банкролл недели сгорел
+        allow, reason = rm.gate(0.1, 0, 0.0)
+        assert not allow and "week budget" in reason
+        assert rm.halted_now(appmod.CFG["daily_loss_cap_sol"]) is True
+        # новый день той же недели НЕ спасает
+        rm._day = "2020-01-01"
+        assert rm.gate(0.1, 0, 0.0)[0] is False
+        # новая ISO-неделя → бюджет заново
+        rm._week = "2020-W01"
+        allow2, _ = rm.gate(0.1, 0, 0.0)
+        assert allow2 and rm.realized_loss_week == 0.0
+
     def test_kill_switch_on_consec_losses(self):
         rm = appmod.RiskManager()
         rm.consec_losses = appmod.CFG["kill_switch_consec_losses"]
