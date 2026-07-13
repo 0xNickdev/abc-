@@ -779,6 +779,13 @@ class TestWalletAuth:
         g = client.get("/api/twitter/config").json()
         assert g == {"enabled": True, "has_key": True}   # сам bearer наружу не уходит
 
+    def test_twitter_default_session_blocked_in_admin_pubkey_mode(self, client, monkeypatch):
+        # прод (ABC_ADMIN=<pubkey>): безкошельковая сессия = любой прохожий с URL →
+        # операторский Bearer перезаписать нельзя (иначе угон квоты/подмена сигнала)
+        monkeypatch.setattr(appmod, "ADMIN_WALLETS", frozenset({"A" * 44}))
+        r = client.post("/api/twitter/config", json={"enabled": True, "bearer": "EVIL"})
+        assert r.status_code == 403
+
     def test_kol_check_uses_getxapi_without_bearer(self, client, monkeypatch):
         # личный Bearer не настроен, но у оператора есть GETXAPI_KEY → работает через него
         monkeypatch.setattr(appmod.xapi, "key", lambda: "OPKEY")

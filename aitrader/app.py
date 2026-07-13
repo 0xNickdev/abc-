@@ -3020,6 +3020,11 @@ def api_twitter_set(cfg: TwitterCfgIn, x_wallet: str | None = WalletHeader,
                     x_auth: str | None = AuthHeader):
     _block_if_public()
     sess = get_session(x_wallet)
+    if sess.pubkey == DEFAULT_PUBKEY:
+        # Операторский Bearer (им пользуется house-бот и admin-fallback кнопки 𝕏):
+        # на публичном деплое с ABC_ADMIN=<pubkey> безкошельковая сессия — любой
+        # прохожий с URL → запись только оператору/локальной сессии.
+        _block_if_not_owner(sess, x_auth)
     require_auth(sess, x_auth)      # секрет юзера: писать только после входа подписью
     with sess.lock:
         sess.twitter["enabled"] = bool(cfg.enabled)
