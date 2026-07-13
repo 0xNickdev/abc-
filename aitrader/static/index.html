@@ -1680,7 +1680,17 @@ async function loadReview(){
   box.innerHTML='<div class="rv-empty">Loading…</div>';
   if(source!=='backend'){box.innerHTML='<div class="rv-empty">Connect to the local backend to see the review-loop.</div>';return;}
   let d;
-  try{const r=await fetch(API+'/api/review');if(!r.ok)throw 0;d=await r.json();}
+  try{
+    let r=await fetch(API+'/api/review');
+    if((r.status===401||r.status===403)&&walletPubkey){
+      // токен подписи протух (рестарт бэкенда) → сбросить и переподписать вход
+      authToken=null;localStorage.removeItem('abc_auth_'+walletPubkey);
+      try{await ensureAuth();}catch(_e){box.innerHTML='<div class="rv-empty">Operator only — sign in with the ADMIN wallet (Phantom signature).</div>';return;}
+      r=await fetch(API+'/api/review');
+    }
+    if(r.status===401||r.status===403){box.innerHTML='<div class="rv-empty">Operator only — connect the ADMIN wallet and sign in.</div>';return;}
+    if(!r.ok)throw 0;d=await r.json();
+  }
   catch(e){box.innerHTML='<div class="rv-empty">Backend offline.</div>';return;}
   const rep=d.report||{}, ov=rep.overall||{};
   const kpi=(lbl,val,cls)=>`<div class="rv-kpi"><span class="rv-kv ${cls||''}">${val}</span><span class="rv-kl">${lbl}</span></div>`;
