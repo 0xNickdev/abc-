@@ -27,6 +27,7 @@ from __future__ import annotations
 import base64
 import concurrent.futures
 import datetime
+import gzip
 import hashlib
 import json
 import math
@@ -1449,14 +1450,75 @@ def valid_chain(ch: str) -> str:
 # ──────────────────────────────────────────────────────────────────────────
 # 10. 日志（私有 ground truth；反馈飞轮的原料）
 # ──────────────────────────────────────────────────────────────────────────
+# Ротация: журнал пишется каждые ~20с 24/7 (FILTER/SCREEN на каждый тик) и без
+# ротации раздувает и диск, и — главное — память эндпоинтов статистики. Данные
+# НЕ теряются: старые записи переливаются в outputs/archive/<stem>-YYYY-MM.jsonl.gz,
+# статистика (backtest.collect / sell_records) читает hot + все архивы.
+LOG_ROTATE_MB = float(os.getenv("ABC_LOG_ROTATE_MB", "10") or 10)     # порог ротации hot-файла
+LOG_KEEP_DAYS = float(os.getenv("ABC_LOG_KEEP_DAYS", "7") or 7)       # свежее этого не архивируем (кроме перелива по размеру)
+_LOG_LOCK = threading.Lock()
+_log_writes = 0
+
+def _rotate_log_locked():
+    """Перелить старые записи hot-журнала в месячные gzip-архивы (вызывать под _LOG_LOCK).
+    Правило: всё старше LOG_KEEP_DAYS → в архив; если hot всё ещё больше порога —
+    доливаем старейшие записи, пока hot не ужмётся до ~половины порога."""
+    try:
+        if LOG_PATH.stat().st_size <= LOG_ROTATE_MB * 1e6:
+            return
+    except OSError:
+        return
+    cutoff = (datetime.datetime.now(datetime.timezone.utc)
+              - datetime.timedelta(days=LOG_KEEP_DAYS)).isoformat(timespec="seconds")
+    lines: list[tuple[str, str]] = []                 # (ts записи, строка)
+    with LOG_PATH.open("r") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            try:
+                ts = str(json.loads(line).get("ts", ""))
+            except Exception:
+                ts = ""                               # битая строка: не теряем, ляжет в текущий месяц
+            lines.append((ts, line if line.endswith("\n") else line + "\n"))
+    # индекс раздела: старше cutoff — в архив; затем по размеру до ~50% порога
+    idx = next((i for i, (ts, _) in enumerate(lines) if ts and ts >= cutoff), len(lines))
+    target = int(LOG_ROTATE_MB * 1e6 * 0.5)
+    keep_bytes = sum(len(line.encode()) for _, line in lines[idx:])
+    while idx < len(lines) - 1 and keep_bytes > target:
+        keep_bytes -= len(lines[idx][1].encode())
+        idx += 1
+    if idx == 0:
+        return
+    arch_dir = LOG_PATH.parent / backtest.ARCHIVE_DIRNAME
+    arch_dir.mkdir(parents=True, exist_ok=True)
+    cur_month = cutoff[:7]
+    by_month: dict[str, list[str]] = {}
+    for ts, line in lines[:idx]:
+        by_month.setdefault(ts[:7] or cur_month, []).append(line)
+    for month, chunk in sorted(by_month.items()):     # gzip-конкатенация валидна для чтения
+        with gzip.open(arch_dir / f"{LOG_PATH.stem}-{month}.jsonl.gz", "at", encoding="utf-8") as gz:
+            gz.writelines(chunk)
+    tmp = LOG_PATH.with_suffix(".jsonl.tmp")
+    with tmp.open("w") as fh:
+        fh.writelines(line for _, line in lines[idx:])
+    os.replace(tmp, LOG_PATH)
+
 def log(action: str, symbol: str, reason: str, extra: dict | None = None,
         mode: str | None = None, pubkey: str | None = None):
+    global _log_writes
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     rec = dict(ts=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                action=action, symbol=symbol, reason=reason, mode=(mode or ST.mode),
                pubkey=(pubkey or DEFAULT_PUBKEY), **(extra or {}))
-    with LOG_PATH.open("a") as fh:
-        fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    with _LOG_LOCK:
+        with LOG_PATH.open("a") as fh:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        _log_writes += 1
+        if _log_writes == 1 or _log_writes % 500 == 0:   # проверка размера редкая и дешёвая
+            try:
+                _rotate_log_locked()
+            except Exception:
+                pass                                     # ротация не должна ронять запись
 
 def pnl_calendar(pubkey: str, month: str) -> dict:
     """Дневной реализованный PnL (SOL) за месяц YYYY-MM.
@@ -1467,31 +1529,28 @@ def pnl_calendar(pubkey: str, month: str) -> dict:
     days: dict[str, dict] = {}
     tot = dict(pnl=0.0, net=0.0, trades=0, wins=0)   # net = вал минус оценочный round-trip cost
     pcts: list[float] = []            # доли PnL по каждой сделке (для сводной статистики)
-    if LOG_PATH.exists():
-        for line in LOG_PATH.read_text().splitlines():
-            try:
-                r = json.loads(line)
-            except Exception:
-                continue
-            if r.get("action") != "SELL" or not r.get("ts", "").startswith(month):
-                continue
-            # pk="*" — не фильтруем (house/бот); иначе только записи этого pubkey
-            if pk != "*" and r.get("pubkey", DEFAULT_PUBKEY) != pk:
-                continue
-            d = r["ts"][:10]
-            pct = float(r.get("pnl", 0.0)); size = float(r.get("size_sol", 0.0))
-            sol = pct * size
-            net = sol - FEE_ROUNDTRIP_PCT * size          # чистый: минус оценочный round-trip cost (fee+priority+slippage)
-            cell = days.setdefault(d, dict(pnl=0.0, net=0.0, trades=0, wins=0, list=[]))
-            cell["pnl"] = round(cell["pnl"] + sol, 6); cell["net"] = round(cell["net"] + net, 6); cell["trades"] += 1
-            # детализация сделки: токен, PnL% и в SOL (вал/чистый), время (для клика по дню)
-            cell["list"].append(dict(sym=r.get("symbol", "?"), pct=round(pct, 4),
-                                     sol=round(sol, 6), net=round(net, 6), ts=r.get("ts", "")[11:16],
-                                     address=r.get("address", "")))
-            tot["pnl"] = round(tot["pnl"] + sol, 6); tot["net"] = round(tot["net"] + net, 6); tot["trades"] += 1
-            pcts.append(pct)
-            if sol > 0:
-                cell["wins"] += 1; tot["wins"] += 1
+    # SELL-выжимка (hot + архивы, кэш по size/mtime) вместо read_text() всего
+    # журнала: память не зависит от возраста бота, история видна вся.
+    for r in backtest.sell_records(LOG_PATH):
+        if not r.get("ts", "").startswith(month):
+            continue
+        # pk="*" — не фильтруем (house/бот); иначе только записи этого pubkey
+        if pk != "*" and r.get("pubkey", DEFAULT_PUBKEY) != pk:
+            continue
+        d = r["ts"][:10]
+        pct = float(r.get("pnl", 0.0)); size = float(r.get("size_sol", 0.0))
+        sol = pct * size
+        net = sol - FEE_ROUNDTRIP_PCT * size          # чистый: минус оценочный round-trip cost (fee+priority+slippage)
+        cell = days.setdefault(d, dict(pnl=0.0, net=0.0, trades=0, wins=0, list=[]))
+        cell["pnl"] = round(cell["pnl"] + sol, 6); cell["net"] = round(cell["net"] + net, 6); cell["trades"] += 1
+        # детализация сделки: токен, PnL% и в SOL (вал/чистый), время (для клика по дню)
+        cell["list"].append(dict(sym=r.get("symbol", "?"), pct=round(pct, 4),
+                                 sol=round(sol, 6), net=round(net, 6), ts=r.get("ts", "")[11:16],
+                                 address=r.get("address", "")))
+        tot["pnl"] = round(tot["pnl"] + sol, 6); tot["net"] = round(tot["net"] + net, 6); tot["trades"] += 1
+        pcts.append(pct)
+        if sol > 0:
+            cell["wins"] += 1; tot["wins"] += 1
     wins = [p for p in pcts if p > 0]; losses = [p for p in pcts if p <= 0]
     stats = dict(
         trades=tot["trades"],
@@ -1517,7 +1576,9 @@ REVIEW_HOUR = int(os.getenv("ABC_REVIEW_HOUR", "3") or 3)   # час UTC ноч�
 
 def run_review_and_persist(persist: bool = True) -> dict:
     """Прогнать review-loop по журналу. persist=True → записать веса/отчёт/строку REVIEW."""
-    records = backtest.load_records(LOG_PATH)
+    # review ест только закрытые сделки (closed_trades → SELL) — отдаём SELL-выжимку
+    # (hot + архивы) вместо всего журнала: результат тот же, память O(сделки).
+    records = backtest.sell_records(LOG_PATH)
     res = review.run(records, cfg=CFG, filters=ST.filters,
                      trigger=strategy.get(ST.strategy_id)["trigger"], fee_pct=FEE_ROUNDTRIP_PCT)
     if persist:

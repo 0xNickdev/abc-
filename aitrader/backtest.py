@@ -10,6 +10,7 @@ R 的定义：1R = 硬止损幅度（hard_stop_pct）。pnl% / hard_stop_pct = �
 """
 from __future__ import annotations
 
+import gzip
 import json
 import pathlib
 import re
@@ -18,6 +19,7 @@ import strategy
 
 HERE = pathlib.Path(__file__).resolve().parent
 LOG_PATH = HERE / "outputs" / "trade_decisions.jsonl"
+ARCHIVE_DIRNAME = "archive"      # <журнал>.parent/archive/<stem>-YYYY-MM.jsonl.gz (ротация в app.log)
 
 _PNL_RE = re.compile(r"PnL\s*([+-]?\d+(?:\.\d+)?)\s*%")
 
@@ -27,15 +29,113 @@ def load_records(path: pathlib.Path | str | None = None) -> list[dict]:
     if not p.exists():
         return []
     out = []
-    for line in p.read_text().splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except Exception:
-            continue
+    with p.open("r") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
     return out
+
+
+# ── потоковый разбор журнала (память O(1) от размера файла) ────────────────
+# Журнал растёт безостановочно (FILTER/SCREEN каждые ~20с 24/7); load_records
+# на сотнях МБ раздувает процесс в гигабайты (dict Python ≈ 10-20× JSON-текста).
+# Здесь один проход по файлу собирает МАЛЕНЬКУЮ выжимку: счётчики + SELL-записи
+# (реальные сделки, их мало) + feature-снапшоты SCREEN. Выжимка кэшируется по
+# (size, mtime) — архивы неизменяемы, пересканируется только выросший hot-файл.
+
+def _open_journal(p: pathlib.Path):
+    return gzip.open(p, "rt", encoding="utf-8") if p.suffix == ".gz" else p.open("r")
+
+
+def _scan_file(p: pathlib.Path) -> dict:
+    ext = dict(records=0, actions={}, gates={}, sells=[], feats=[])
+    try:
+        fh = _open_journal(p)
+    except OSError:
+        return ext
+    with fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                r = json.loads(line)
+            except Exception:
+                continue
+            ext["records"] += 1
+            a = r.get("action", "?")
+            ext["actions"][a] = ext["actions"].get(a, 0) + 1
+            if a == "REJECT":
+                g = str(r.get("gate", "?"))
+                ext["gates"][g] = ext["gates"].get(g, 0) + 1
+            if a == "SELL":
+                ext["sells"].append(r)
+            f = _features_of(r)
+            if f:
+                ext["feats"].append(f)
+    return ext
+
+
+_SCAN_CACHE: dict[str, tuple[tuple, dict]] = {}   # str(path) -> ((size, mtime_ns), выжимка)
+
+
+def _scan_cached(p: pathlib.Path) -> dict | None:
+    try:
+        st = p.stat()
+    except OSError:
+        return None
+    sig = (st.st_size, st.st_mtime_ns)
+    key = str(p)
+    hit = _SCAN_CACHE.get(key)
+    if hit and hit[0] == sig:
+        return hit[1]
+    ext = _scan_file(p)
+    if len(_SCAN_CACHE) > 64:
+        _SCAN_CACHE.pop(next(iter(_SCAN_CACHE)))
+    _SCAN_CACHE[key] = (sig, ext)
+    return ext
+
+
+def journal_files(path: pathlib.Path | str | None = None) -> list[pathlib.Path]:
+    """Все сегменты журнала: месячные gzip-архивы (по возрастанию) + hot-файл."""
+    p = pathlib.Path(path) if path else LOG_PATH
+    files: list[pathlib.Path] = []
+    ad = p.parent / ARCHIVE_DIRNAME
+    if ad.is_dir():
+        files += sorted(ad.glob(f"{p.stem}-*.jsonl.gz"))
+    files.append(p)
+    return files
+
+
+def collect(path: pathlib.Path | str | None = None) -> dict:
+    """Слитая выжимка hot-файла + всех архивов: полная история для статистики
+    без загрузки самого журнала в память."""
+    merged = dict(records=0, actions={}, gates={}, sells=[], feats=[])
+    for f in journal_files(path):
+        if not f.exists():
+            continue
+        ext = _scan_cached(f)
+        if not ext:
+            continue
+        merged["records"] += ext["records"]
+        for k, v in ext["actions"].items():
+            merged["actions"][k] = merged["actions"].get(k, 0) + v
+        for k, v in ext["gates"].items():
+            merged["gates"][k] = merged["gates"].get(k, 0) + v
+        merged["sells"] += ext["sells"]
+        merged["feats"] += ext["feats"]
+    return merged
+
+
+def sell_records(path: pathlib.Path | str | None = None) -> list[dict]:
+    """Все SELL-записи (hot + архивы) — ground truth для PnL/review. Их мало
+    (реальные сделки), в отличие от FILTER/SCREEN-шума."""
+    return list(collect(path)["sells"])
 
 
 def _pnl_pct(rec: dict):
@@ -110,7 +210,10 @@ def _features_of(rec: dict) -> dict | None:
 def paper(records: list[dict], trig: dict | None = None) -> dict:
     """对带特征快照的候选跑 ABC Alpha v1 评估，给出【事前】触发率与平均预期 R。
     用于上线前判断"这套打法在历史候选上会不会频繁触发、预期 R 是否为正"。非实盘业绩。"""
-    feats = [f for f in (_features_of(r) for r in records) if f]
+    return _paper_feats([f for f in (_features_of(r) for r in records) if f], trig)
+
+
+def _paper_feats(feats: list[dict], trig: dict | None = None) -> dict:
     if not feats:
         return dict(candidates=0, note="No feature snapshots in log (run screen_once first, then review)")
     sigs = [strategy.evaluate(f, trig) for f in feats]
@@ -127,13 +230,15 @@ def paper(records: list[dict], trig: dict | None = None) -> dict:
 
 
 def summary(path: pathlib.Path | str | None = None, trig: dict | None = None) -> dict:
-    recs = load_records(path)
+    # Потоково (hot + архивы): не материализуем журнал списком dict'ов — на
+    # многомесячном журнале это гигабайты RSS при каждом вызове эндпоинта.
+    c = collect(path)
     return dict(
         strategy=strategy.NAME, version=strategy.VERSION,
-        records=len(recs),
-        funnel=funnel(recs),
-        realized=realized(recs),
-        paper=paper(recs, trig),
+        records=c["records"],
+        funnel=dict(by_action=c["actions"], rejects_by_gate=c["gates"], total=c["records"]),
+        realized=realized(c["sells"]),
+        paper=_paper_feats(c["feats"], trig),
     )
 
 
