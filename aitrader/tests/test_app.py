@@ -1676,6 +1676,36 @@ class TestXSignalAttribution:
         appmod._enrich_x_signal(attrib, "CA", self._sess(True), 0.0)
         assert "x_mentions" not in attrib                            # мягкая ошибка → без разметки
 
+    def test_no_bearer_falls_back_to_getxapi(self, monkeypatch):
+        """Без личного Bearer сигнал идёт через операторский getxapi (как кнопка 𝕏) —
+        иначе покупки бота шли без x-разметки и KOL-топливо не копилось."""
+        rec = []
+        monkeypatch.setattr(appmod.xapi, "key", lambda: "opkey")
+        monkeypatch.setattr(appmod.xapi, "ca_mentions", lambda ca: dict(
+            ok=True, count=4, authors=[dict(username="dog", followers=900)]))
+        monkeypatch.setattr(appmod.kol, "record_calls", lambda ca, a, p: rec.append(ca))
+        attrib = {}
+        appmod._enrich_x_signal(attrib, "CA", self._sess(True, bearer=""), 0.001)
+        assert attrib["x_mentions"] == 4 and attrib["x_top_followers"] == 900
+        assert rec == ["CA"]
+
+    def test_free_tier_auth_error_falls_back_to_getxapi(self, monkeypatch):
+        monkeypatch.setattr(appmod.kol, "mentions",
+                            lambda ca, b: dict(ok=False, error="auth"))
+        monkeypatch.setattr(appmod.xapi, "key", lambda: "opkey")
+        monkeypatch.setattr(appmod.xapi, "ca_mentions", lambda ca: dict(
+            ok=True, count=2, authors=[]))
+        monkeypatch.setattr(appmod.kol, "record_calls", lambda ca, a, p: None)
+        attrib = {}
+        appmod._enrich_x_signal(attrib, "CA", self._sess(True), 0.0)
+        assert attrib["x_mentions"] == 2                             # free-тариф X → getxapi
+
+    def test_no_bearer_no_key_stays_silent(self, monkeypatch):
+        monkeypatch.setattr(appmod.xapi, "key", lambda: "")
+        attrib = {}
+        appmod._enrich_x_signal(attrib, "CA", self._sess(True, bearer=""), 0.0)
+        assert attrib == {}
+
 
 # ── Снапшот-хранилище качества токенов (SQLite), фундамент verification-слоя ──
 class TestSnapshotDB:

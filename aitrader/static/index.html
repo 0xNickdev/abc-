@@ -1693,6 +1693,8 @@ async function loadReview(){
   const learnOn=!!d.learning;
   html+=`<div class="rv-learn"><span class="rv-learn-t">Self-learning · edge-weighting</span><button class="rv-toggle ${learnOn?'on':''}" onclick="toggleLearning(${!learnOn})">${learnOn?'ON':'OFF'}</button><span class="rv-learn-h">${learnOn?'Weighting wallets by proven edge.':'Neutral (off) — recommended until hundreds of trades accrue per wallet.'}</span></div>`;
   if(rep.fee_pct)html+=`<div class="rv-note">Net = gross − est. round-trip cost (${Math.round(rep.fee_pct*1000)/10}% fee+priority+slippage, both legs). Gross ${_fmtSol(ov.total_sol||0)}.</div>`;
+  const cf=rep.cashflow;
+  if(cf&&cf.trades)html+=`<div class="rv-note">Actual cash-flow — all sells incl. partial TPs (matches the PnL calendar): ${cf.trades} sells · ${Math.round((cf.winrate||0)*100)}% wins · net ${_fmtSol(cf.net_total_sol!=null?cf.net_total_sol:(cf.total_sol||0))}. Cards above count full position closes only.</div>`;
   if(rep.note)html+=`<div class="rv-note">${rep.note}</div>`;
 
   const props=rep.proposals||[];_RVPROPS=props;

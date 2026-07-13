@@ -37,6 +37,22 @@ def _is_full_sell(r: dict) -> bool:
         return True
 
 
+def all_sells(records: list[dict]) -> list[dict]:
+    """ВСЕ SELL-записи с pnl, ВКЛЮЧАЯ частичные TP → реальный cash-flow (совпадает
+    с календарём/бэктестом). closed_trades ниже — только полные закрытия (исход
+    позиции); без частичных TP сводка выглядит хуже реальных денег — показываем обе."""
+    out = []
+    for r in records:
+        if r.get("action") != "SELL":
+            continue
+        p = backtest._pnl_pct(r)
+        if p is None:
+            continue
+        size = float(r.get("size_sol", 0.0) or 0.0)
+        out.append(dict(pnl=p, size_sol=size, sol=round(p * size, 6)))
+    return out
+
+
 def closed_trades(records: list[dict]) -> list[dict]:
     """SELL-записи с посчитанным pnl → [{ts,symbol,pnl,size_sol,sol,attrib,hold_min}]."""
     out = []
@@ -242,6 +258,7 @@ def daily_report(records: list[dict], day: str | None = None, cfg: dict | None =
         day=day, fee_pct=fee_pct,
         day_summary=_summ(day_trades, hs, fee_pct),
         overall=_summ(all_trades, hs, fee_pct),
+        cashflow=_summ(all_sells(records), hs, fee_pct),   # все продажи, вкл. частичные TP = реальные деньги
         wallet_edge=wallet_edge(records, hard_stop=hs),
         kol_review=kol_review(),
         social_edge=social_edge(records, hard_stop=hs),

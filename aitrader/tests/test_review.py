@@ -291,3 +291,16 @@ class TestFeeAwarePnl:
         rep = review.daily_report(recs, cfg={"hard_stop_pct": 0.35}, fee_pct=0.025)
         assert abs(rep["overall"]["net_total_sol"] - 0.175) < 1e-9
         assert rep["fee_pct"] == 0.025
+
+
+# ── Cash-flow сводка: ВСЕ продажи (вкл. частичные TP) = реальные деньги ──
+class TestCashflowSummary:
+    def test_cashflow_counts_partial_tps_overall_does_not(self):
+        recs = [dict(action="SELL", symbol="A", reason="x", pnl=-0.35, size_sol=0.5, fraction=1.0),
+                dict(action="SELL", symbol="A", reason="TP1", pnl=0.8, size_sol=0.5, fraction=0.5)]
+        rep = review.daily_report(recs, cfg={"hard_stop_pct": 0.35})
+        assert rep["overall"]["trades"] == 1                 # только полное закрытие
+        assert rep["cashflow"]["trades"] == 2                # + частичный TP
+        # реальные деньги: −0.35*0.5 + 0.8*0.5 = +0.225 (совпадает с календарём)
+        assert abs(rep["cashflow"]["total_sol"] - 0.225) < 1e-9
+        assert rep["cashflow"]["winrate"] == 0.5

@@ -1689,17 +1689,24 @@ def _attrib_for(address: str) -> dict:
 
 def _enrich_x_signal(attrib: dict, address: str, s: UserSession, price: float = 0.0) -> None:
     """Соц-сигнал X на момент BUY: кол-во упоминаний CA + подписчики топ-автора → в entry_attrib.
-    Топливо review-loop (коррелируем «соц-хайп на входе» с исходом сделки). Дёргаем kol.mentions
-    РОВНО раз на покупку (кэш 5 мин в kol.py), только если юзер подключил свой Bearer — чужую
-    квоту не жжём (ключ per-user). Сбой Twitter НЕ должен блокировать покупку → мягко глотаем."""
+    Топливо review-loop (коррелируем «соц-хайп на входе» с исходом сделки). Приоритет источников —
+    как у кнопки 𝕏 (/api/kol/check): личный Bearer → (нет/отказ тарифа) операторский getxapi.
+    Иначе KOL-топливо копилось только с ручных нажатий кнопки: free-тариф X отдаёт 403 на recent
+    search, и покупки бота шли без разметки. Квота ограничена числом покупок + кэш 5 мин на CA.
+    Сбой Twitter НЕ должен блокировать покупку → мягко глотаем."""
     tw = getattr(s, "twitter", None) or {}
-    if not (tw.get("enabled") and tw.get("bearer")):
-        return
-    try:
-        m = kol.mentions(address, tw["bearer"])
-    except Exception:
-        return
-    if not m.get("ok"):
+    bearer = (tw.get("bearer") or "") if tw.get("enabled") else ""
+    m = None
+    if bearer:
+        try:
+            m = kol.mentions(address, bearer)
+        except Exception:
+            m = None
+        if m and m.get("error") == "auth" and xapi.key():   # free-тариф X → операторский getxapi
+            m = xapi.ca_mentions(address)
+    elif xapi.key():
+        m = xapi.ca_mentions(address)
+    if not m or not m.get("ok"):
         return
     authors = m.get("authors") or []
     attrib["x_mentions"] = int(m.get("count", 0))
