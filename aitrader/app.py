@@ -2117,6 +2117,24 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         dict(size_sol=size_sol, chain=chain, attrib=attrib, **exit_plan()), mode=s.mode)
     return dict(ok=True, status=status_msg, filled=filled, symbol=symbol)
 
+# Реестр недавних закрытий: (pubkey, addr) -> (monotonic, pnl). Бот не перезаходит в CA
+# REENTRY_COOLDOWN_MIN после любого выхода; после убыточного стопа (pnl ≤ −20%) —
+# LOSS_REENTRY_HOURS (дамп/раг не «откупают» на автопилоте). Человек руками — как хочет.
+REENTRY_COOLDOWN_MIN = float(os.getenv("ABC_REENTRY_COOLDOWN_MIN", "30") or 30)
+LOSS_REENTRY_HOURS = float(os.getenv("ABC_LOSS_REENTRY_HOURS", "24") or 24)
+_RECENT_EXITS: dict[tuple[str, str], tuple[float, float]] = {}
+
+def _reentry_block(pubkey: str, address: str) -> str | None:
+    ex = _RECENT_EXITS.get((pubkey, address))
+    if not ex:
+        return None
+    ago_min = (time.monotonic() - ex[0]) / 60.0
+    if ex[1] <= -0.20 and ago_min < LOSS_REENTRY_HOURS * 60:
+        return f"re-entry blocked {LOSS_REENTRY_HOURS:.0f}h after {ex[1]:+.0%} stop"
+    if ago_min < REENTRY_COOLDOWN_MIN:
+        return f"re-entry cooldown {ago_min:.0f}m < {REENTRY_COOLDOWN_MIN:.0f}m after exit"
+    return None
+
 def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
             s: UserSession | None = None) -> dict:
     """平仓。fraction<1.0 为分批落袋（TP 阶梯用）：减仓不清仓、不计连亏；
@@ -2156,6 +2174,12 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
             WEEK_BUDGET.add(abs(pnl) * p["size_sol"])   # общий недельный котёл (все сессии)
         else:
             s.risk.consec_losses = 0
+        # Кулдаун перезахода для БОТА: без него после стопа токен всё ещё в трендинге
+        # и всё ещё «триггерит» → бот перекупает тот же CA каждый тик (6 входов в MERT
+        # за 11 минут на одном дампе). Ручных покупок не касается.
+        _RECENT_EXITS[(s.pubkey, p["address"])] = (time.monotonic(), pnl)
+        if len(_RECENT_EXITS) > 2000:
+            _RECENT_EXITS.pop(next(iter(_RECENT_EXITS)))
         log("SELL", p["symbol"], f"{s.mode} closed PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=p.get("size_sol", 0.0), address=p.get("address"), fraction=1.0,
                  attrib=attrib, hold_min=hold_min),
@@ -2806,6 +2830,11 @@ def _bot_buy_fn(sess: UserSession):
         mode = sess.bot.cfg.get("mode")
         cap = CFG["auto_max_per_trade_sol"] if mode == "n3" else CFG["bot_max_per_trade_sol"]
         size_sol = round(min(size_sol, cap), 4)
+        # кулдаун перезахода: только что вышли из этого CA → бот не перекупает его же
+        rb = _reentry_block(sess.pubkey, address)
+        if rb:
+            log("BUY_BLOCK", address[:8], rb, mode=sess.mode, pubkey=sess.pubkey)
+            raise HTTPException(409, rb)
         # авто-Verify: red flag → входа нет (bot.stats считает как blocked, не error)
         if BOT_VERIFY and chain == "sol":
             flag = preentry_red_flags(address)

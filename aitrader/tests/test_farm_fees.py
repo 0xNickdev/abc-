@@ -78,3 +78,26 @@ class TestFarmPlumbing:
         assert flag == "farm cluster 7/15 same-history wallets"
         assert appmod._farm_preentry_flag("FARMCA") == flag   # из кэша
         assert calls == ["FARMCA"]                            # GMGN дёрнут один раз
+
+
+class TestReentryCooldown:
+    def test_bot_blocked_after_stop_loss_and_after_any_exit(self, monkeypatch):
+        appmod._RECENT_EXITS.clear()
+        appmod._RECENT_EXITS[("PK", "CA1")] = (appmod.time.monotonic(), -0.48)   # стоп −48%
+        appmod._RECENT_EXITS[("PK", "CA2")] = (appmod.time.monotonic(), +0.30)   # обычный выход
+        appmod._RECENT_EXITS[("PK", "CA3")] = (appmod.time.monotonic() - 3600, +0.30)  # час назад
+        assert "24h" in appmod._reentry_block("PK", "CA1")          # лузер: сутки
+        assert "cooldown" in appmod._reentry_block("PK", "CA2")     # свежий выход: 30 мин
+        assert appmod._reentry_block("PK", "CA3") is None           # кулдаун истёк
+        assert appmod._reentry_block("OTHER", "CA1") is None        # чужая сессия не блокируется
+
+    def test_full_close_records_exit(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(appmod, "LOG_PATH", tmp_path / "j.jsonl")
+        appmod._RECENT_EXITS.clear()
+        s = appmod.UserSession("PKX")
+        s.positions = [dict(address="CAX", symbol="T", size_sol=0.1, chain="sol",
+                            entry_price=1.0, cur_price=0.5, pnl=-0.5, opened_ts=0)]
+        monkeypatch.setattr(s, "save_positions", lambda: None)
+        appmod.do_sell("CAX", s=s)
+        assert ("PKX", "CAX") in appmod._RECENT_EXITS
+        assert appmod._RECENT_EXITS[("PKX", "CAX")][1] <= -0.2
