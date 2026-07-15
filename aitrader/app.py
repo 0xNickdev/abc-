@@ -157,14 +157,21 @@ DEFAULT_FILTERS = {
     "max_sniper_count": -1,      # 最大狙击钱包数上限；-1=关闭
     "require_renounced_freeze": False,   # 必须放弃冻结权（可冻结=可随时锁死卖出）
     "max_vol_to_liq": 0.0,       # 量/流动性比上限：远高于正常=疑似刷量；0=关闭
+    # Мин. комиссий (SOL) на $100k mcap — «главный скам-фильтр» юзера: фермы крутят
+    # объём со своих откупных кошей БЕЗ уплаты комиссий платформам → у скама Total Fees
+    # аномально низкий при большой капе (примеры: −96% раг с 10 SOL fees @ $272k).
+    # Работает от gas_fee строки GMGN; применяется только при mcap ≥ FEES_GATE_MCAP
+    # (молодой микрокап комиссий ещё не набрал) и только когда данные есть. 0=выкл.
+    "min_fees_per_100k": 0.0,
     "symbol_blacklist": [],      # 符号黑名单（不区分大小写，子串命中即拒）
     "address_blacklist": [],     # 地址黑名单（精确匹配）
 }
+FEES_GATE_MCAP = float(os.getenv("ABC_FEES_GATE_MCAP", "30000") or 30000)   # mcap-порог fee-фильтра
 # 过滤器键的类型校验表（UI/接口写入时据此清洗）：num=非负浮点，int=整数，bool=布尔，list=字符串列表
 _FILTER_TYPES = {
     "min_liquidity": "num", "min_volume_1h": "num", "min_mcap": "num", "max_mcap": "num",
     "min_age_min": "num", "max_age_min": "num", "max_sniper_count": "int",
-    "require_renounced_freeze": "bool", "max_vol_to_liq": "num",
+    "require_renounced_freeze": "bool", "max_vol_to_liq": "num", "min_fees_per_100k": "num",
     "symbol_blacklist": "list", "address_blacklist": "list",
 }
 # 各链「原生/币种」token 地址（买入时作 input、卖出时作 output）。
@@ -632,7 +639,9 @@ class LiveGMGN(GMGNAdapter):
     def wallet_activity(self, wallet, limit=50):
         d = self._cli("portfolio", "activity", "--wallet", wallet, "--limit", str(limit))
         rows = d.get("data", d)
-        return rows.get("activity", rows.get("list", [])) if isinstance(rows, dict) else rows
+        if isinstance(rows, dict):   # живой gmgn-cli 1.3.9: {"activities":[...], "next":...}
+            rows = rows.get("activities") or rows.get("activity") or rows.get("list") or []
+        return rows
 
     def wallet_address(self) -> str:
         """取绑定到 API Key 的本链钱包地址（swap 的 --from 必须与 Key 绑定一致）。
@@ -816,6 +825,7 @@ class TokenFeatures:
     tracked_names: list = field(default_factory=list)
     holder_count: int = 0            # держатели (из trending)
     holder_velocity: float = 0.0     # прирост держателей/мин между сканами (ранний органический сигнал)
+    gas_fee: float = -1.0            # суммарные комиссии по токену, SOL (gas_fee GMGN); -1 = данных нет
 
 class FeatureExtractor:
     """trending 一行已含几乎全部尽调字段，直接据此建特征（省掉逐个 info/security/holders）。"""
@@ -855,6 +865,7 @@ class FeatureExtractor:
             smart_degen=degen, renowned=renowned,
             sniper_count=int(_f(row.get("sniper_count"))),
             sm_confluence=degen + renowned,
+            gas_fee=_f(row.get("gas_fee")) if row.get("gas_fee") is not None else -1.0,
         )
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -891,6 +902,13 @@ def hard_gates(f: TokenFeatures, flt: dict | None = None, chain: str | None = No
         return False, f"REJECT filter: snipers {f.sniper_count} > {flt['max_sniper_count']}", 1
     if flt.get("max_vol_to_liq", 0) > 0 and f.liquidity > 0 and (f.vol_1h / f.liquidity) > flt["max_vol_to_liq"]:
         return False, f"REJECT filter: vol/liq {f.vol_1h / f.liquidity:.1f}x > {flt['max_vol_to_liq']:.1f}x (wash-trade suspect)", 1
+    # Фермы не платят комиссии платформам со своих откупных кошей → у скама Total Fees
+    # аномально мал при большой капе. gas_fee=-1 (данных нет, Dex/Mock-адаптер) → молчим.
+    if flt.get("min_fees_per_100k", 0) > 0 and f.gas_fee >= 0 and f.mcap >= FEES_GATE_MCAP:
+        per100k = f.gas_fee / (f.mcap / 100_000.0)
+        if per100k < flt["min_fees_per_100k"]:
+            return False, (f"REJECT filter: total fees {f.gas_fee:.1f} SOL @ mcap {f.mcap:,.0f} "
+                           f"= {per100k:.1f}/100k < {flt['min_fees_per_100k']:.1f} (farm wash-trading)"), 1
     sym_lower = (f.symbol_safe or "").lower()
     if any(b and b.lower() in sym_lower for b in flt.get("symbol_blacklist", [])):
         return False, "REJECT filter: symbol blacklisted", 1
@@ -1854,7 +1872,8 @@ def _feat(f):
                 holder_count=f.holder_count, holder_velocity=f.holder_velocity,
                 chg_1h=round(f.chg_1h, 3), chg_5m=round(f.chg_5m, 3),
                 buy_ratio=round(f.buy_ratio, 2), turnover=round(f.turnover, 2),
-                liquidity=f.liquidity, mcap=f.mcap, age_min=round(f.age_min, 1))
+                liquidity=f.liquidity, mcap=f.mcap, age_min=round(f.age_min, 1),
+                gas_fee=round(f.gas_fee, 2))
 
 def _portfolio(s: UserSession | None = None):
     s = s or ST
@@ -2725,6 +2744,34 @@ def _n3_execute(sess: UserSession, side: str, chain: str, address: str,
 # RPC-детекторы — не жгут квоты GMGN/getxapi и не зависят от их банов. Ручных покупок
 # не касается: человек решает сам (ему кнопка Verify). Цель юзера: «меньше рагов».
 BOT_VERIFY = os.getenv("ABC_BOT_VERIFY", "1").strip().lower() in ("1", "true", "yes", "on")
+# Ферма-чек перед входом бота (идея юзера, подтверждена на -97% раге EZ94…: 11/15
+# топ-покупателей с ОБЩЕЙ историей покупок = откупные коши фермы). Дорог по GMGN-квоте
+# (N кошельков × activity) → только для финалистов покупки + кэш; ABC_BOT_FARM_VERIFY=0 выкл.
+BOT_FARM_VERIFY = os.getenv("ABC_BOT_FARM_VERIFY", "1").strip().lower() in ("1", "true", "yes", "on")
+BOT_FARM_WALLETS = int(os.getenv("ABC_BOT_FARM_WALLETS", "12") or 12)
+_FARM_PRE_CACHE: dict[str, tuple[float, str | None]] = {}   # addr -> (monotonic, флаг/None)
+_FARM_PRE_TTL = 600.0
+
+def _farm_preentry_flag(address: str) -> str | None:
+    """Красный флаг фермы для pre-entry: кластер кошельков с общей историей среди
+    топ-покупателей. Fail-open: нет живого GMGN/сбой = None (базовые гейты уже отработали)."""
+    hit = _FARM_PRE_CACHE.get(address)
+    if hit and time.monotonic() - hit[0] < _FARM_PRE_TTL:
+        return hit[1]
+    flag = None
+    try:
+        g = MK.adapter_for("sol")
+        if getattr(g, "token_traders", None) and MK.is_live_adapter:
+            gt, ga = _farm_fns(g)
+            res = farm.detect(address, gt, ga, max_wallets=BOT_FARM_WALLETS)
+            if res.get("red_flag"):
+                flag = f"farm cluster {res['largest_cluster']}/{res['checked']} same-history wallets"
+    except Exception:
+        flag = None
+    _FARM_PRE_CACHE[address] = (time.monotonic(), flag)
+    if len(_FARM_PRE_CACHE) > 512:
+        _FARM_PRE_CACHE.pop(next(iter(_FARM_PRE_CACHE)))
+    return flag
 
 def preentry_red_flags(address: str) -> str | None:
     """Red flag по независимым он-чейн сигналам: top10-концентрация (RPC) и доля свежих
@@ -2746,6 +2793,8 @@ def preentry_red_flags(address: str) -> str | None:
                 return f"fresh wallets {fw.get('fresh', 0)}/{checked}"
     except Exception:
         pass
+    if BOT_FARM_VERIFY:
+        return _farm_preentry_flag(address)
     return None
 
 def _bot_buy_fn(sess: UserSession):
@@ -3133,7 +3182,16 @@ def _farm_fns(g):
     def get_activity(w):
         fn = getattr(g, "wallet_activity", None)
         rows = fn(w) if fn else []
-        return [r.get("token_address") or r.get("address") for r in (rows or []) if isinstance(r, dict)]
+        out = []
+        for r in (rows or []):
+            if not isinstance(r, dict):
+                continue
+            tok = r.get("token")   # живой формат: адрес токена вложен в token.address
+            a = (tok.get("address") if isinstance(tok, dict) else None) \
+                or r.get("token_address") or r.get("address")
+            if a:
+                out.append(a)
+        return out
     return get_traders, get_activity
 
 @app.get("/api/token/farm")
