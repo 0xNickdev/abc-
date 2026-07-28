@@ -32,7 +32,7 @@ import wallets
 # ABC_SMART_EXIT=0 выключить; DROP — доля от базового баланса, ниже которой кошелёк
 # считается «слившим» (0.5 = слил больше половины своей позиции).
 SMART_EXIT = os.getenv("ABC_SMART_EXIT", "1").strip().lower() in ("1", "true", "yes", "on")
-SMART_EXIT_DROP = float(os.getenv("ABC_SMART_EXIT_DROP", "0.5") or 0.5)
+SMART_EXIT_DROP = float(os.getenv("ABC_SMART_EXIT_DROP", "0.35") or 0.35)
 
 WATCH_POLL_S = float(os.getenv("ABC_WATCH_POLL_S", "2.0") or 2.0)
 WS_ENABLED = os.getenv("ABC_WATCH_WS", "1").strip().lower() in ("1", "true", "yes", "on")

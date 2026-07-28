@@ -39,7 +39,7 @@ PRESET = {
     "momentum_reject_chg1h": -0.12,
     "tp_ladder": [(0.60, 0.40), (1.50, 0.30), (3.00, 0.20)],  # 三段：落袋 + 留底搏大
     "trailing_pct": 0.25,
-    "hard_stop_pct": 0.35,
+    "hard_stop_pct": 0.25,   # синхронно с app.CFG: −25% из-за проскальзывания стопов на дампах
     "max_concurrent_positions": 3,       # 纪律：实盘并发收回 3
     "risk_per_trade": 0.01,
     "kill_switch_consec_losses": 3,
