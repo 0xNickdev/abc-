@@ -567,6 +567,13 @@ class LiveGMGN(GMGNAdapter):
     def __init__(self, chain="sol"):
         self.chain = chain
         self.env = {**os.environ, **load_env()}
+        # ABC_GMGN_PROXY=<http://user:pass@ip:port> — статичный прокси ТОЛЬКО для gmgn-cli
+        # (GMGN банит shared-IP Railway). Глобальный HTTPS_PROXY не используем: через прокси
+        # не должен литься весь трафик бота (RPC/DexScreener/X) — лимиты и латентность.
+        gp = os.getenv("ABC_GMGN_PROXY", "").strip()
+        if gp:
+            self.env["HTTPS_PROXY"] = gp
+            self.env["HTTP_PROXY"] = gp
         self._wallet_cache: dict[str, str] = {}   # chain -> bound wallet address
 
     def _cli(self, *args) -> dict:
