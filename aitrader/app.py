@@ -1742,6 +1742,62 @@ def _enrich_x_signal(attrib: dict, address: str, s: UserSession, price: float = 
         except Exception:
             pass
 
+# ── Live-цены скринера: состав списка из GMGN-снапшота (20с), а цены/капы этих токенов
+#    освежаются каждые ~2с из DexScreener (batch 30 CA) + bonding curve для свежих pump.
+#    GMGN-квота не тратится; контур стопов (watcher/spot_prices) не затронут.
+LIVE_PRICES_S = float(os.getenv("ABC_LIVE_PRICES_S", "2.0") or 2.0)
+_LIVE_WATCH: list[str] = []
+_LIVE_QUOTES: dict[str, dict] = {}          # addr -> {price, mcap, ts}
+_live_lock = threading.Lock()
+_live_started = False
+
+def _set_live_watch(addrs: list[str]):
+    global _LIVE_WATCH
+    _LIVE_WATCH = [a for a in addrs if a][:100]
+
+def _live_refresh_once() -> bool:
+    mints = list(_LIVE_WATCH)
+    if not mints:
+        return False
+    quotes: dict[str, dict] = {}
+    try:
+        quotes = dexadapter.spot_quotes(mints)
+    except Exception:
+        pass
+    missing = [m for m in mints if m not in quotes and m.endswith("pump")]
+    if missing:                                  # до индексации DexScreener: цена с кривой
+        try:
+            for m, px in pumpcurve.usd_prices(missing).items():
+                quotes[m] = dict(price=px, mcap=px * 1e9)   # pump.fun: фикс. supply 1B
+        except Exception:
+            pass
+    if quotes:
+        now = time.time()
+        with _live_lock:
+            for m, q in quotes.items():
+                _LIVE_QUOTES[m] = dict(q, ts=now)
+            if len(_LIVE_QUOTES) > 300:          # кап памяти: чистим ушедших из вотчлиста
+                for k in [k for k in _LIVE_QUOTES if k not in mints][:len(_LIVE_QUOTES) - 300]:
+                    _LIVE_QUOTES.pop(k, None)
+    return True
+
+def _live_prices_loop():
+    while True:
+        try:
+            busy = _live_refresh_once()
+        except Exception:
+            busy = False
+        time.sleep(LIVE_PRICES_S if busy else 5.0)
+
+def ensure_live_prices():
+    """Идемпотентный старт фонового контура (первый запрос /api/prices)."""
+    global _live_started
+    with _live_lock:
+        if _live_started:
+            return
+        _live_started = True
+    threading.Thread(target=_live_prices_loop, daemon=True).start()
+
 def screen_once(chain: str, s: UserSession | None = None) -> dict:
     s = s or ST                       # 会话（多用户：每 pubkey 自己的过滤器/持仓/风控）
     g = s.adapter_for(chain)          # 市场层共享（运营者 key），与会话无关
@@ -1830,6 +1886,8 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
 
     # 持仓逃生监控（与筛选同一轮跑）；把本轮热榜行喂进去，持仓在榜则零额外 cli
     rows_by_addr = {t["address"]: t for t in candidates if t.get("address")}
+    if chain == "sol":
+        _set_live_watch(list(rows_by_addr))   # live-цены скринера следят за текущей выдачей
     positions_out = monitor_positions(chain, rows_by_addr, s)
 
     if db.enabled():          # снапшот всех решений прохода в SQLite (opt-in ABC_SNAPSHOT_DB=1)
@@ -2456,6 +2514,14 @@ def api_settings_reset(c: ChainIn):
     with MK.lock:
         MK.reset_trending_cmd(ch)
     return dict(ok=True, trending_cmd=MK.get_trending_cmd(ch))
+
+@app.get("/api/prices")
+def api_prices():
+    """Живые цены/капы токенов текущей выдачи скринера (~2с, DexScreener+кривая).
+    Read-only, GMGN не трогает; фронт накладывает поверх снапшота таблицы."""
+    ensure_live_prices()
+    with _live_lock:
+        return dict(ts=time.time(), quotes=dict(_LIVE_QUOTES))
 
 @app.get("/api/wallets")
 def api_wallets():
