@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures
+import contextlib
 import datetime
 import gzip
 import hashlib
@@ -2063,7 +2064,10 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
     rows_by_addr = {t["address"]: t for t in candidates if t.get("address")}
     if chain == "sol":
         _set_live_watch(list(rows_by_addr))   # live-цены скринера следят за текущей выдачей
-    positions_out = monitor_positions(chain, rows_by_addr, s)
+    pre = prefetch_positions(chain, rows_by_addr, s)          # сеть — без замка
+    with s.lock:                                             # замок только на мутацию позиций
+        positions_out = monitor_positions(chain, rows_by_addr, s, pre=pre)
+        portfolio = _portfolio(s)
 
     if db.enabled():          # снапшот всех решений прохода в SQLite (opt-in ABC_SNAPSHOT_DB=1)
         try:
@@ -2073,7 +2077,7 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
             pass              # снапшот НИКОГДА не роняет скан
 
     # 回传后端真实 mode：前端据此同步 LIVE/SHADOW 开关，避免重启后端后开关停留在 LIVE 误导
-    return dict(decisions=decisions, portfolio=_portfolio(s), positions=positions_out, mode=s.mode)
+    return dict(decisions=decisions, portfolio=portfolio, positions=positions_out, mode=s.mode)
 
 # 公开演示缓存：后台线程定时刷新真实筛选结果，访客只读这份缓存（见 PUBLIC_DEMO 注释）。
 _PUBLIC_CACHE: dict = {"data": None, "err": None}
@@ -2086,8 +2090,7 @@ def _public_broadcast_loop():
     stop = threading.Event()
     while not stop.is_set():
         try:
-            with ST.lock:
-                screened = screen_once(ST.chain)   # 公开演示单链广播（默认链）
+            screened = screen_once(ST.chain)   # 公开演示单链广播（默认链）; замок берёт сам
             _PUBLIC_CACHE["data"] = _public_payload(screened)
             _PUBLIC_CACHE["err"] = None
         except Exception as e:
@@ -2133,8 +2136,49 @@ def _sec_from_row(row: dict) -> dict:
                 burn_ratio=_f(row.get("burn_ratio")),
                 top10=_f(row.get("top_10_holder_rate")))
 
+def _fetch_offlist(g, p: dict, rt_fresh: bool):
+    """Сеть для позиции вне хот-листа → (cur_sec, cur_price|None, err|None). Без мутаций p:
+    зовётся БЕЗ замка сессии (аудит 28.09: скан держал замок 20-40с, watcher со стопами ждал →
+    стоп −25% исполнялся на −50…−90%). cur_price=None — «цену даёт watcher (RT свежая)»."""
+    addr = p["address"]
+    if rt_fresh:
+        try:
+            return g.token_security(addr), None, None
+        except Exception:
+            return dict(p["entry"]), None, None  # security недоступен — дифф нулевой
+    try:
+        return g.token_security(addr), g.token_price(addr), None
+    except Exception as e:
+        # GMGN недоступен (429-бан/таймаут) — цена НЕ должна замерзать: замёрзший
+        # pnl = спящий hard-stop. Fallback: DexScreener, для свежих pump.fun — bonding curve.
+        try:
+            price = dexadapter.spot_price(addr)
+        except Exception:
+            price = 0.0
+        if price <= 0 and str(addr).endswith("pump"):
+            try:
+                price = pumpcurve.usd_prices([addr]).get(addr, 0.0)
+            except Exception:
+                price = 0.0
+        return dict(p["entry"]), price, e
+
+def prefetch_positions(chain: str, rows_by_addr: dict | None, s: UserSession) -> dict:
+    """Сходить в сеть за позициями вне листа ДО взятия замка. Снимок списка без замка —
+    безопасен (читаем, не мутируем); исчезнувшие позиции просто не используются."""
+    rows_by_addr = rows_by_addr or {}
+    if not s.is_live_adapter:
+        return {}
+    g = s.adapter_for(chain)
+    pre = {}
+    for p in list(s.positions):
+        if p.get("chain", "sol") != chain or p["address"] in rows_by_addr:
+            continue
+        rt_fresh = (time.time() - float(p.get("rt_ts", 0) or 0)) < 10.0
+        pre[p["address"]] = _fetch_offlist(g, p, rt_fresh)
+    return pre
+
 def monitor_positions(chain: str, rows_by_addr: dict | None = None,
-                      s: UserSession | None = None) -> list[dict]:
+                      s: UserSession | None = None, pre: dict | None = None) -> list[dict]:
     s = s or ST
     rows_by_addr = rows_by_addr or {}
     out = []
@@ -2153,38 +2197,20 @@ def monitor_positions(chain: str, rows_by_addr: dict | None = None,
             if row is not None:                  # 持仓币在本轮热榜里 → 复用行数据，零额外 cli
                 cur_sec = _sec_from_row(row)
                 cur_price = float(p.get("cur_price", 0.0)) if rt_fresh else _f(row.get("price"))
-            elif rt_fresh:                       # вне листа, но RT-цена свежая → security по возможности
-                cur_price = float(p.get("cur_price", 0.0))
-                try:
-                    cur_sec = g.token_security(p["address"])
-                except Exception:
-                    cur_sec = dict(p["entry"])   # security недоступен — дифф нулевой
-            else:                                # 不在榜 → 才单独查（security + price 各一次 cli）
-                try:
-                    cur_sec = g.token_security(p["address"])
-                    cur_price = g.token_price(p["address"])
-                except Exception as e:
-                    # GMGN недоступен (429-бан/таймаут) — цена НЕ должна замерзать: замёрзший
-                    # pnl = спящий hard-stop, пока монета валится (наблюдали закрытия −44…−51%
-                    # при стопе −35%). Fallback: DexScreener, а для свежих pump.fun ещё без
-                    # пары — bonding curve по RPC; security-снапшота нет → дифф нулевой.
-                    try:
-                        cur_price = dexadapter.spot_price(p["address"])
-                    except Exception:
-                        cur_price = 0.0
-                    if cur_price <= 0 and str(p["address"]).endswith("pump"):
-                        try:
-                            cur_price = pumpcurve.usd_prices([p["address"]]).get(p["address"], 0.0)
-                        except Exception:
-                            cur_price = 0.0
-                    if cur_price <= 0:
-                        if _is_zombie(p, s):
-                            zombies.append(p["address"])
-                        out.append(dict(symbol=p["symbol"], address=p["address"], size_sol=p["size_sol"],
-                                        pnl=p.get("pnl", 0), severity=0,
-                                        signals=[dict(t=f"Monitor query failed: {e}", hot=False)]))
-                        continue
-                    cur_sec = dict(p["entry"])
+            else:                                # вне листа: security (+ цена, если RT протух)
+                if pre is not None and p["address"] in pre:
+                    cur_sec, cur_price, err = pre[p["address"]]   # сеть уже сходили без замка
+                else:
+                    cur_sec, cur_price, err = _fetch_offlist(g, p, rt_fresh)
+                if cur_price is None:            # «цену даёт watcher» → берём самую свежую
+                    cur_price = float(p.get("cur_price", 0.0))
+                if cur_price <= 0 and err is not None:
+                    if _is_zombie(p, s):
+                        zombies.append(p["address"])
+                    out.append(dict(symbol=p["symbol"], address=p["address"], size_sol=p["size_sol"],
+                                    pnl=p.get("pnl", 0), severity=0,
+                                    signals=[dict(t=f"Monitor query failed: {_redact(err)}", hot=False)]))
+                    continue
             cur_liq = _f(row.get("liquidity")) if row is not None else 0.0   # реальна из DexScreener, когда токен ещё в榜
             severity, sigs = assess_escape(cur_sec, p["entry"], cur_price=cur_price,
                                            entry_price=p.get("entry_price", 0.0),
@@ -2262,7 +2288,10 @@ def _mock_drift(p):
 # ──────────────────────────────────────────────────────────────────────────
 # 12. 成交（人按下才发生）
 # ──────────────────────────────────────────────────────────────────────────
-def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = None) -> dict:
+def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = None,
+           lock=None) -> dict:
+    """lock — замок сессии, если вызывающий его НЕ держит (бот): сеть идёт без замка,
+    под замком только запись позиции. Ручные эндпоинты держат замок сами (lock=None)."""
     s = s or ST
     # 成交前再过一次组合风控（硬拦；与筛选时的提示分离）
     allow, rnote = s.risk.gate(size_sol, len(s.positions), s.exposure())
@@ -2351,6 +2380,13 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         filled = False
         status_msg = "SHADOW (not sent on-chain — switch to LIVE + signing key)"
 
+    with (lock if lock is not None else contextlib.nullcontext()):
+        return _buy_commit(s, chain, address, size_sol, symbol, entry, entry_price,
+                           filled, status_msg)
+
+def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbol: str,
+                entry: dict, entry_price: float, filled: bool, status_msg: str) -> dict:
+    """Запись позиции после исполнения (под замком сессии)."""
     # Докупка того же токена = усреднение в ОДНУ позицию (средневзвешенный вход, суммарный
     # размер), а не вторая запись: карточка в UI одна на адрес, и трейдер ждёт среднюю.
     # Бумажные и self-custody записи не смешиваем (разная природа учёта).
@@ -2816,15 +2852,14 @@ def api_run(r: RunIn, x_wallet: str | None = WalletHeader):
             return JSONResponse(dict(sess.last_screen, throttled=True))
         raise HTTPException(429, "too fast — wait a couple of seconds")
     sess.last_run = now
-    with sess.lock:
-        try:
-            out = screen_once(ch, sess)
-            sess.last_screen = out
-            return JSONResponse(out)
-        except Exception as e:
-            import traceback
-            traceback.print_exc()                        # реальная причина (gmgn-cli/timeout) → в логи Railway
-            raise HTTPException(502, f"scan failed: {type(e).__name__}: {_redact(e)}")
+    try:                                   # screen_once сам берёт замок на короткие участки
+        out = screen_once(ch, sess)
+        sess.last_screen = out
+        return JSONResponse(out)
+    except Exception as e:
+        import traceback
+        traceback.print_exc()                            # реальная причина (gmgn-cli/timeout) → в логи Railway
+        raise HTTPException(502, f"scan failed: {type(e).__name__}: {_redact(e)}")
 
 @app.post("/api/buy")
 def api_buy(b: BuyIn, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
@@ -2864,8 +2899,9 @@ def api_positions(chain: str = "sol", x_wallet: str | None = WalletHeader):
         return dict(positions=[], portfolio=None)
     ch = valid_chain(chain)
     sess = get_session(x_wallet)
+    pre = prefetch_positions(ch, {}, sess)          # сеть без замка (его ждёт watcher со стопами)
     with sess.lock:
-        return dict(positions=monitor_positions(ch, s=sess), portfolio=_portfolio(sess))
+        return dict(positions=monitor_positions(ch, s=sess, pre=pre), portfolio=_portfolio(sess))
 
 @app.get("/api/strategy")
 def api_strategy(x_wallet: str | None = WalletHeader):
@@ -3215,11 +3251,13 @@ def _bot_buy_fn(sess: UserSession):
                     pubkey=sess.pubkey)
                 raise HTTPException(409, f"auto-verify red flag: {flag}")
         if mode == "n1":
-            _propose(sess, "buy", chain, address, size_sol=size_sol, reason="вход по стратегии")
+            with sess.lock:
+                _propose(sess, "buy", chain, address, size_sol=size_sol, reason="вход по стратегии")
             return dict(ok=True, proposed=True)
         if mode == "n3":
-            return _n3_execute(sess, "buy", chain, address, size_sol=size_sol)
-        return do_buy(chain, address, size_sol, sess)
+            with sess.lock:
+                return _n3_execute(sess, "buy", chain, address, size_sol=size_sol)
+        return do_buy(chain, address, size_sol, sess, lock=sess.lock)
     return fn
 
 def _bot_sell_fn(sess: UserSession):

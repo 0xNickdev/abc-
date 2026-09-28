@@ -1168,7 +1168,7 @@ class TestAutoVerifyPreEntry:
         monkeypatch.setattr(appmod, "preentry_red_flags", lambda a: None)
         seen = {}
         monkeypatch.setattr(appmod, "do_buy",
-                            lambda ch, a, sz, s=None: seen.update(addr=a) or dict(ok=True))
+                            lambda ch, a, sz, s=None, lock=None: seen.update(addr=a) or dict(ok=True))
         appmod._bot_buy_fn(appmod.get_session("AVWallet22222"))("sol", "CLEANCA", 0.05)
         assert seen["addr"] == "CLEANCA"
 
@@ -1365,7 +1365,7 @@ class TestPerModeTradeCaps:
         sess = appmod.get_session("CapWalletN2xxxx")
         seen = {}
         monkeypatch.setattr(appmod, "do_buy",
-                            lambda ch, a, sz, s=None: seen.update(size=sz) or dict(ok=True))
+                            lambda ch, a, sz, s=None, lock=None: seen.update(size=sz) or dict(ok=True))
         appmod._bot_buy_fn(sess)("sol", "ADDRN2", 0.4)      # дефолтный режим бота = n2
         assert seen["size"] == appmod.CFG["bot_max_per_trade_sol"]
 
@@ -1380,7 +1380,7 @@ class TestPerModeTradeCaps:
         sess.bot.cfg["mode"] = "n3"
         seen = {}
         monkeypatch.setattr(appmod, "do_buy",
-                            lambda ch, a, sz, s=None: seen.update(size=sz) or dict(ok=True))
+                            lambda ch, a, sz, s=None, lock=None: seen.update(size=sz) or dict(ok=True))
         appmod._bot_buy_fn(sess)("sol", "ADDRN3", 0.4)      # замок закрыт → бумажный fallback
         assert seen["size"] == appmod.CFG["auto_max_per_trade_sol"]
 

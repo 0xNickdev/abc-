@@ -6,9 +6,9 @@ import base64 as b64
 import base58
 import pytest
 from nacl.signing import SigningKey
+from test_app import _mu_client, _wallet_auth
 
 import app as appmod
-from test_app import _mu_client, _wallet_auth
 
 pytestmark = pytest.mark.realauth
 

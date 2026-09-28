@@ -154,27 +154,33 @@ class BotRunner:
         f = self._fns
         if not f:
             return
-        with f["lock"]:
-            screened = f["screen"](self.chain)
-            self._act(screened, f)
+        # Аудит 28.09: раньше весь скан (GMGN/LLM/RPC, 20-40с) шёл под замком сессии, и
+        # real-time watcher со стопами ждал его → стоп −25% исполнялся на −50…−90%.
+        # Теперь: скан без замка (screen_once сам берёт замок на мутацию позиций),
+        # входы — без замка (buy_fn пишет позицию под замком), выходы — под замком (быстро).
+        screened = f["screen"](self.chain)
+        self._act(screened, f)
         self.stats["ticks"] += 1
         self.stats["last_tick"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
     def _act(self, screened: dict, f: dict):
-        positions = f["positions"]()
         risk_cfg = f["risk_cfg"]
         decisions = screened.get("decisions", [])
         pos_views = {pv.get("address"): pv for pv in screened.get("positions", [])}
 
         # 1) 入场（熔断/当日上限期间只许平仓，跳过开仓）
-        if not f["halted"]():
-            held = {p["address"] for p in positions}
-            entries = select_entries(
-                decisions, held, len(positions),
-                risk_cfg.get("max_concurrent_positions", 3),
-                self.cfg["max_new_per_tick"],
-                require_trigger=self.cfg["require_abc_trigger"],
-                min_priority=self.cfg.get("min_priority", 0))
+        entries = []
+        with f["lock"]:
+            if not f["halted"]():
+                positions = f["positions"]()
+                held = {p["address"] for p in positions}
+                entries = select_entries(
+                    decisions, held, len(positions),
+                    risk_cfg.get("max_concurrent_positions", 3),
+                    self.cfg["max_new_per_tick"],
+                    require_trigger=self.cfg["require_abc_trigger"],
+                    min_priority=self.cfg.get("min_priority", 0))
+        if entries:                                # сеть (pre-entry проверки, цена) — без замка
             for addr, size, _sym in entries:
                 try:
                     f["buy"](self.chain, addr, size)
@@ -183,8 +189,12 @@ class BotRunner:
                     self.stats["blocked"] += 1
                     self.stats["last_error"] = str(e)
 
-        # 2) 离场（始终执行，含熔断期）
-        for p in list(positions):
+        # 2) 离场（始终执行，含熔断期）— под замком: те же позиции трогает watcher
+        with f["lock"]:
+            self._exits(f, pos_views, risk_cfg)
+
+    def _exits(self, f: dict, pos_views: dict, risk_cfg: dict):
+        for p in list(f["positions"]()):
             if p.get("chain", "sol") != self.chain:
                 continue
             pnl = float(p.get("pnl", 0.0))
@@ -194,16 +204,23 @@ class BotRunner:
             ed = decide_exit(p, pv.get("severity", 0), risk_cfg, self.cfg)
             if ed.action != "SELL":
                 continue
+            partial = ed.rung >= 0 and ed.fraction < 1.0
+            if partial:
+                p["tp_taken"].append(ed.rung)   # ДО продажи: do_sell сохраняет позиции на диск —
+                                                # иначе рестарт между ними = та же ступень дважды
             try:
-                f["sell"](p["address"], fraction=ed.fraction, reason=ed.reason)
-                if ed.rung >= 0 and ed.fraction < 1.0:
-                    p["tp_taken"].append(ed.rung)
-                    self.stats["partials"] += 1
-                else:
-                    self.stats["sells"] += 1
+                res = f["sell"](p["address"], fraction=ed.fraction, reason=ed.reason)
             except Exception as e:
+                if partial:
+                    p["tp_taken"].remove(ed.rung)
                 self.stats["errors"] += 1
                 self.stats["last_error"] = str(e)
+                continue
+            if isinstance(res, dict) and res.get("proposed"):
+                if partial:                     # N1: только предложение — ступень не взята
+                    p["tp_taken"].remove(ed.rung)
+                continue
+            self.stats["partials" if partial else "sells"] += 1
 
     # ── 自省 ───────────────────────────────────────────────────────────────
     def status(self) -> dict:

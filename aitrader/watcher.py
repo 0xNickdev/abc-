@@ -36,7 +36,8 @@ SMART_EXIT_DROP = float(os.getenv("ABC_SMART_EXIT_DROP", "0.35") or 0.35)
 
 WATCH_POLL_S = float(os.getenv("ABC_WATCH_POLL_S", "2.0") or 2.0)
 WS_ENABLED = os.getenv("ABC_WATCH_WS", "1").strip().lower() in ("1", "true", "yes", "on")
-_MAX_WS_SUBS = 25          # Helius лимит подписок на соединение держим с запасом
+_MAX_WS_SUBS = 25
+STALE_AFTER_WAIT_S = 1.5   # цена старше этого после ожидания замка сессии не применяется          # Helius лимит подписок на соединение держим с запасом
 
 
 def ws_url() -> str:
@@ -108,12 +109,18 @@ class PositionWatcher:
         if not prices:
             return                                  # оба источника легли — ждём следующего круга
         self.stats["polls"] += 1
+        fetched_at = time.monotonic()
         for sess, p in pairs:
             px = float(prices.get(p["address"]) or 0.0)
             ep = float(p.get("entry_price", 0.0) or 0.0)
             if px <= 0 or ep <= 0:
                 continue
             with sess.lock:
+                # цена снята ДО ожидания замка: если ждали долго — она уже не «свежая»,
+                # не штампуем её как RT (следующий круг через ~2с возьмёт настоящую)
+                if time.monotonic() - fetched_at > STALE_AFTER_WAIT_S:
+                    self.stats["stale_skips"] = self.stats.get("stale_skips", 0) + 1
+                    continue
                 if p not in sess.positions:         # продана параллельным тиком бота
                     continue
                 p["cur_price"] = px
@@ -128,14 +135,22 @@ class PositionWatcher:
                 ed = botmod.decide_exit(p, None, self._risk_cfg, sess.bot.cfg)
                 if ed.action != "SELL":
                     continue
+                partial = ed.rung >= 0 and ed.fraction < 1.0
+                if partial:
+                    p["tp_taken"].append(ed.rung)   # до продажи (do_sell пишет диск), откат ниже
                 try:
-                    self._sell_for(sess)(p["address"], fraction=ed.fraction,
-                                         reason="RT " + ed.reason)
-                    if ed.rung >= 0 and ed.fraction < 1.0:
-                        p["tp_taken"].append(ed.rung)
-                    self.stats["exits"] += 1
+                    res = self._sell_for(sess)(p["address"], fraction=ed.fraction,
+                                               reason="RT " + ed.reason)
                 except Exception as e:              # 404 гонка с ботом и т.п. — не роняем цикл
+                    if partial:
+                        p["tp_taken"].remove(ed.rung)
                     self._log("WATCH_ERR", p.get("symbol", "?"), str(e))
+                    continue
+                if isinstance(res, dict) and res.get("proposed"):
+                    if partial:                     # N1: лишь предложение — ступень не взята
+                        p["tp_taken"].remove(ed.rung)
+                    continue
+                self.stats["exits"] += 1
 
     # ── Smart-Exit Mirror: инсайдеры (кошельки из атрибуции входа) сливают → выходим ──
     def _insider_atas(self, p: dict) -> list[str]:
@@ -189,12 +204,13 @@ class PositionWatcher:
                         dumped += 1
                 if total == 0 or dumped < max(1, (total + 1) // 2):
                     continue
-                p["smart_exit_done"] = True                # один выстрел на позицию
                 try:
-                    self._sell_for(sess)(p["address"], fraction=1.0,
-                                         reason=f"SMART-EXIT insiders dumping {dumped}/{total}")
-                    self.stats["smart_exits"] = self.stats.get("smart_exits", 0) + 1
-                except Exception as e:
+                    res = self._sell_for(sess)(p["address"], fraction=1.0,
+                                               reason=f"SMART-EXIT insiders dumping {dumped}/{total}")
+                    p["smart_exit_done"] = True            # один выстрел — после успешной отправки
+                    if not (isinstance(res, dict) and res.get("proposed")):
+                        self.stats["smart_exits"] = self.stats.get("smart_exits", 0) + 1
+                except Exception as e:                     # не удалось — повторим на следующем круге
                     self._log("WATCH_ERR", p.get("symbol", "?"), f"smart-exit: {e}")
 
     def _loop(self):

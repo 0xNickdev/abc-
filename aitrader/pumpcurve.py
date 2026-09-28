@@ -26,7 +26,10 @@ from solders.pubkey import Pubkey
 
 PUMP_PROGRAM = Pubkey.from_string("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P")
 SOL_MINT = "So11111111111111111111111111111111111111112"
-JUP_PRICE = "https://api.jup.ag/price/v2"
+# Аудит 28.09: api.jup.ag/price/v2 → 404 (переехал) → sol_usd()=0 → цена с кривой не считалась
+# ни разу (curve_prices=0 в проде). Бесплатный эндпоинт — lite-api price v3 ({mint:{usdPrice}}).
+JUP_PRICE = os.getenv("ABC_JUP_PRICE_URL", "https://lite-api.jup.ag/price/v3")
+DEX_SOL_PAIR = "https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112"
 RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 TIMEOUT = 8.0
 
@@ -62,15 +65,30 @@ def sol_usd() -> float:
     now = time.monotonic()
     if usd > 0 and now - ts < SOL_TTL:
         return usd
+    px = 0.0
     try:
         r = httpx.get(JUP_PRICE, params={"ids": SOL_MINT}, timeout=TIMEOUT)
         r.raise_for_status()
-        px = float(((r.json().get("data") or {}).get(SOL_MINT) or {}).get("price") or 0.0)
-        if px > 0:
-            _sol_cache = (now, px)
-            return px
+        d = r.json() or {}
+        row = d.get(SOL_MINT) or (d.get("data") or {}).get(SOL_MINT) or {}   # v3 | v2-формат
+        px = float(row.get("usdPrice") or row.get("price") or 0.0)
     except Exception:
-        pass
+        px = 0.0
+    if px <= 0:                                       # запасной источник: DexScreener SOL/USDC
+        try:
+            r = httpx.get(DEX_SOL_PAIR, timeout=TIMEOUT)
+            r.raise_for_status()
+            pairs = [q for q in (r.json().get("pairs") or [])
+                     if (q.get("baseToken") or {}).get("address") == SOL_MINT
+                     and (q.get("quoteToken") or {}).get("symbol") in ("USDC", "USDT")]
+            pairs.sort(key=lambda q: -float((q.get("liquidity") or {}).get("usd") or 0))
+            if pairs:
+                px = float(pairs[0].get("priceUsd") or 0.0)
+        except Exception:
+            px = 0.0
+    if px > 0:
+        _sol_cache = (now, px)
+        return px
     return usd                                        # протухший лучше, чем ноль (SOL стабилен на минутах)
 
 

@@ -15,8 +15,9 @@ import os
 
 import httpx
 
-JUP_QUOTE = "https://quote-api.jup.ag/v6/quote"
-JUP_SWAP = "https://quote-api.jup.ag/v6/swap"
+# Аудит 28.09: quote-api.jup.ag/v6 не резолвится → Phantom/N3 не торговали вовсе.
+JUP_QUOTE = os.getenv("ABC_JUP_QUOTE_URL", "https://lite-api.jup.ag/swap/v1/quote")
+JUP_SWAP = os.getenv("ABC_JUP_SWAP_URL", "https://lite-api.jup.ag/swap/v1/swap")
 SOL_MINT = "So11111111111111111111111111111111111111112"
 RPC_URL = os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
 TIMEOUT = 15.0
