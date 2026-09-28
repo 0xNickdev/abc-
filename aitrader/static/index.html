@@ -77,6 +77,7 @@ body.rail-open .scrim.view-mode{left:196px}   /* view уезжает вправ�
 .demobar.on{display:block}
 .demobar b{color:var(--paper)}
 .publicbar{background:linear-gradient(90deg,#5ad6ff1c,#9a82ff14);border-color:#5ad6ff55;color:#7fd9ff}
+.healthbar{background:linear-gradient(90deg,#ff5c5c1f,#f0a93b14);border-color:#ff5c5c66;color:#ff8a8a}
 /* 公开演示只读：藏掉一切写操作入口（买入/配置/切源/切链/持仓监控/买入数量）。
    后端已对写接口 403，这里再从 UI 收掉，避免访客点了报错。 */
 body.publicro .buybtn,
@@ -362,6 +363,7 @@ td{padding:5px 10px;vertical-align:middle}
   <script src="https://unpkg.com/@solana/web3.js@1.95.8/lib/index.iife.min.js"></script>
   <div class="demobar" id="demoBar" data-i18n="demobar"></div>
   <div class="demobar publicbar" id="publicBar" data-i18n="publicbar"></div>
+  <div class="demobar healthbar" id="healthBar"></div>
 
   <div class="bar">
     <div class="bar-l">
@@ -1601,6 +1603,15 @@ async function ensureAuth(){
 }
 /* admin-флаг зависит от сессии (кошелёк владельца после входа подписью) — обновляем
    шестерёнку/панель при каждой смене кошелька или получении X-Auth токена. */
+/* Здоровье бэкенда: GMGN-бан / протухшие данные / бот без сделок — красная полоса сверху.
+   Раньше бот мог молча стоять неделями (инцидент 15–28.09), UI выглядел живым. */
+async function refreshHealth(){
+  const el=document.getElementById('healthBar'); if(!el)return;
+  try{const d=await(await fetch(API+'/api/status')).json();
+      const a=(d.health&&d.health.alerts)||[];
+      el.textContent=a.join(' · '); el.classList.toggle('on',a.length>0);}catch(e){}
+}
+setInterval(refreshHealth,60000); setTimeout(refreshHealth,3000);
 async function refreshAdmin(){
   try{const d=await(await fetch(API+'/api/status')).json();
       document.body.classList.toggle('admin',!!d.admin);}catch(e){}

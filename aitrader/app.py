@@ -56,7 +56,9 @@ import db  # снапшот-хранилище качества токенов (
 import dexadapter  # реальные данные без ключей (GeckoTerminal + Solana RPC), DATA_SOURCE=dex
 import execution  # non-custodial：服务器只构建 tx，签名在浏览器（Phantom）
 import farm  # детектор ферм по кластеризации истории кошельков (gmgn portfolio activity)
+import gmgnguard  # общий ban-гейт + лимитер для всех вызовов gmgn-cli
 import kol  # Twitter/X KOL 信号（per-user opt-in）
+import notify  # Telegram-алерты оператору (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)
 import pumpcurve  # цена pump.fun из bonding curve по RPC (fallback для свежих токенов)
 import review  # офлайн review-loop: эдж кошельков/KOL + предложения по конфигу (обучение на своих данных)
 import rugcheck  # он-чейн риск холдеров (бандлеры/инсайдеры/danger) — белый лейбл, без бренда
@@ -254,6 +256,12 @@ RUN_MIN_INTERVAL_S = float(os.getenv("RUN_MIN_INTERVAL_S", "1.5"))
 # ⚠ 3s 太短 → 5.6s 轮询每轮都打 GMGN → 触发 429/IP 封禁。默认 20s，env 可调。
 TRENDING_CACHE_TTL = float(os.getenv("TRENDING_CACHE_TTL", "20"))
 TRENDING_COOLDOWN_S = float(os.getenv("TRENDING_COOLDOWN_S", "60"))   # после 429 не бьём GMGN столько сек (иначе бан продлевается)
+# Потолок возраста кэша трендинга. Инцидент 15–28.09: при бане GMGN отдавался дисковый кэш
+# БЕЗ срока годности → бот 13 дней фильтровал один снапшот (все «momentum spent»), молча.
+# Старше этого — строк нет (пустой экран + алерт честнее, чем торговля по трупам).
+TRENDING_STALE_S = float(os.getenv("ABC_TRENDING_STALE_S", "300") or 300)
+# Бот не входит, если рыночные данные старше этого (кэш в кулдауне после 429 и т.п.).
+BOT_MAX_DATA_AGE_S = float(os.getenv("ABC_BOT_MAX_DATA_AGE_S", "90") or 90)
 
 def _is_rate_limited(e: Exception) -> bool:
     s = str(e).lower()
@@ -265,13 +273,18 @@ def _is_rate_limited(e: Exception) -> bool:
 def _trending_disk_path() -> pathlib.Path:
     return OUT_DIR / "trending_cache.json"
 
-def _load_trending_disk(chain: str) -> list:
+def _load_trending_disk(chain: str) -> tuple[list, float]:
+    """(rows, wall-ts когда строки были получены от GMGN). Старый формат без _ts → mtime файла."""
     try:
-        data = json.loads(_trending_disk_path().read_text())
+        p = _trending_disk_path()
+        data = json.loads(p.read_text())
         rows = data.get(chain)
-        return rows if isinstance(rows, list) else []
+        ts = (data.get("_ts") or {}).get(chain) if isinstance(data.get("_ts"), dict) else None
+        if not ts:
+            ts = p.stat().st_mtime
+        return (rows if isinstance(rows, list) else []), float(ts)
     except Exception:
-        return []
+        return [], 0.0
 
 def _save_trending_disk(chain: str, rows: list):
     try:
@@ -283,6 +296,9 @@ def _save_trending_disk(chain: str, rows: list):
         except Exception:
             data = {}
         data[chain] = rows
+        ts = data.get("_ts") if isinstance(data.get("_ts"), dict) else {}
+        ts[chain] = time.time()
+        data["_ts"] = ts
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(data, ensure_ascii=False))
     except Exception:
@@ -562,6 +578,9 @@ class GMGNAdapter:
     def wallet_address(self) -> str: raise NotImplementedError
 
 
+SECURITY_TTL_S = float(os.getenv("ABC_GMGN_SECURITY_TTL_S", "60") or 60)   # security меняется редко
+INFO_TTL_S = float(os.getenv("ABC_GMGN_INFO_TTL_S", "5") or 5)              # цена — только анти-дубль
+
 class LiveGMGN(GMGNAdapter):
     """真实接入：调用全局安装的 gmgn-cli，解析 --raw 单行 JSON。"""
     def __init__(self, chain="sol"):
@@ -575,14 +594,41 @@ class LiveGMGN(GMGNAdapter):
             self.env["HTTPS_PROXY"] = gp
             self.env["HTTP_PROXY"] = gp
         self._wallet_cache: dict[str, str] = {}   # chain -> bound wallet address
+        self._resp_cache: dict[tuple, tuple] = {}  # (kind, addr) -> (monotonic, resp)
+
+    def _exec(self, cmd: list[str], timeout: float, label: str) -> dict:
+        """Единая точка вызова gmgn-cli: общий ban-гейт + лимитер (gmgnguard). В паузе бана
+        запрос в сеть НЕ уходит — иначе GMGN продлевает бан на каждый наш запрос."""
+        gmgnguard.GUARD.before()
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=self.env)
+        except subprocess.TimeoutExpired as e:
+            gmgnguard.GUARD.fail(f"timeout {label}")
+            raise RuntimeError(f"gmgn-cli {label} timeout") from e
+        if out.returncode != 0:
+            err = out.stderr.strip()
+            gmgnguard.GUARD.fail(err)
+            raise RuntimeError(f"gmgn-cli {label} rc={out.returncode}: {err[:400]}")
+        gmgnguard.GUARD.ok()
+        return json.loads(out.stdout)
+
+    def _cached(self, key: tuple, ttl: float, fn):
+        """TTL-кэш ответов (security/info): /api/positions поллят все вкладки UI — без кэша
+        каждая вкладка = 2 запроса в GMGN на каждую позицию вне хот-листа."""
+        hit = self._resp_cache.get(key)
+        now = time.monotonic()
+        if hit and now - hit[0] < ttl:
+            return hit[1]
+        val = fn()
+        self._resp_cache[key] = (now, val)
+        if len(self._resp_cache) > 1024:
+            self._resp_cache.pop(next(iter(self._resp_cache)))
+        return val
 
     def _cli(self, *args) -> dict:
         cmd = ["gmgn-cli", *args, "--chain", self.chain, "--raw"]
-        out = subprocess.run(cmd, capture_output=True, text=True,
-                             timeout=float(os.getenv("GMGN_CLI_TIMEOUT", "12")), env=self.env)  # fail-fast, не 25с
-        if out.returncode != 0:
-            raise RuntimeError(f"gmgn-cli {' '.join(args[:2])} rc={out.returncode}: {out.stderr.strip()[:400]}")
-        return json.loads(out.stdout)
+        return self._exec(cmd, float(os.getenv("GMGN_CLI_TIMEOUT", "12")),   # fail-fast, не 25с
+                          " ".join(args[:2]))
 
     def _run_cmd(self, cmd_str: str) -> dict:
         """执行用户自定义的完整 gmgn-cli 命令（不经 shell，避免注入扩大）。"""
@@ -591,10 +637,7 @@ class LiveGMGN(GMGNAdapter):
             raise RuntimeError("Command must start with gmgn-cli")
         if "--raw" not in parts:
             parts.append("--raw")
-        out = subprocess.run(parts, capture_output=True, text=True, timeout=25, env=self.env)
-        if out.returncode != 0:
-            raise RuntimeError(f"gmgn-cli error: {out.stderr.strip()}")
-        return json.loads(out.stdout)
+        return self._exec(parts, 25, " ".join(parts[1:3]))
 
     def market_trending(self, cmd=None, interval="1h", orderby="volume", limit=100,
                         filters=("not_wash_trading",)):
@@ -611,17 +654,19 @@ class LiveGMGN(GMGNAdapter):
         return data.get("rank", data.get("tokens", []))
 
     def token_info(self, addr):
-        return self._cli("token", "info", "--address", addr)
+        return self._cached(("info", addr), INFO_TTL_S,
+                            lambda: self._cli("token", "info", "--address", addr))
 
     def token_price(self, addr) -> float:
         # 真实 token info 的 price 是嵌套对象 {price:{price:"0.0001"...}}（字符串）
-        d = self._cli("token", "info", "--address", addr)
+        d = self.token_info(addr)
         p = d.get("price")
         return _f(p.get("price")) if isinstance(p, dict) else _f(p)
 
     def token_security(self, addr):
         # 归一化为逃生监控所需的安全快照（真实 1.3.9 无 security_score）
-        d = self._cli("token", "security", "--address", addr)
+        d = self._cached(("security", addr), SECURITY_TTL_S,
+                         lambda: self._cli("token", "security", "--address", addr))
         return dict(
             honeypot=_b(d.get("is_honeypot") if d.get("is_honeypot") is not None else d.get("honeypot")),
             renounced_mint=_b(d.get("renounced_mint")),
@@ -656,11 +701,7 @@ class LiveGMGN(GMGNAdapter):
         if self.chain in self._wallet_cache:
             return self._wallet_cache[self.chain]
         # portfolio info 无 --chain 参数：直接调，不经 _cli（_cli 会硬加 --chain）
-        out = subprocess.run(["gmgn-cli", "portfolio", "info", "--raw"],
-                             capture_output=True, text=True, timeout=25, env=self.env)
-        if out.returncode != 0:
-            raise RuntimeError(f"gmgn-cli error: {out.stderr.strip()}")
-        data = json.loads(out.stdout)
+        data = self._exec(["gmgn-cli", "portfolio", "info", "--raw"], 25, "portfolio info")
         for w in data.get("wallets", []):
             if w.get("chain") == self.chain and w.get("address"):
                 self._wallet_cache[self.chain] = w["address"]
@@ -1301,6 +1342,7 @@ class MarketLayer:
         self._dex = dexadapter.DexAdapter() if DATA_SOURCE == "dex" else None
         self._trending_cache: dict[str, tuple] = {}
         self._trending_cooldown: dict[str, float] = {}   # chain -> monotonic, до когда не бить GMGN (после 429)
+        self._trending_wall: dict[str, float] = {}       # chain -> wall-ts получения строк в кэше
         self.trending_cmds: dict[str, str] = load_trending_cmds()
         env = load_env()
         if env.get("GMGN_API_KEY"):
@@ -1343,28 +1385,44 @@ class MarketLayer:
         self._trending_cache.pop(chain, None)
         save_trending_cmds(self.trending_cmds)
 
+    def trending_age(self, chain: str) -> float | None:
+        """Возраст рыночных данных в секундах (None — ещё не получали в этом процессе)."""
+        ts = self._trending_wall.get(chain)
+        return (time.time() - ts) if ts else None
+
+    def _serve_cached(self, chain: str, hit) -> list:
+        """Кэш при недоступном GMGN — только пока он не протух (TRENDING_STALE_S)."""
+        if not hit:
+            return []
+        age = self.trending_age(chain)
+        if age is None or age > TRENDING_STALE_S:
+            return []
+        return hit[1]
+
     def trending_rows(self, chain: str) -> list:
         now = time.monotonic()
         hit = self._trending_cache.get(chain)
         if hit is None:                                     # холодный старт (рестарт/деплой) → диск
-            rows = _load_trending_disk(chain)
+            rows, ts = _load_trending_disk(chain)
             if rows:
                 # ts «в прошлом»: TTL истёк (обновимся при первой возможности), но при 429-кулдауне
-                # отдаём эти строки вместо пустого экрана «No candidates» после каждого деплоя
+                # отдаём эти строки вместо пустого экрана — если они не старше TRENDING_STALE_S
                 hit = (now - TRENDING_CACHE_TTL - 1, rows)
                 self._trending_cache[chain] = hit
+                self._trending_wall[chain] = ts
         if hit and (now - hit[0]) < TRENDING_CACHE_TTL:
             return hit[1]
-        if now < self._trending_cooldown.get(chain, 0.0):   # недавно 429 → НЕ бьём GMGN (продлевает бан)
-            return hit[1] if hit else []                    # отдаём последний кэш / пусто
+        if now < self._trending_cooldown.get(chain, 0.0) or gmgnguard.GUARD.banned():
+            return self._serve_cached(chain, hit)           # бан/кулдаун → НЕ бьём GMGN (продлевает бан)
         try:
             rows = self.adapter_for(chain).market_trending(cmd=self.get_trending_cmd(chain))
         except Exception as e:
-            if _is_rate_limited(e):                          # 429/бан → пауза, отдаём кэш/пусто (без 502-спама)
+            if _is_rate_limited(e):                          # 429/бан → пауза, отдаём свежий кэш/пусто
                 self._trending_cooldown[chain] = now + TRENDING_COOLDOWN_S
-                return hit[1] if hit else []
+                return self._serve_cached(chain, hit)
             raise                                           # прочие ошибки — как раньше (502 + трейсбек)
         self._trending_cache[chain] = (now, rows)
+        self._trending_wall[chain] = time.time()
         self._trending_cooldown.pop(chain, None)            # успех → снять кулдаун
         _save_trending_disk(chain, rows)                    # переживаем рестарт (деплой ≠ пустой экран)
         return rows
@@ -1530,11 +1588,15 @@ def _rotate_log_locked():
 
 def log(action: str, symbol: str, reason: str, extra: dict | None = None,
         mode: str | None = None, pubkey: str | None = None):
-    global _log_writes
+    global _log_writes, _LAST_TRADE_WALL
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     rec = dict(ts=datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                action=action, symbol=symbol, reason=reason, mode=(mode or ST.mode),
                pubkey=(pubkey or DEFAULT_PUBKEY), **(extra or {}))
+    if action in ("BUY", "SELL"):
+        _LAST_TRADE_WALL = time.time()
+        if notify.trades_enabled():
+            notify.send(f"{action} {symbol} [{rec['mode']}] {reason}")
     with _LOG_LOCK:
         with LOG_PATH.open("a") as fh:
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
@@ -1544,6 +1606,56 @@ def log(action: str, symbol: str, reason: str, extra: dict | None = None,
                 _rotate_log_locked()
             except Exception:
                 pass                                     # ротация не должна ронять запись
+
+# ── Здоровье + алерты (инцидент 15–28.09: бот 13 дней стоял молча) ─────────────
+_PROC_START = time.time()
+_LAST_TRADE_WALL = 0.0
+ALERT_STALE_MIN = float(os.getenv("ABC_ALERT_STALE_MIN", "10") or 10)   # рынок не обновлялся N минут
+ALERT_IDLE_H = float(os.getenv("ABC_ALERT_IDLE_H", "6") or 6)           # бот без сделок N часов
+
+def health_snapshot() -> dict:
+    """Сводка здоровья для /api/status и алертов. alerts — человекочитаемые проблемы."""
+    g = gmgnguard.GUARD.snapshot()
+    age = MK.trending_age("sol")
+    idle = time.time() - (_LAST_TRADE_WALL or _PROC_START)
+    bot_on = bool(getattr(ST.bot, "enabled", False))
+    alerts = []
+    if g["banned"]:
+        alerts.append(f"GMGN rate-limit ban: requests paused {g['banned_left_s']}s")
+    if bot_on and MK.is_live_adapter:
+        if age is None:
+            if time.time() - _PROC_START > ALERT_STALE_MIN * 60:
+                alerts.append("No market data from GMGN since start: bot is not trading")
+        elif age > ALERT_STALE_MIN * 60:
+            alerts.append(f"Market data is {age / 60:.0f} min old: bot is not trading")
+        if idle > ALERT_IDLE_H * 3600:
+            alerts.append(f"Bot idle: no trades for {idle / 3600:.0f}h")
+    return dict(gmgn=g, trending_age_s=(round(age) if age is not None else None),
+                last_trade_ago_s=round(idle), bot_enabled=bot_on,
+                telegram=notify.enabled(), alerts=alerts)
+
+def _health_loop():
+    """Раз в минуту: проблемы → Telegram (дедуп), восстановление → одно сообщение."""
+    down = False
+    while True:
+        try:
+            h = health_snapshot()
+            stale = any(a.startswith(("Market data", "No market data")) for a in h["alerts"])
+            if stale and not down:
+                down = True
+                notify.send("ALERT: " + " | ".join(h["alerts"])
+                            + (f" | last GMGN error: {h['gmgn']['last_error']}" if h["gmgn"]["last_error"] else ""),
+                            key="stale", cooldown_s=6 * 3600)
+            elif not stale and down:
+                down = False
+                notify.reset("stale")
+                notify.send("RECOVERED: market data is fresh again, bot is trading")
+            if any(a.startswith("Bot idle") for a in h["alerts"]):
+                notify.send("ALERT: " + " | ".join(h["alerts"]), key="idle",
+                            cooldown_s=ALERT_IDLE_H * 3600)
+        except Exception:
+            pass
+        time.sleep(60)
 
 def pnl_calendar(pubkey: str, month: str) -> dict:
     """Дневной реализованный PnL (SOL) за месяц YYYY-MM.
@@ -1963,6 +2075,7 @@ def monitor_positions(chain: str, rows_by_addr: dict | None = None,
     s = s or ST
     rows_by_addr = rows_by_addr or {}
     out = []
+    zombies: list[str] = []
     g = s.adapter_for(chain)
     for p in s.positions:
         if p.get("chain", "sol") != chain:       # 只监控该链的持仓
@@ -2002,6 +2115,8 @@ def monitor_positions(chain: str, rows_by_addr: dict | None = None,
                         except Exception:
                             cur_price = 0.0
                     if cur_price <= 0:
+                        if _is_zombie(p, s):
+                            zombies.append(p["address"])
                         out.append(dict(symbol=p["symbol"], address=p["address"], size_sol=p["size_sol"],
                                         pnl=p.get("pnl", 0), severity=0,
                                         signals=[dict(t=f"Monitor query failed: {e}", hot=False)]))
@@ -2015,6 +2130,7 @@ def monitor_positions(chain: str, rows_by_addr: dict | None = None,
             if ep > 0 and cur_price > 0:
                 p["pnl"] = round((cur_price - ep) / ep, 4)
                 p["cur_price"] = cur_price
+                p["px_ts"] = time.time()             # штамп «цена есть» (детектор зомби-позиций)
         else:
             # Mock：让持仓随轮次劣化，演示逃生信号 + 价格涨跌全过程
             severity, sigs = _mock_drift(p)
@@ -2042,7 +2158,33 @@ def monitor_positions(chain: str, rows_by_addr: dict | None = None,
                         mcap=round(mc, 2),
                         self_custody=p.get("self_custody", False),
                         signals=[dict(t=s[0], hot=s[1]) for s in sigs]))
+    for addr in zombies:                              # после цикла: do_sell мутирует s.positions
+        try:
+            # count_risk=False: пачка старых зомби не должна дёргать kill-switch/недельный котёл
+            do_sell(addr, 1.0, f"DEAD no price from any source {ZOMBIE_HOURS:g}h+ (counted -100%)", s,
+                    count_risk=False)
+            out = [o for o in out if o.get("address") != addr]
+        except Exception:
+            pass
     return out
+
+# Зомби-позиция: ни GMGN, ни DexScreener, ни bonding curve не дают цену дольше ZOMBIE_HOURS
+# (пул удалён/токен мёртв). Висела бы вечно с замёрзшим pnl, занимая слот и искажая статистику.
+# Закрываем ТОЛЬКО бумажные (SHADOW) бот-позиции и считаем честно как −100%;
+# реальные/ручные/self-custody не трогаем — там решает человек.
+ZOMBIE_HOURS = float(os.getenv("ABC_ZOMBIE_HOURS", "6") or 6)
+
+def _is_zombie(p: dict, s: UserSession) -> bool:
+    if ZOMBIE_HOURS <= 0 or s.mode != "SHADOW" or p.get("self_custody"):
+        return False
+    if not getattr(s.bot, "enabled", False):
+        return False
+    last = max(float(p.get("px_ts", 0) or 0), float(p.get("rt_ts", 0) or 0),
+               float(p.get("opened_ts", 0) or 0))
+    if last <= 0 or time.time() - last < ZOMBIE_HOURS * 3600:
+        return False
+    p["pnl"] = -1.0                                   # цены нет нигде → списываем полностью
+    return True
 
 def _mock_drift(p):
     c = p["cycles"]
@@ -2170,6 +2312,9 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
             dict(size_sol=size_sol, chain=chain, averaged=True, **exit_plan()), mode=s.mode)
         return dict(ok=True, status=status_msg, filled=filled, symbol=symbol, averaged=True)
     attrib = _attrib_for(address)                    # атрибуция входа (кошельки/KOL в场) → едет с позицией
+    _chk = _PREENTRY_CHECKS.pop(address, None)       # результаты pre-entry детекторов (бот) → контрфакт
+    if _chk:
+        attrib["checks"] = _chk
     _enrich_x_signal(attrib, address, s, entry_price)   # + соц-сигнал X на входе (opt-in, quota-safe)
     s.positions.append(dict(symbol=symbol, address=address, size_sol=round(size_sol, 4),
                             pnl=0.0, cycles=0, entry=entry, chain=chain,
@@ -2201,7 +2346,7 @@ def _reentry_block(pubkey: str, address: str) -> str | None:
     return None
 
 def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
-            s: UserSession | None = None) -> dict:
+            s: UserSession | None = None, count_risk: bool = True) -> dict:
     """平仓。fraction<1.0 为分批落袋（TP 阶梯用）：减仓不清仓、不计连亏；
     fraction>=1.0 为全清：连亏/当日亏损照常入账并移除持仓。reason 仅丰富日志（机器人标注离场原因）。"""
     s = s or ST
@@ -2233,7 +2378,9 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
     attrib = p.get("entry_attrib") or {}
     hold_min = round((time.time() - p["opened_ts"]) / 60.0, 1) if p.get("opened_ts") else None
     if full:
-        if pnl < 0:
+        if not count_risk:
+            pass                                     # списание зомби: в журнал/статистику да, в предохранители нет
+        elif pnl < 0:
             s.risk.consec_losses += 1
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * p["size_sol"], 4)
             WEEK_BUDGET.add(abs(pnl) * p["size_sol"])   # общий недельный котёл (все сессии)
@@ -2299,6 +2446,9 @@ async def _lifespan(_app: FastAPI):
     # Real-time монитор позиций (дефолт ON, ABC_WATCH=0 выключить): батч-цены DexScreener
     # ~2с + WS-пинок Helius (logsSubscribe по минтам) → свежий pnl и мгновенные стопы
     # для бот-сессий. Ручные/self-custody позиции не продаёт — только обновляет цену.
+    threading.Thread(target=_health_loop, daemon=True).start()
+    notify.send(f"started: bot {'ON ' + ST.bot.cfg.get('mode', '') if ST.bot.enabled else 'OFF'}, "
+                f"{len(ST.positions)} open positions, mode {ST.mode}", key="boot", cooldown_s=300)
     if os.getenv("ABC_WATCH", "1").strip().lower() in ("1", "true", "yes", "on"):
         def _all_sessions():
             with _sessions_lock:
@@ -2423,6 +2573,7 @@ def api_status(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHea
                           bot=CFG["bot_max_per_trade_sol"],
                           auto=CFG["auto_max_per_trade_sol"]),
                 watch=watcher.stats(),
+                health=health_snapshot(),
                 trending_cmd=MK.get_trending_cmd(MK.chain))
 
 @app.post("/api/config")
@@ -2870,15 +3021,40 @@ def _farm_preentry_flag(address: str) -> str | None:
         _FARM_PRE_CACHE.pop(next(iter(_FARM_PRE_CACHE)))
     return flag
 
+# Риск холдеров (бандлеры/инсайдеры/rugged) перед входом бота. Режимы ABC_BOT_HOLDER_RISK:
+#   log   (дефолт) — только записываем в attrib.checks входа → review считает контрфакт
+#           «сколько бы сэкономили/потеряли, блокируя по этому правилу» на НАШИХ сделках;
+#   block — блокировать (rugged / бандл ≥1 / инсайдеров ≥3);  0 — выключено.
+# Почему не block сразу: на pump.fun бандл есть у большинства запусков — без данных можно
+# заблокировать вообще всё. Решение принимаем по контрфакту, а не на глаз.
+BOT_HOLDER_RISK = os.getenv("ABC_BOT_HOLDER_RISK", "log").strip().lower()
+_PREENTRY_CHECKS: dict[str, dict] = {}     # addr -> результаты детекторов последней проверки
+
+def _holder_risk_flag(hr: dict) -> str | None:
+    if not hr:
+        return None
+    if hr.get("rugged"):
+        return "holder-risk: rugged"
+    if int(hr.get("bundled") or 0) >= 1:
+        return f"holder-risk: bundled {hr.get('bundled')}"
+    if int(hr.get("insiders") or 0) >= 3:
+        return f"holder-risk: insiders {hr.get('insiders')}"
+    return None
+
 def preentry_red_flags(address: str) -> str | None:
-    """Red flag по независимым он-чейн сигналам: top10-концентрация (RPC) и доля свежих
-    кошельков среди топ-холдеров (RPC). Пороги = те же, что в /api/token/quality.
-    Детектор недоступен/выключен → пропуск (fail-open по детектору, т.к. базовые
-    safety-гейты уже отработали); сработал → причина строкой."""
+    """Red flag по независимым он-чейн сигналам: top10-концентрация (RPC), доля свежих
+    кошельков среди топ-холдеров (RPC), риск холдеров, ферма. Пороги = те же, что в
+    /api/token/quality. Детектор недоступен → пропуск (fail-open по детектору: базовые
+    safety-гейты уже отработали). Все значения пишутся в _PREENTRY_CHECKS → attrib.checks
+    сделки (топливо контрфакт-анализа детекторов в review)."""
+    chk: dict = {}
+    flag = None
     try:
         top10 = dexadapter._top10_concentration(address)
-        if top10 and top10 >= 0.6:
-            return f"top10 {top10:.0%} >= 60%"
+        if top10:
+            chk["top10"] = round(float(top10), 4)
+            if top10 >= 0.6:
+                flag = flag or f"top10 {top10:.0%} >= 60%"
     except Exception:
         pass
     try:
@@ -2886,13 +3062,32 @@ def preentry_red_flags(address: str) -> str | None:
         checked = int(fw.get("checked") or 0)
         if checked:
             ratio = float(fw.get("ratio") or (fw.get("fresh", 0) / checked))
+            chk["fresh_ratio"] = round(ratio, 3)
             if ratio >= 0.5:
-                return f"fresh wallets {fw.get('fresh', 0)}/{checked}"
+                flag = flag or f"fresh wallets {fw.get('fresh', 0)}/{checked}"
     except Exception:
         pass
-    if BOT_FARM_VERIFY:
-        return _farm_preentry_flag(address)
-    return None
+    if BOT_HOLDER_RISK in ("log", "block"):
+        try:
+            hr = rugcheck.check(address) or {}
+            if hr:
+                chk["holder"] = dict(insiders=hr.get("insiders", 0), bundled=hr.get("bundled", 0),
+                                     danger=hr.get("danger") or [], rugged=bool(hr.get("rugged")))
+                hf = _holder_risk_flag(hr)
+                chk["holder_flag"] = hf
+                if hf and BOT_HOLDER_RISK == "block":
+                    flag = flag or hf
+        except Exception:
+            pass
+    if BOT_FARM_VERIFY and not flag:              # ферма дорогая по GMGN-квоте — только если чисто
+        ff = _farm_preentry_flag(address)
+        chk["farm"] = ff
+        flag = ff
+    chk["blocked_by"] = flag
+    _PREENTRY_CHECKS[address] = chk
+    if len(_PREENTRY_CHECKS) > 512:
+        _PREENTRY_CHECKS.pop(next(iter(_PREENTRY_CHECKS)))
+    return flag
 
 def _bot_buy_fn(sess: UserSession):
     """buy-колбэк бота: режим читается на каждом вызове — переключение на лету.
@@ -2903,6 +3098,12 @@ def _bot_buy_fn(sess: UserSession):
         mode = sess.bot.cfg.get("mode")
         cap = CFG["auto_max_per_trade_sol"] if mode == "n3" else CFG["bot_max_per_trade_sol"]
         size_sol = round(min(size_sol, cap), 4)
+        # протухшие рыночные данные (GMGN в бане/кулдауне) → не входим по старой цене/метрикам
+        age = MK.trending_age(chain)
+        if age is not None and age > BOT_MAX_DATA_AGE_S:
+            msg = f"stale market data {age:.0f}s > {BOT_MAX_DATA_AGE_S:.0f}s"
+            log("BUY_BLOCK", address[:8], msg, mode=sess.mode, pubkey=sess.pubkey)
+            raise HTTPException(409, msg)
         # кулдаун перезахода: только что вышли из этого CA → бот не перекупает его же
         rb = _reentry_block(sess.pubkey, address)
         if rb:

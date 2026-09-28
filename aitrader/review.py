@@ -229,6 +229,40 @@ def social_edge(records: list[dict], thr: int = 3,
                 high=_stats([t["pnl"] for t in hi], hard_stop))
 
 
+# Правила-кандидаты для блокировки входа (по attrib.checks, см. app.preentry_red_flags).
+DETECTOR_RULES = {
+    "holder_rugged": lambda c: bool((c.get("holder") or {}).get("rugged")),
+    "holder_bundled": lambda c: int((c.get("holder") or {}).get("bundled") or 0) >= 1,
+    "holder_insiders3": lambda c: int((c.get("holder") or {}).get("insiders") or 0) >= 3,
+    "holder_danger": lambda c: bool((c.get("holder") or {}).get("danger")),
+    "top10_40": lambda c: float(c.get("top10") or 0) >= 0.4,
+    "fresh_30": lambda c: float(c.get("fresh_ratio") or 0) >= 0.3,
+}
+
+
+def detector_edge(records: list[dict], hard_stop: float = DEFAULT_HARD_STOP,
+                  fee_pct: float = 0.0) -> dict:
+    """Контрфакт по детекторам: что было бы, если бы правило БЛОКИРОВАЛО вход.
+    Для каждого правила — сделки, где оно сработало (flagged) vs остальные;
+    saved_sol > 0 → блокировка по правилу сберегла бы столько SOL (net, после комиссий)
+    на наших же сделках. Пусто, пока входы не несут attrib.checks."""
+    trades = [t for t in closed_trades(records) if isinstance(t["attrib"].get("checks"), dict)]
+    if not trades:
+        return {}
+    out = dict(samples=len(trades), rules={})
+    for name, rule in DETECTOR_RULES.items():
+        flagged = [t for t in trades if rule(t["attrib"]["checks"])]
+        rest = [t for t in trades if not rule(t["attrib"]["checks"])]
+        net = round(sum((t["pnl"] - fee_pct) * t["size_sol"] for t in flagged), 4)
+        out["rules"][name] = dict(
+            flagged=_stats([t["pnl"] for t in flagged], hard_stop) | dict(net_sol=net),
+            rest=_stats([t["pnl"] for t in rest], hard_stop),
+            block_rate=round(len(flagged) / len(trades), 3),
+            saved_sol=round(-net, 4),
+            confidence=_confidence(len(flagged)))
+    return out
+
+
 # ── дайджест дня + полный прогон ─────────────────────────────────────────────
 def _data_note(n: int) -> str:
     if n == 0:
@@ -262,6 +296,7 @@ def daily_report(records: list[dict], day: str | None = None, cfg: dict | None =
         wallet_edge=wallet_edge(records, hard_stop=hs),
         kol_review=kol_review(),
         social_edge=social_edge(records, hard_stop=hs),
+        detector_edge=detector_edge(records, hard_stop=hs, fee_pct=fee_pct),
         proposals=propose(records, cfg, filters, trigger),
         note=_data_note(len(all_trades)),
     )
