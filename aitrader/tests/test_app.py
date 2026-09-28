@@ -2084,18 +2084,17 @@ class TestPnlCalendar:
     def client(self, tmp_path, monkeypatch):
         return _mu_client(tmp_path, monkeypatch)
 
-    def test_endpoint_is_house_view_all_trades(self, client):
+    def test_endpoint_is_per_session_view(self, client):
         import datetime as dt
         appmod.log("SELL", "A", "x", dict(pnl=0.2, size_sol=0.1), pubkey="local")   # +0.02
         appmod.log("SELL", "B", "x", dict(pnl=-0.5, size_sol=0.1), pubkey="local")  # -0.05
         appmod.log("SELL", "C", "x", dict(pnl=0.3, size_sol=0.1), pubkey="WX")       # +0.03
         m = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m")
-        # эндпоинт = house-вид: все 3 сделки, независимо от X-Wallet (иначе противоречит
-        # полосе метрик /api/backtest в том же окне)
-        for hdr in ({}, {"X-Wallet": "WX"}):
-            d = client.get(f"/api/pnl/calendar?month={m}", headers=hdr).json()
-            assert d["total"]["trades"] == 3
-            assert abs(d["total"]["pnl"] - 0.0) < 1e-9      # 0.02-0.05+0.03 = 0
+        # аудит 28.09: house-вид больше не смешивает чужие/фейковые кошельковые сделки
+        d = client.get(f"/api/pnl/calendar?month={m}").json()
+        assert d["total"]["trades"] == 2 and abs(d["total"]["pnl"] + 0.03) < 1e-9
+        d = client.get(f"/api/pnl/calendar?month={m}", headers={"X-Wallet": "WX"}).json()
+        assert d["total"]["trades"] == 1
 
     def test_function_still_filters_per_user(self, client):   # client → свежий tmp LOG_PATH
         import datetime as dt

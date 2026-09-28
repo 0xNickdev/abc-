@@ -215,8 +215,14 @@ DATA_SOURCE = os.getenv("DATA_SOURCE", "").strip().lower()
 # 也无权写 .env —— 他们的密钥(钱包)走 non-custodial（浏览器侧），运营密钥在服务器 .env 自动加载。
 # 设 ABC_ADMIN=1 解锁凭据面板与 /api/config 写入；默认(未设)=外部用户模式，凭据面板隐藏、写入 403。
 _admin_env = os.getenv("ABC_ADMIN", "").strip()
-# Legacy: ABC_ADMIN=1 → оператор ВСЕ, кто открыл URL (только для приватного/локального стенда!).
-ADMIN_MODE = _admin_env.lower() in ("1", "true", "yes", "on")
+# Публичный деплой (Railway сам ставит RAILWAY_ENVIRONMENT; вручную — ABC_PUBLIC=1): URL открыт
+# всему интернету → сессия без кошелька (house-бот) = любой прохожий, а не 127.0.0.1.
+PUBLIC_DEPLOY = bool(os.getenv("RAILWAY_ENVIRONMENT", "").strip()) or \
+    os.getenv("ABC_PUBLIC", "").strip().lower() in ("1", "true", "yes", "on")
+# Legacy: ABC_ADMIN=1 → оператор ВСЕ, кто открыл URL. Аудит 28.09: на публичном URL это давало
+# любому посетителю вывод session-кошелька, смену GMGN-ключа и управление house-ботом →
+# на публичном деплое legacy-флаг ИГНОРИРУЕТСЯ, нужен ABC_ADMIN=<pubkey> + вход подписью.
+ADMIN_MODE = _admin_env.lower() in ("1", "true", "yes", "on") and not PUBLIC_DEPLOY
 # Прод-режим: ABC_ADMIN=<pubkey>[,<pubkey>…] — операторские права ТОЛЬКО у этих кошельков
 # и только после входа подписью (X-Auth). Для публичного URL с реальными деньгами — един-
 # ственно правильный вариант. Отличаем от legacy по длине (base58 pubkey ≥ 32 символов).
@@ -228,6 +234,48 @@ def _is_admin(sess, x_auth: str | None) -> bool:
         return True
     return (sess.pubkey in ADMIN_WALLETS
             and sess.auth_token is not None and x_auth == sess.auth_token)
+
+def _house_admin(x_auth: str | None) -> bool:
+    """Право управлять house-сессией (без кошелька). Локально — всегда; на публичном деплое —
+    только X-Auth токен, выданный admin-кошельку (ABC_ADMIN=<pubkey>) после входа подписью."""
+    if not PUBLIC_DEPLOY or ADMIN_MODE:
+        return True
+    if not x_auth:
+        return False
+    for w in ADMIN_WALLETS:
+        s = SESSIONS.get(w)
+        if s is not None and s.auth_token and secrets.compare_digest(s.auth_token, x_auth):
+            return True
+    return False
+
+def _guard_write(sess, x_auth: str | None):
+    """Единый гейт для всего, что меняет состояние/тратит деньги или квоту.
+    house-сессия: оператор (см. _house_admin); кошелёк: владелец после входа подписью.
+    Аудит 28.09: без этого любой, кто знает (публичный!) pubkey, стартовал чужой бот в n3,
+    а без X-Wallet — выводил house session-кошелёк и менял конфиг house-бота."""
+    _block_if_public()
+    if sess.pubkey == DEFAULT_PUBKEY:
+        if not _house_admin(x_auth):
+            raise HTTPException(403, "House bot is operator-only (sign in with the admin wallet). "
+                                     "Connect your wallet to use your own bot.")
+        return
+    if not x_auth or not sess.auth_token or not secrets.compare_digest(x_auth, sess.auth_token):
+        raise HTTPException(401, "wallet sign-in required (X-Auth)")
+
+_SECRET_RX = re.compile(r"(api[-_]?key=)[^&\s\"']+", re.I)
+
+def _redact(msg) -> str:
+    """Не отдаём клиенту ключи из URL (Helius ?api-key=… в тексте httpx-ошибок)."""
+    return _SECRET_RX.sub(r"\1***", str(msg))
+
+_THROTTLE: dict[str, float] = {}
+
+def _throttle(name: str, min_interval_s: float):
+    """Глобальный лимит дорогих публичных эндпоинтов (квота GMGN/getxapi/RPC оператора)."""
+    now = time.monotonic()
+    if now - _THROTTLE.get(name, 0.0) < min_interval_s:
+        raise HTTPException(429, "busy — try again in a few seconds")
+    _THROTTLE[name] = now
 
 # 热榜扫描命令（可在前端「筛选结果」齿轮里改）。按链给默认值：
 #   sol 用经调优的命令（含 not_wash_trading 过滤）；其他链先用通用模板（仅换 --chain）。
@@ -1515,12 +1563,27 @@ _sessions_lock = threading.Lock()
 def get_session(pubkey: str | None) -> UserSession:
     """按 pubkey 取/建会话；空 pubkey → 默认会话(local，兼容单用户/未连钱包)。"""
     pk = (pubkey or "").strip() or DEFAULT_PUBKEY
+    if pk != DEFAULT_PUBKEY and not (len(pk) <= 64 and pk.isalnum()):
+        raise HTTPException(400, "bad X-Wallet")       # мусорные заголовки не плодят сессии/каталоги
     with _sessions_lock:
         s = SESSIONS.get(pk)
         if s is None:
+            if len(SESSIONS) >= MAX_SESSIONS:
+                _evict_idle_session()
             s = UserSession(pk)
             SESSIONS[pk] = s
         return s
+
+MAX_SESSIONS = int(os.getenv("ABC_MAX_SESSIONS", "300") or 300)
+
+def _evict_idle_session():
+    """Выкинуть из памяти одну простаивающую сессию (без позиций/бота/входа). Данные на диске
+    остаются — при следующем запросе сессия поднимется заново. Иначе случайные X-Wallet растят
+    SESSIONS без предела (и watcher обходит их все)."""
+    for pk, s in list(SESSIONS.items()):
+        if pk != DEFAULT_PUBKEY and not s.positions and not s.bot.enabled and not s.auth_token:
+            SESSIONS.pop(pk, None)
+            return
 
 ST = get_session(DEFAULT_PUBKEY)    # 默认会话：兼容既有 ST.* 引用与单用户/未连钱包场景
 
@@ -2383,7 +2446,8 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         elif pnl < 0:
             s.risk.consec_losses += 1
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * p["size_sol"], 4)
-            WEEK_BUDGET.add(abs(pnl) * p["size_sol"])   # общий недельный котёл (все сессии)
+            if s.pubkey == DEFAULT_PUBKEY:   # котёл = house-бот; чужие (в т.ч. фейковые) сессии его не жгут
+                WEEK_BUDGET.add(abs(pnl) * p["size_sol"])
         else:
             s.risk.consec_losses = 0
         # Кулдаун перезахода для БОТА: без него после стопа токен всё ещё в трендинге
@@ -2400,7 +2464,8 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
     else:
         if pnl < 0:                                  # 分批离场若为亏损也按比例入账当日亏损
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * sold_sol, 4)
-            WEEK_BUDGET.add(abs(pnl) * sold_sol)        # общий недельный котёл (все сессии)
+            if s.pubkey == DEFAULT_PUBKEY:
+                WEEK_BUDGET.add(abs(pnl) * sold_sol)    # недельный котёл house-бота
         p["size_sol"] = round(p["size_sol"] - sold_sol, 6)
         log("SELL", p["symbol"], f"{s.mode} partial {pct}% PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac,
@@ -2511,7 +2576,7 @@ AuthHeader = Header(default=None, alias="X-Auth")
 # ── Sign-in-with-wallet: challenge → браузер подписывает (Phantom signMessage) →
 #    сервер проверяет ed25519-подпись против pubkey → выдаёт токен сессии (в памяти).
 AUTH_CHALLENGE_TTL = 300.0
-_auth_challenges: dict[str, tuple[str, float]] = {}   # pubkey -> (nonce, monotonic_deadline)
+_auth_challenges: dict[str, dict[str, float]] = {}   # pubkey -> {nonce: monotonic_deadline}
 
 def _auth_message(pubkey: str, nonce: str) -> str:
     return f"ABC terminal sign-in\nwallet: {pubkey}\nnonce: {nonce}"
@@ -2520,8 +2585,10 @@ def require_auth(sess: UserSession, x_auth: str | None):
     """Секреты/деньги: локальная сессия (без кошелька, 127.0.0.1) не требует токена;
     сессия кошелька — только с валидным X-Auth (иначе любой, кто знает pubkey, читал бы чужое)."""
     if sess.pubkey == DEFAULT_PUBKEY:
+        if not _house_admin(x_auth):
+            raise HTTPException(403, "House session is operator-only on a public deploy")
         return
-    if not x_auth or x_auth != sess.auth_token:
+    if not x_auth or not sess.auth_token or not secrets.compare_digest(x_auth, sess.auth_token):
         raise HTTPException(401, "нужен вход подписью кошелька (X-Auth)")
 
 class AuthChallengeIn(BaseModel):
@@ -2537,7 +2604,15 @@ def api_auth_challenge(a: AuthChallengeIn):
     if not pk:
         raise HTTPException(400, "пустой pubkey")
     nonce = secrets.token_urlsafe(24)
-    _auth_challenges[pk] = (nonce, time.monotonic() + AUTH_CHALLENGE_TTL)
+    now = time.monotonic()
+    # per-nonce: чужой запрос challenge на тот же pubkey не ломает вход владельцу
+    pend = {n: t for n, t in (_auth_challenges.get(pk) or {}).items() if t > now}
+    if len(pend) >= 5:
+        pend.pop(min(pend, key=pend.get))
+    pend[nonce] = now + AUTH_CHALLENGE_TTL
+    _auth_challenges[pk] = pend
+    if len(_auth_challenges) > 2000:
+        _auth_challenges.pop(next(iter(_auth_challenges)))
     return dict(ok=True, message=_auth_message(pk, nonce))
 
 @app.post("/api/auth/verify")
@@ -2546,15 +2621,23 @@ def api_auth_verify(a: AuthVerifyIn):
     from nacl.exceptions import BadSignatureError
     from nacl.signing import VerifyKey
     pk = (a.pubkey or "").strip()
-    ch = _auth_challenges.get(pk)
-    if not ch or time.monotonic() > ch[1]:
+    now = time.monotonic()
+    pend = {n: t for n, t in (_auth_challenges.get(pk) or {}).items() if t > now}
+    if not pend:
         raise HTTPException(400, "challenge не найден или истёк — запроси заново")
-    try:
-        VerifyKey(base58.b58decode(pk)).verify(
-            _auth_message(pk, ch[0]).encode(), base64.b64decode(a.signature))
-    except (BadSignatureError, ValueError, TypeError):
+    ok_nonce = None
+    for nonce in pend:
+        try:
+            VerifyKey(base58.b58decode(pk)).verify(
+                _auth_message(pk, nonce).encode(), base64.b64decode(a.signature))
+            ok_nonce = nonce
+            break
+        except (BadSignatureError, ValueError, TypeError):
+            continue
+    if ok_nonce is None:
         raise HTTPException(401, "подпись не сошлась")
-    _auth_challenges.pop(pk, None)      # одноразовый nonce
+    pend.pop(ok_nonce, None)            # одноразовый nonce
+    _auth_challenges[pk] = pend
     sess = get_session(pk)
     sess.auth_token = secrets.token_urlsafe(32)
     return dict(ok=True, token=sess.auth_token)
@@ -2612,6 +2695,7 @@ def api_mode(m: ModeIn, x_wallet: str | None = WalletHeader,
     (X-Auth). Выключение (SHADOW) — всегда без препятствий. Режим кошелька персистится."""
     _block_if_public()
     s = get_session(x_wallet)
+    _guard_write(s, x_auth)
     want_live = m.mode.upper() == "LIVE"
     if s.pubkey == DEFAULT_PUBKEY:
         with s.lock:
@@ -2640,8 +2724,10 @@ def api_settings_get(chain: str = "sol"):
                 poll_interval_s=DEFAULT_POLL_S)
 
 @app.post("/api/settings")
-def api_settings(s: SettingsIn):
+def api_settings(s: SettingsIn, x_auth: str | None = AuthHeader):
     _block_if_public()
+    if not _house_admin(x_auth):                   # глобальный трендинг-команд house-бота и всех
+        raise HTTPException(403, "Trending command is operator-only")
     ch = valid_chain(s.chain)
     with MK.lock:
         if s.trending_cmd is not None:
@@ -2658,9 +2744,11 @@ def api_settings(s: SettingsIn):
     return dict(ok=True, trending_cmd=MK.get_trending_cmd(ch))
 
 @app.post("/api/settings/reset")
-def api_settings_reset(c: ChainIn):
+def api_settings_reset(c: ChainIn, x_auth: str | None = AuthHeader):
     """重置该链热榜命令为默认（删除落盘的用户覆盖），返回恢复后的默认命令。"""
     _block_if_public()
+    if not _house_admin(x_auth):                   # глобальный трендинг-команд house-бота и всех
+        raise HTTPException(403, "Trending command is operator-only")
     ch = valid_chain(c.chain)
     with MK.lock:
         MK.reset_trending_cmd(ch)
@@ -2686,21 +2774,23 @@ def api_filters_get(x_wallet: str | None = WalletHeader):
     return dict(filters=s.filters, defaults=DEFAULT_FILTERS, types=_FILTER_TYPES)
 
 @app.post("/api/filters")
-def api_filters(patch: dict, x_wallet: str | None = WalletHeader):
+def api_filters(patch: dict, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """合并写入过滤器（只收已知键，类型清洗，落盘持久）。每用户独立。"""
     _block_if_public()
     if not isinstance(patch, dict):
         raise HTTPException(400, "Request body must be an object")
     s = get_session(x_wallet)
+    _guard_write(s, x_auth)
     with s.lock:
         flt = s.set_filters(patch)
     return dict(ok=True, filters=flt)
 
 @app.post("/api/filters/reset")
-def api_filters_reset(x_wallet: str | None = WalletHeader):
+def api_filters_reset(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """重置过滤器为默认（删除落盘覆盖）。每用户独立。"""
     _block_if_public()
     s = get_session(x_wallet)
+    _guard_write(s, x_auth)
     with s.lock:
         flt = s.reset_filters()
     return dict(ok=True, filters=flt)
@@ -2734,20 +2824,22 @@ def api_run(r: RunIn, x_wallet: str | None = WalletHeader):
         except Exception as e:
             import traceback
             traceback.print_exc()                        # реальная причина (gmgn-cli/timeout) → в логи Railway
-            raise HTTPException(502, f"scan failed: {type(e).__name__}: {e}")
+            raise HTTPException(502, f"scan failed: {type(e).__name__}: {_redact(e)}")
 
 @app.post("/api/buy")
-def api_buy(b: BuyIn, x_wallet: str | None = WalletHeader):
+def api_buy(b: BuyIn, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     _block_if_public()
     ch = valid_chain(b.chain)
     sess = get_session(x_wallet)
+    _guard_write(sess, x_auth)
     with sess.lock:
         return do_buy(ch, b.address, b.size_sol, sess)
 
 @app.post("/api/sell")
-def api_sell(s: SellIn, x_wallet: str | None = WalletHeader):
+def api_sell(s: SellIn, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     _block_if_public()
     sess = get_session(x_wallet)
+    _guard_write(sess, x_auth)
     with sess.lock:
         # self_custody-позиция куплена реальными деньгами через Phantom: «бумажное» закрытие
         # здесь стёрло бы запись, а токены остались бы в кошельке. Только Wallet sell (Phantom)
@@ -2759,9 +2851,10 @@ def api_sell(s: SellIn, x_wallet: str | None = WalletHeader):
         return do_sell(s.address, s=sess)
 
 @app.post("/api/unmonitor")
-def api_unmonitor(s: SellIn, x_wallet: str | None = WalletHeader):
+def api_unmonitor(s: SellIn, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     _block_if_public()
     sess = get_session(x_wallet)
+    _guard_write(sess, x_auth)
     with sess.lock:
         return do_unmonitor(s.address, sess)
 
@@ -2790,10 +2883,11 @@ class StrategyIn(BaseModel):
     id: str
 
 @app.post("/api/strategy/select")
-def api_strategy_select(sel: StrategyIn, x_wallet: str | None = WalletHeader):
+def api_strategy_select(sel: StrategyIn, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """选定策略（每用户独立，落盘）。信号评估/机器人触发即时切换到该策略阈值。"""
     _block_if_public()
     sess = get_session(x_wallet)
+    _guard_write(sess, x_auth)
     with sess.lock:
         sid = sess.set_strategy(sel.id)
     st = strategy.get(sid)
@@ -2801,11 +2895,12 @@ def api_strategy_select(sel: StrategyIn, x_wallet: str | None = WalletHeader):
     return dict(ok=True, active=sid, strategy=st)
 
 @app.post("/api/strategy/apply")
-def api_strategy_apply(x_wallet: str | None = WalletHeader):
+def api_strategy_apply(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """把【当前选定策略】的 preset_filters 并入该用户过滤器并落盘。
     CFG（全局风控预设）只在默认会话（运营者/单机）时并入，避免一个用户改全局。"""
     _block_if_public()
     sess = get_session(x_wallet)
+    _guard_write(sess, x_auth)
     st = strategy.get(sess.strategy_id)
     with sess.lock:
         sess.filters.update(sanitize_filters(st["preset_filters"]))
@@ -2827,7 +2922,7 @@ def api_backtest(x_wallet: str | None = WalletHeader):
 @app.get("/api/pnl/calendar")
 def api_pnl_calendar(month: str = "", x_wallet: str | None = WalletHeader):
     """Календарь дневного реализованного PnL за месяц (per-user). month=YYYY-MM (пусто=текущий)."""
-    get_session(x_wallet)
+    sess = get_session(x_wallet)
     m = month.strip() or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
     if len(m) != 7 or m[4] != "-":
         raise HTTPException(400, "month формат YYYY-MM")
@@ -2835,7 +2930,10 @@ def api_pnl_calendar(month: str = "", x_wallet: str | None = WalletHeader):
     # Согласовано с /api/backtest (тоже по всему журналу) — иначе календарь и полоса
     # метрик в одном окне противоречат друг другу. Разбивку «мои/бот» добавим, когда
     # появятся реальные пользовательские сделки.
-    return pnl_calendar("*", m)
+    # Аудит 28.09: «*» смешивал house-бота с любыми кошельковыми сессиями (включая фейковые
+    # записи через tx/confirm) → календарь, по которому решаем про реальные деньги, врал.
+    # Теперь: без кошелька — house-бот; с кошельком — только свои сделки.
+    return pnl_calendar(sess.pubkey, m)
 
 # ── Ночной review-loop: отчёт (read-only) + форс-прогон + применение одного предложения ──
 def _block_if_not_owner(sess: UserSession, x_auth: str | None = None):
@@ -2845,7 +2943,7 @@ def _block_if_not_owner(sess: UserSession, x_auth: str | None = None):
     это любой прохожий с URL, а не 127.0.0.1."""
     if _is_admin(sess, x_auth):
         return
-    if sess.pubkey == DEFAULT_PUBKEY and not ADMIN_WALLETS:
+    if sess.pubkey == DEFAULT_PUBKEY and not ADMIN_WALLETS and not PUBLIC_DEPLOY:
         return
     raise HTTPException(403, "review-loop доступен оператору (ADMIN-кошелёк / локальная сессия)")
 
@@ -3147,11 +3245,12 @@ def api_bot(x_wallet: str | None = WalletHeader):
                 mode=sess.mode, trading_locked=LIVE_TRADING_DISABLED)
 
 @app.post("/api/bot/start")
-def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader):
+def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """启动该用户的自主执行回路。纸面优先：是否真实上链仍由 mode(LIVE) + ENABLE_LIVE_TRADING 决定。"""
     _block_if_public()
     ch = valid_chain(r.chain)
     sess = get_session(x_wallet)
+    _guard_write(sess, x_auth)
     # 把会话绑进回调：机器人跑在该用户的 过滤器/持仓/风控 上（tick 内部会拿 sess.lock）
     started = sess.bot.start(
         ch,
@@ -3164,22 +3263,28 @@ def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader):
     return dict(ok=True, started=started, **sess.bot.status())
 
 @app.post("/api/bot/stop")
-def api_bot_stop(x_wallet: str | None = WalletHeader):
+def api_bot_stop(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """停止该用户的自主执行回路（不影响已有持仓，只停自动开/平仓）。"""
     _block_if_public()
     sess = get_session(x_wallet)
+    _guard_write(sess, x_auth)
     sess.bot.stop()
     log("BOT", "ABC", "Autonomous loop stopped", mode=sess.mode)
     return dict(ok=True, **sess.bot.status())
 
 @app.post("/api/bot/config")
-def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader):
+def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """更新该用户机器人的执行参数（只收已知键，非空才覆盖）。"""
     _block_if_public()
     sess = get_session(x_wallet)
+    _guard_write(sess, x_auth)
     patch = {k: v for k, v in c.model_dump().items() if v is not None}
     if "mode" in patch and patch["mode"] not in ("n1", "n2", "n3"):
         raise HTTPException(400, "mode: n1 | n2 | n3")
+    if "poll_s" in patch:                          # 0/минус = busy-loop по GMGN (бан IP)
+        patch["poll_s"] = max(5.0, float(patch["poll_s"]))
+    if "max_new_per_tick" in patch:
+        patch["max_new_per_tick"] = max(0, min(5, int(patch["max_new_per_tick"])))
     with sess.lock:
         sess.bot.cfg.update(patch)
     return dict(ok=True, cfg=dict(sess.bot.cfg))
@@ -3195,11 +3300,12 @@ class ProposalActIn(BaseModel):
     action: str = "approve"      # approve | dismiss
 
 @app.post("/api/bot/proposals/act")
-def api_bot_proposal_act(a: ProposalActIn, x_wallet: str | None = WalletHeader):
+def api_bot_proposal_act(a: ProposalActIn, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """approve → исполнить бумажно/через операторский путь (self-custody кошельки
     исполняют сами через Phantom и шлют dismiss); dismiss → просто убрать."""
     _block_if_public()
     sess = get_session(x_wallet)
+    _guard_write(sess, x_auth)
     with sess.lock:
         prop = next((p for p in sess.proposals if p["id"] == a.id), None)
         if prop is None:
@@ -3273,6 +3379,9 @@ def api_tx_confirm(c: TxConfirmIn, x_wallet: str | None = WalletHeader,
     if sess.pubkey == DEFAULT_PUBKEY:
         raise HTTPException(400, "подключи кошелёк")
     require_auth(sess, x_auth)
+    # клиентские числа не доверяем: размер зажат ручным потолком (tx/build его и так не пропустит)
+    c.size_sol = max(0.0, min(float(c.size_sol or 0.0), CFG["max_per_trade_sol"]))
+    c.fraction = max(0.0, min(float(c.fraction or 0.0), 1.0))
     tag = f"tx {c.signature[:16]}…" if c.signature else "tx ?"
     with sess.lock:
         if c.side == "buy":
@@ -3348,11 +3457,15 @@ def api_session_wallet_withdraw(w: WithdrawIn, x_wallet: str | None = WalletHead
     to = (w.to or "").strip() or sess.pubkey
     if to == DEFAULT_PUBKEY:
         raise HTTPException(400, "укажи адрес получателя (локальная сессия без кошелька)")
+    # Вывод только владельцу: кошельковая сессия → свой pubkey; house → admin-кошелёк.
+    allowed = {sess.pubkey} if sess.pubkey != DEFAULT_PUBKEY else set(ADMIN_WALLETS)
+    if PUBLIC_DEPLOY and to not in allowed:
+        raise HTTPException(403, "withdraw only to the owner wallet")
     kp = sessionwallet.keypair_for(sess.session_key_path())
     try:
         sig = sessionwallet.withdraw_all(kp, to)
     except Exception as e:
-        raise HTTPException(502, f"вывод: {e}")
+        raise HTTPException(502, f"вывод: {_redact(e)}")
     log("WITHDRAW", to[:8], f"session-кошелёк → {to[:8]}… · tx {sig[:16]}…", mode=sess.mode)
     return dict(ok=True, tx=sig, to=to)
 
@@ -3404,9 +3517,11 @@ def api_kol_check(address: str, x_wallet: str | None = WalletHeader,
             raise HTTPException(502, f"Twitter API: {e}")
         # free-тариф X не даёт recent search (401/403) → операторский getxapi, если настроен
         if res.get("error") == "auth" and xapi.key():
+            _throttle("kol-op", 2.0)                 # операторская квота getxapi — общий лимит
             res = xapi.ca_mentions(address.strip())
     elif xapi.key():
         # личный Bearer не обязателен вовсе: у оператора есть getxapi-ключ
+        _throttle("kol-op", 2.0)
         res = xapi.ca_mentions(address.strip())
     else:
         raise HTTPException(400, "Twitter is not connected — add a Bearer in the KOL/X tab "
@@ -3440,12 +3555,14 @@ def api_snapshots(address: str | None = None, limit: int = 100):
 def api_token_freshness(address: str):
     """Свежие кошельки среди топ-холдеров (он-чейн, независимо от GMGN). Opt-in ABC_FRESH_WALLETS_RPC=1."""
     _block_if_public()
+    _throttle("freshness", 2.0)
     return dict(enabled=dexadapter.FRESH_RPC, **(dexadapter.fresh_wallet_count(address.strip()) or {}))
 
 @app.get("/api/token/xcheck")
 def api_token_xcheck(username: str, address: str = ""):
     """X reuse-профиль хендла (getxapi): возраст/подписчики + сколько РАЗНЫХ CA постил. По кнопке."""
     _block_if_public()
+    _throttle("xcheck", 3.0)
     return xapi.reuse_check(address.strip(), username.strip())
 
 @app.get("/api/token/quality")
@@ -3453,6 +3570,7 @@ def api_token_quality(address: str):
     """Сводная НЕЗАВИСИМАЯ проверка токена (не GMGN-агрегаты): top10-концентрация (RPC) +
     свежие кошельки (RPC) + X-reuse (getxapi, хендл авто из socials). По кнопке — платит RPC/getxapi."""
     _block_if_public()
+    _throttle("quality", 3.0)
     address = address.strip()
     handle = dexadapter.token_twitter(address)
     out = dict(address=address,
@@ -3502,8 +3620,9 @@ def api_token_farm(address: str, max_wallets: int = 30):
     """Детектор ферм + фронтранеры: топ-покупатели по объёму → (1) доля снайперов/ботов по тегам
     GMGN + (2) история каждого → кластеры одинаковой истории. Тяжело по rate-limit → по кнопке. Live-gmgn."""
     _block_if_public()
+    _throttle("farm", 10.0)                       # 1 запрос ≈ N+1 вызовов GMGN → бан IP
     address = address.strip()
-    n = min(int(max_wallets), 100)
+    n = max(1, min(int(max_wallets), 30))
     g = MK.adapter_for("sol")
     rows = []
     _tt = getattr(g, "token_traders", None)

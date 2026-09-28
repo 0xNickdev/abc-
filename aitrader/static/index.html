@@ -1573,13 +1573,27 @@ let walletPubkey=null;
 /* 多用户：连上钱包后，所有发往本引擎 /api/* 的请求自动带 X-Wallet —— 后端按 pubkey
    分区状态（持仓/过滤器/模式/机器人）。未连钱包 → 不带头 → 默认会话(local)。 */
 const _rawFetch=window.fetch.bind(window);
-window.fetch=function(url,opts){
-  if(walletPubkey&&typeof url==='string'&&url.indexOf(API+'/api/')===0){
+window.fetch=async function(url,opts){
+  const ours=walletPubkey&&typeof url==='string'&&url.indexOf(API+'/api/')===0;
+  if(ours){
     opts=opts||{};const h={'X-Wallet':walletPubkey};
     if(authToken)h['X-Auth']=authToken;
     opts.headers=Object.assign({},opts.headers||{},h);
   }
-  return _rawFetch(url,opts);
+  const r=await _rawFetch(url,opts);
+  /* Все записи кошельковой сессии требуют входа подписью (аудит 28.09). 401 на запись →
+     один раз подписываем вход в Phantom и повторяем запрос (токен живёт до рестарта сервера). */
+  const isWrite=opts&&opts.method&&opts.method.toUpperCase()!=='GET';
+  if(ours&&r.status===401&&isWrite&&url.indexOf('/api/auth/')<0&&!(opts&&opts._retried)){
+    try{
+      authToken=null;localStorage.removeItem('abc_auth_'+walletPubkey);
+      await ensureAuth();
+      const o2=Object.assign({},opts,{_retried:true});
+      o2.headers=Object.assign({},opts.headers||{},{'X-Auth':authToken});
+      return _rawFetch(url,o2);
+    }catch(e){return r;}
+  }
+  return r;
 };
 /* ── sign-in-with-wallet: challenge → Phantom signMessage → токен сессии.
    Токен в localStorage per-pubkey; после рестарта бэкенда протухает → авторетрай на 401. */
