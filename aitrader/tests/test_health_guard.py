@@ -56,6 +56,27 @@ class TestGuard:
             g.before()                                     # следующий через 10с > 1с ожидания
 
 
+class TestAdaptiveRate:
+    def test_ban_slows_down_success_speeds_up(self):
+        g = gmgnguard.Guard(min_interval_s=0.35)
+        g.fail(BAN_ERR)
+        assert g.interval_s == 0.7
+        g.fail(BAN_ERR)
+        assert g.interval_s == 1.4
+        for _ in range(gmgnguard.RECOVER_AFTER_OK):
+            g.ok()
+        assert abs(g.interval_s - 1.4 / 1.5) < 1e-9
+        for _ in range(gmgnguard.RECOVER_AFTER_OK * 10):
+            g.ok()
+        assert g.interval_s == 0.35                        # не быстрее базового
+
+    def test_interval_capped(self):
+        g = gmgnguard.Guard(min_interval_s=0.35)
+        for _ in range(20):
+            g.fail(BAN_ERR)
+        assert g.interval_s == gmgnguard.MAX_INTERVAL_S
+
+
 class TestLiveGmgnUsesGuard:
     def test_ban_stops_further_subprocess_calls(self, monkeypatch):
         monkeypatch.setattr(gmgnguard, "GUARD", gmgnguard.Guard(min_interval_s=0.0))

@@ -22,6 +22,12 @@ import time
 
 MIN_INTERVAL_S = float(os.getenv("ABC_GMGN_MIN_INTERVAL_S", "0.35") or 0.35)   # ~3 req/s
 MAX_QUEUE_WAIT_S = float(os.getenv("ABC_GMGN_MAX_WAIT_S", "15") or 15)
+# Адаптивная частота (AIMD): каждый бан удваивает интервал (до MAX_INTERVAL_S), каждые
+# RECOVER_AFTER_OK успехов подряд — ускоряемся в 1.5 раза до базового. Прод 28.09: бан
+# снимался, но первая же пачка запросов (holders финалистов) банила снова — 13 банов на
+# 21 запрос. Так гард сам находит темп, который терпит текущий IP.
+MAX_INTERVAL_S = float(os.getenv("ABC_GMGN_MAX_INTERVAL_S", "5") or 5)
+RECOVER_AFTER_OK = 20
 BAN_PAD_S = 10.0          # запас сверх объявленного времени сброса
 BAN_DEFAULT_S = 120.0     # сброс не распарсился
 BAN_MAX_S = 900.0
@@ -65,6 +71,8 @@ class Guard:
     def __init__(self, min_interval_s: float = MIN_INTERVAL_S,
                  max_wait_s: float = MAX_QUEUE_WAIT_S):
         self.min_interval_s = min_interval_s
+        self.interval_s = min_interval_s        # текущий (адаптивный) интервал
+        self._ok_streak = 0
         self.max_wait_s = max_wait_s
         self._lock = threading.Lock()
         self._banned_until = 0.0         # monotonic
@@ -89,7 +97,7 @@ class Guard:
             if wait > self.max_wait_s:
                 self.skipped += 1
                 raise GMGNUnavailable(f"429 GMGN local throttle: queue {wait:.0f}s")
-            self._next_slot = slot + self.min_interval_s
+            self._next_slot = slot + self.interval_s
             self.calls += 1
         if wait > 0:
             time.sleep(wait)
@@ -98,6 +106,10 @@ class Guard:
     def ok(self):
         with self._lock:
             self.ok_count += 1
+            self._ok_streak += 1
+            if self._ok_streak >= RECOVER_AFTER_OK and self.interval_s > self.min_interval_s:
+                self.interval_s = max(self.min_interval_s, self.interval_s / 1.5)
+                self._ok_streak = 0
             self.last_ok_wall = time.time()
             self.down_since_wall = None
             self.last_error = ""
@@ -108,6 +120,8 @@ class Guard:
             self.last_error = (err_text or "")[:300]
             if is_ban_text(err_text):
                 self.bans += 1
+                self._ok_streak = 0
+                self.interval_s = min(MAX_INTERVAL_S, max(self.interval_s, 0.1) * 2)
                 until = time.monotonic() + ban_seconds(err_text)
                 self._banned_until = max(self._banned_until, until)
                 if self.down_since_wall is None:
@@ -123,7 +137,7 @@ class Guard:
             banned=left > 0, banned_left_s=round(left),
             last_ok_ago_s=(round(now_w - self.last_ok_wall) if self.last_ok_wall else None),
             down_for_s=(round(now_w - self.down_since_wall) if self.down_since_wall else None),
-            calls=self.calls, ok=self.ok_count, fails=self.fails, bans=self.bans,
+            interval_s=round(self.interval_s, 2), calls=self.calls, ok=self.ok_count, fails=self.fails, bans=self.bans,
             skipped=self.skipped, last_error=self.last_error[:160])
 
 
