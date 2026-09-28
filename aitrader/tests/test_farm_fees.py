@@ -83,9 +83,9 @@ class TestFarmPlumbing:
 class TestReentryCooldown:
     def test_bot_blocked_after_stop_loss_and_after_any_exit(self, monkeypatch):
         appmod._RECENT_EXITS.clear()
-        appmod._RECENT_EXITS[("PK", "CA1")] = (appmod.time.monotonic(), -0.48)   # стоп −48%
-        appmod._RECENT_EXITS[("PK", "CA2")] = (appmod.time.monotonic(), +0.30)   # обычный выход
-        appmod._RECENT_EXITS[("PK", "CA3")] = (appmod.time.monotonic() - 3600, +0.30)  # час назад
+        appmod._RECENT_EXITS[("PK", "CA1")] = (appmod.time.time(), -0.48)   # стоп −48%
+        appmod._RECENT_EXITS[("PK", "CA2")] = (appmod.time.time(), +0.30)   # обычный выход
+        appmod._RECENT_EXITS[("PK", "CA3")] = (appmod.time.time() - 3600, +0.30)  # час назад
         assert "24h" in appmod._reentry_block("PK", "CA1")          # лузер: сутки
         assert "cooldown" in appmod._reentry_block("PK", "CA2")     # свежий выход: 30 мин
         assert appmod._reentry_block("PK", "CA3") is None           # кулдаун истёк

@@ -209,7 +209,11 @@ class TestZombiePositions:
 class TestHealth:
     def test_stale_market_raises_alert(self, tmp_path, monkeypatch):
         _mu_client(tmp_path, monkeypatch)
-        monkeypatch.setattr(appmod, "ST", types.SimpleNamespace(bot=types.SimpleNamespace(enabled=True)))
+        import time as _t
+        bot = types.SimpleNamespace(enabled=True, cfg={"poll_s": 20},
+                                    stats={"last_tick": _t.strftime("%Y-%m-%d %H:%M:%S")})
+        risk = types.SimpleNamespace(halted=False, consec_losses=0)
+        monkeypatch.setattr(appmod, "ST", types.SimpleNamespace(bot=bot, risk=risk, positions=[]))
         mk = types.SimpleNamespace(is_live_adapter=True, trending_age=lambda ch: 3600.0)
         monkeypatch.setattr(appmod, "MK", mk)
         h = appmod.health_snapshot()
@@ -272,3 +276,89 @@ class TestPreentryChecksRecorded:
         assert chk["holder_flag"] == "holder-risk: bundled 1"
         monkeypatch.setattr(appmod, "BOT_HOLDER_RISK", "block")
         assert appmod.preentry_red_flags("CAchk") == "holder-risk: bundled 1"
+
+
+class TestHealthMore:
+    def _st(self, monkeypatch, **kw):
+        import time as _t
+        bot = types.SimpleNamespace(enabled=kw.get("enabled", True), cfg={"poll_s": 20},
+                                    stats=dict(last_tick=kw.get("last_tick", _t.strftime("%Y-%m-%d %H:%M:%S")),
+                                               last_error=kw.get("last_error")))
+        risk = types.SimpleNamespace(halted=kw.get("halted", False), consec_losses=0)
+        monkeypatch.setattr(appmod, "ST", types.SimpleNamespace(bot=bot, risk=risk,
+                                                                positions=kw.get("positions", [])))
+        monkeypatch.setattr(appmod, "MK", types.SimpleNamespace(is_live_adapter=True,
+                                                                trending_age=lambda ch: 5.0))
+        monkeypatch.setattr(gmgnguard, "GUARD", gmgnguard.Guard())
+
+    def test_autostart_bot_off(self, monkeypatch):
+        self._st(monkeypatch, enabled=False)
+        monkeypatch.setenv("BOT_AUTOSTART", "n2")
+        assert any(a.startswith("House bot is OFF") for a in appmod.health_snapshot()["alerts"])
+
+    def test_stuck_loop_and_kill_switch(self, monkeypatch):
+        self._st(monkeypatch, last_tick="2026-01-01 00:00:00", last_error="boom", halted=True)
+        al = appmod.health_snapshot()["alerts"]
+        assert any(a.startswith("Bot loop stuck") and "boom" in a for a in al)
+        assert any(a.startswith("Kill-switch") for a in al)
+
+    def test_frozen_position_price(self, monkeypatch):
+        self._st(monkeypatch, positions=[dict(symbol="FRZ", px_ts=time.time() - 3600)])
+        assert any("FRZ" in a for a in appmod.health_snapshot()["alerts"])
+
+
+class TestPersistence:
+    def test_risk_state_survives_restart(self, tmp_path, monkeypatch):
+        _mu_client(tmp_path, monkeypatch)
+        appmod.ST.risk.consec_losses = 4
+        appmod._RECENT_EXITS[("local", "RUGCA")] = (time.time(), -0.6)
+        monkeypatch.setattr(appmod.WEEK_BUDGET, "loss", 3.3)
+        appmod.save_risk_state()
+        appmod.ST.risk.consec_losses = 0
+        appmod._RECENT_EXITS.clear()
+        monkeypatch.setattr(appmod.WEEK_BUDGET, "loss", 0.0)
+        appmod.load_risk_state()
+        assert appmod.ST.risk.consec_losses == 4 and appmod.WEEK_BUDGET.loss == 3.3
+        assert "24h" in appmod._reentry_block("local", "RUGCA")
+
+    def test_corrupt_positions_quarantined_not_overwritten(self, tmp_path, monkeypatch):
+        _mu_client(tmp_path, monkeypatch)
+        appmod.POSITIONS_PATH.write_text('[{"symbol": "X", "addr')      # обрезанный JSON
+        assert appmod.load_positions() == []
+        assert not appmod.POSITIONS_PATH.exists()
+        assert list(tmp_path.glob("positions.json.corrupt-*"))
+
+    def test_session_key_never_overwritten(self, tmp_path):
+        import sessionwallet
+        kp = tmp_path / "session_key.json"
+        kp.write_text("garbage")
+        with pytest.raises(RuntimeError):
+            sessionwallet._load_or_create(kp)
+        assert kp.read_text() == "garbage"
+
+
+class TestGuardThrottleIsNotBan:
+    def test_trending_serves_cache_without_cooldown_on_local_throttle(self, monkeypatch):
+        monkeypatch.setattr(gmgnguard, "GUARD", gmgnguard.Guard(min_interval_s=0.0))
+        monkeypatch.setattr(appmod, "_load_trending_disk", lambda ch: ([{"address": "A"}], time.time() - 30))
+        mk = appmod.MarketLayer()
+
+        class _T:
+            def market_trending(self, cmd=None, **kw):
+                raise gmgnguard.GMGNThrottled("429 GMGN local throttle: queue 20s")
+        mk.adapter_for = lambda ch: _T()
+        assert mk.trending_rows("sol") == [{"address": "A"}]
+        assert "sol" not in mk._trending_cooldown
+
+
+class TestN3ShadowIsPaper:
+    def test_n3_in_shadow_never_signs(self, tmp_path, monkeypatch):
+        _mu_client(tmp_path, monkeypatch)
+        sess = appmod.get_session("N3ShadowWallet")
+        sess.bot.cfg["mode"] = "n3"
+        monkeypatch.setattr(appmod, "LIVE_TRADING_DISABLED", False)
+        signed = []
+        monkeypatch.setattr(appmod.sessionwallet, "sign_and_send", lambda tx, kp: signed.append(1))
+        monkeypatch.setattr(appmod, "do_buy", lambda *a, **k: dict(ok=True, paper=True))
+        res = appmod._n3_execute(sess, "buy", "sol", "CA", size_sol=0.05)
+        assert res.get("paper") and not signed

@@ -1486,6 +1486,7 @@ class TestSessionWallet:
     def test_n3_live_signs_and_records(self, client, monkeypatch, tmp_path):
         sess = appmod.get_session("N3WalletBBBB")
         sess.bot.cfg["mode"] = "n3"
+        sess.mode = "LIVE"                      # аудит 28.09: реальная tx только в LIVE
         monkeypatch.setattr(appmod, "LIVE_TRADING_DISABLED", False)
         monkeypatch.setattr(appmod.execution, "build_buy",
                             lambda pk, ca, sz, sl=100: dict(tx="dGVzdA==", out_amount=555))

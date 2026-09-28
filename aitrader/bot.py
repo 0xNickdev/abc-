@@ -130,8 +130,10 @@ class BotRunner:
                          positions=positions_fn, risk_cfg=risk_cfg, lock=lock,
                          halted=halted_fn or (lambda: False))
         self.enabled = True
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, daemon=True)
+        # Своё Event на каждый запуск: stop→start подряд раньше очищал общий _stop раньше,
+        # чем старая нить его видела → крутились ДВА цикла (двойная нагрузка на GMGN/входы).
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._loop, args=(self._stop,), daemon=True)
         self._thread.start()
         return True
 
@@ -140,14 +142,15 @@ class BotRunner:
         self._stop.set()
         return True
 
-    def _loop(self):
-        while not self._stop.is_set() and self.enabled:
+    def _loop(self, stop_ev: threading.Event | None = None):
+        stop_ev = stop_ev or self._stop
+        while not stop_ev.is_set() and self.enabled:
             try:
                 self.tick()
             except Exception as e:           # 单轮异常不杀回路，记录后继续
                 self.stats["errors"] += 1
                 self.stats["last_error"] = str(e)
-            self._stop.wait(self.cfg["poll_s"])
+            stop_ev.wait(max(1.0, float(self.cfg["poll_s"])))
 
     # ── 单轮 ───────────────────────────────────────────────────────────────
     def tick(self):

@@ -349,7 +349,7 @@ def _save_trending_disk(chain: str, rows: list):
         ts[chain] = time.time()
         data["_ts"] = ts
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(json.dumps(data, ensure_ascii=False))
+        _atomic_write(p, json.dumps(data, ensure_ascii=False))
     except Exception:
         pass                                    # кэш — best-effort, скан не роняем
 # Оценочная round-trip стоимость сделки (pool fee + priority + slippage, обе ноги) как доля
@@ -400,10 +400,31 @@ def load_trending_cmds() -> dict:
     except Exception:
         return {}
 
+def _atomic_write(path: pathlib.Path, text: str):
+    """tmp + fsync + os.replace: kill/OOM посреди записи не оставит обрезанный JSON
+    (раньше битый positions.json молча читался как [] и перезаписывался — позиции терялись)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w") as fh:
+        fh.write(text)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+def _quarantine(path: pathlib.Path, err: Exception):
+    """Битый файл не затираем пустым: откладываем в .corrupt и алертим оператора."""
+    try:
+        bad = path.with_name(path.name + f".corrupt-{int(time.time())}")
+        os.replace(path, bad)
+        notify.send(f"ALERT: corrupt state file {path.name} moved to {bad.name}: {err}",
+                    key="corrupt:" + path.name, cooldown_s=3600)
+    except Exception:
+        pass
+
 def save_trending_cmds(cmds: dict):
     try:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        TRENDING_CMDS_PATH.write_text(json.dumps(cmds, ensure_ascii=False))
+        _atomic_write(TRENDING_CMDS_PATH, json.dumps(cmds, ensure_ascii=False))
     except Exception:
         pass
 
@@ -446,7 +467,7 @@ def load_filters() -> dict:
 def save_filters(flt: dict):
     try:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        FILTERS_PATH.write_text(json.dumps(flt, ensure_ascii=False))
+        _atomic_write(FILTERS_PATH, json.dumps(flt, ensure_ascii=False))
     except Exception:
         pass
 
@@ -469,13 +490,14 @@ def load_user_positions(pubkey: str) -> list:
     try:
         data = json.loads(p.read_text())
         return data if isinstance(data, list) else []
-    except Exception:
+    except Exception as e:
+        _quarantine(p, e)
         return []
 
 def save_user_positions(pubkey: str, lst: list):
     try:
         d = _user_dir(pubkey); d.mkdir(parents=True, exist_ok=True)
-        (d / "positions.json").write_text(json.dumps(lst, ensure_ascii=False))
+        _atomic_write(d / "positions.json", json.dumps(lst, ensure_ascii=False))
     except Exception:
         pass
 
@@ -591,7 +613,7 @@ def load_user_mode(pubkey: str) -> str:
 def save_user_mode(pubkey: str, mode: str):
     try:
         d = _user_dir(pubkey); d.mkdir(parents=True, exist_ok=True)
-        (d / "mode.json").write_text(json.dumps(dict(mode=mode)))
+        _atomic_write(d / "mode.json", json.dumps(dict(mode=mode)))
     except Exception:
         pass
 
@@ -599,7 +621,7 @@ def save_positions(lst: list):
     """默认会话(local)持仓落盘到顶层 positions.json（重启/reload 不丢）。"""
     try:
         OUT_DIR.mkdir(parents=True, exist_ok=True)
-        POSITIONS_PATH.write_text(json.dumps(lst, ensure_ascii=False))
+        _atomic_write(POSITIONS_PATH, json.dumps(lst, ensure_ascii=False))
     except Exception:
         pass
 
@@ -609,7 +631,8 @@ def load_positions() -> list:
     try:
         data = json.loads(POSITIONS_PATH.read_text())
         return data if isinstance(data, list) else []
-    except Exception:
+    except Exception as e:
+        _quarantine(POSITIONS_PATH, e)
         return []
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -658,8 +681,9 @@ class LiveGMGN(GMGNAdapter):
             err = out.stderr.strip()
             gmgnguard.GUARD.fail(err)
             raise RuntimeError(f"gmgn-cli {label} rc={out.returncode}: {err[:400]}")
+        data = json.loads(out.stdout)                 # успех засчитываем только после парса
         gmgnguard.GUARD.ok()
-        return json.loads(out.stdout)
+        return data
 
     def _cached(self, key: tuple, ttl: float, fn):
         """TTL-кэш ответов (security/info): /api/positions поллят все вкладки UI — без кэша
@@ -1078,7 +1102,8 @@ def _get_anthropic():
     global _anthropic_client
     if _anthropic_client is None:
         import anthropic
-        _anthropic_client = anthropic.Anthropic()   # 自动读 ANTHROPIC_API_KEY
+        # timeout: дефолт SDK 600с×2 ретрая — один зависший ответ LLM останавливал тик бота
+        _anthropic_client = anthropic.Anthropic(timeout=20.0, max_retries=0)   # ключ из ANTHROPIC_API_KEY
     return _anthropic_client
 
 # 结构化输出 schema：强约束 LLM 只能回这几个字段（与启发式输出同构）。
@@ -1353,6 +1378,8 @@ class RiskManager:
         """Для halted_fn бота: сброс дня и здесь — замерший на kill-switch бот не доходит
         до gate() и иначе никогда не увидел бы новый день."""
         self.roll_day()
+        if self.consec_losses >= CFG["kill_switch_consec_losses"]:
+            self.halted = True          # раньше взводился только в gate() — N3 его не звал
         return (self.halted or self.realized_loss_today >= daily_cap
                 or WEEK_BUDGET.exhausted())
 
@@ -1466,6 +1493,8 @@ class MarketLayer:
         try:
             rows = self.adapter_for(chain).market_trending(cmd=self.get_trending_cmd(chain))
         except Exception as e:
+            if isinstance(e, gmgnguard.GMGNThrottled):       # своя очередь, не бан → без кулдауна
+                return self._serve_cached(chain, hit)
             if _is_rate_limited(e):                          # 429/бан → пауза, отдаём свежий кэш/пусто
                 self._trending_cooldown[chain] = now + TRENDING_COOLDOWN_S
                 return self._serve_cached(chain, hit)
@@ -1676,6 +1705,7 @@ _PROC_START = time.time()
 _LAST_TRADE_WALL = 0.0
 ALERT_STALE_MIN = float(os.getenv("ABC_ALERT_STALE_MIN", "10") or 10)   # рынок не обновлялся N минут
 ALERT_IDLE_H = float(os.getenv("ABC_ALERT_IDLE_H", "6") or 6)           # бот без сделок N часов
+ALERT_FROZEN_MIN = float(os.getenv("ABC_ALERT_FROZEN_MIN", "10") or 10)  # цена позиции не обновлялась
 
 def health_snapshot() -> dict:
     """Сводка здоровья для /api/status и алертов. alerts — человекочитаемые проблемы."""
@@ -1686,6 +1716,33 @@ def health_snapshot() -> dict:
     alerts = []
     if g["banned"]:
         alerts.append(f"GMGN rate-limit ban: requests paused {g['banned_left_s']}s")
+    if os.getenv("BOT_AUTOSTART", "").strip().lower() in ("n1", "n2", "n3") and not bot_on:
+        alerts.append("House bot is OFF (BOT_AUTOSTART is set)")
+    if bot_on:
+        st = ST.bot.stats
+        lt = st.get("last_tick")
+        try:
+            lt_age = time.time() - time.mktime(time.strptime(lt, "%Y-%m-%d %H:%M:%S")) if lt else None
+        except ValueError:
+            lt_age = None
+        poll = float(ST.bot.cfg.get("poll_s", 20) or 20)
+        if (lt_age is None and time.time() - _PROC_START > 10 * poll) or (lt_age is not None and lt_age > 10 * poll):
+            alerts.append(f"Bot loop stuck: no completed tick for {((lt_age or 0) / 60):.0f} min"
+                          + (f" (last error: {_redact(st.get('last_error'))[:120]})" if st.get("last_error") else ""))
+        if ST.risk.halted or ST.risk.consec_losses >= CFG["kill_switch_consec_losses"]:
+            alerts.append("Kill-switch is ON: bot only closes positions today")
+        elif WEEK_BUDGET.exhausted():
+            alerts.append(f"Week budget exhausted ({CFG['week_budget_sol']} SOL): no entries until Monday UTC")
+    frozen = []
+    for p in list(ST.positions):
+        last = max(float(p.get("px_ts", 0) or 0), float(p.get("rt_ts", 0) or 0))
+        if last and time.time() - last > ALERT_FROZEN_MIN * 60:
+            frozen.append(p.get("symbol", "?"))
+    if frozen:
+        alerts.append(f"Frozen prices (stop-loss blind) >{ALERT_FROZEN_MIN:.0f} min: {', '.join(frozen[:5])}")
+    ws = (watcher.stats() or {}).get("ws_state")
+    if ws == "dead":
+        alerts.append("Real-time WS thread is dead (stops fall back to 2s polling)")
     if bot_on and MK.is_live_adapter:
         if age is None:
             if time.time() - _PROC_START > ALERT_STALE_MIN * 60:
@@ -1714,6 +1771,10 @@ def _health_loop():
                 down = False
                 notify.reset("stale")
                 notify.send("RECOVERED: market data is fresh again, bot is trading")
+            for a in h["alerts"]:
+                if a.startswith(("House bot is OFF", "Bot loop stuck", "Kill-switch", "Week budget",
+                                 "Frozen prices", "Real-time WS")):
+                    notify.send("ALERT: " + a, key="h:" + a.split(":")[0], cooldown_s=3 * 3600)
             if any(a.startswith("Bot idle") for a in h["alerts"]):
                 notify.send("ALERT: " + " | ".join(h["alerts"]), key="idle",
                             cooldown_s=ALERT_IDLE_H * 3600)
@@ -2333,6 +2394,10 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
             entry_price = 0.0
     if not entry_price and info.get("price"):
         entry_price = _f(info.get("price"))
+    if entry_price <= 0 and not (s.mode == "LIVE" and not LIVE_TRADING_DISABLED):
+        # без цены входа pnl навсегда 0 → ни стопа, ни TP, слот занят вечно (аудит 28.09)
+        log("BUY_FAIL", address[:8], "no entry price from any source")
+        raise HTTPException(502, "No entry price for this token right now (feeds unavailable)")
 
     # Кошельковая сессия в LIVE = self-custody: операторский серверный ключ (GMGN swap)
     # к чужим деньгам не прикасается НИКОГДА. Реальная сделка — только /api/tx/* + Phantom.
@@ -2405,6 +2470,10 @@ def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbo
         if entry_price > 0:
             existing["cur_price"] = entry_price
         existing.pop("peak_pnl", None)           # новая средняя → трейлинг с чистого листа
+        existing["tp_taken"] = []                # ступени TP считаются от новой средней
+        cp = float(existing.get("cur_price", 0.0) or 0.0)
+        ep = float(existing.get("entry_price", 0.0) or 0.0)
+        existing["pnl"] = round((cp - ep) / ep, 4) if ep > 0 and cp > 0 else 0.0
         s.save_positions()
         _verb = "filled" if filled else ("submitted·pending" if s.mode == "LIVE" else "recorded")
         log("BUY", symbol, f"{s.mode} {_verb} +{size_sol} averaged → {new_sz} ({chain})",
@@ -2431,13 +2500,44 @@ def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbo
 # LOSS_REENTRY_HOURS (дамп/раг не «откупают» на автопилоте). Человек руками — как хочет.
 REENTRY_COOLDOWN_MIN = float(os.getenv("ABC_REENTRY_COOLDOWN_MIN", "30") or 30)
 LOSS_REENTRY_HOURS = float(os.getenv("ABC_LOSS_REENTRY_HOURS", "24") or 24)
-_RECENT_EXITS: dict[tuple[str, str], tuple[float, float]] = {}
+_RECENT_EXITS: dict[tuple[str, str], tuple[float, float]] = {}   # (pubkey, addr) -> (wall ts, pnl)
+RISK_STATE_PATH = OUT_DIR / "risk_state.json"
+
+# Аудит 28.09: kill-switch, дневной/недельный котёл и запрет перезахода после стопа жили
+# только в памяти → каждый деплой (а их много) снимал все предохранители house-бота.
+def save_risk_state():
+    try:
+        r = ST.risk
+        now = time.time()
+        exits = [[k[0], k[1], v[0], v[1]] for k, v in _RECENT_EXITS.items()
+                 if now - v[0] < LOSS_REENTRY_HOURS * 3600 and k[0] == DEFAULT_PUBKEY]
+        _atomic_write(OUT_DIR / "risk_state.json", json.dumps(dict(
+            day=r._day, realized_loss_today=r.realized_loss_today, consec_losses=r.consec_losses,
+            halted=r.halted, week=WEEK_BUDGET._week, week_loss=WEEK_BUDGET.loss,
+            recent_exits=exits[-500:])))
+    except Exception:
+        pass
+
+def load_risk_state():
+    try:
+        d = json.loads((OUT_DIR / "risk_state.json").read_text())
+    except Exception:
+        return
+    r = ST.risk
+    if d.get("day") == r._day:
+        r.realized_loss_today = float(d.get("realized_loss_today") or 0.0)
+        r.consec_losses = int(d.get("consec_losses") or 0)
+        r.halted = bool(d.get("halted"))
+    if d.get("week") == WEEK_BUDGET._week:
+        WEEK_BUDGET.loss = float(d.get("week_loss") or 0.0)
+    for pk, addr, ts, pnl in d.get("recent_exits") or []:
+        _RECENT_EXITS[(pk, addr)] = (float(ts), float(pnl))
 
 def _reentry_block(pubkey: str, address: str) -> str | None:
     ex = _RECENT_EXITS.get((pubkey, address))
     if not ex:
         return None
-    ago_min = (time.monotonic() - ex[0]) / 60.0
+    ago_min = (time.time() - ex[0]) / 60.0
     if ex[1] <= -0.20 and ago_min < LOSS_REENTRY_HOURS * 60:
         return f"re-entry blocked {LOSS_REENTRY_HOURS:.0f}h after {ex[1]:+.0%} stop"
     if ago_min < REENTRY_COOLDOWN_MIN:
@@ -2489,7 +2589,7 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         # Кулдаун перезахода для БОТА: без него после стопа токен всё ещё в трендинге
         # и всё ещё «триггерит» → бот перекупает тот же CA каждый тик (6 входов в MERT
         # за 11 минут на одном дампе). Ручных покупок не касается.
-        _RECENT_EXITS[(s.pubkey, p["address"])] = (time.monotonic(), pnl)
+        _RECENT_EXITS[(s.pubkey, p["address"])] = (time.time(), pnl)   # wall: переживает рестарт
         if len(_RECENT_EXITS) > 2000:
             _RECENT_EXITS.pop(next(iter(_RECENT_EXITS)))
         log("SELL", p["symbol"], f"{s.mode} closed PnL {pnl:+.1%}{tag}",
@@ -2508,6 +2608,8 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
                  attrib=attrib, hold_min=hold_min),
             mode=s.mode, pubkey=s.pubkey)
     s.save_positions()
+    if s.pubkey == DEFAULT_PUBKEY:
+        save_risk_state()
     return dict(ok=True, symbol=p["symbol"], fraction=frac, closed=full)
 
 def do_unmonitor(address: str, s: UserSession | None = None) -> dict:
@@ -2547,6 +2649,7 @@ async def _lifespan(_app: FastAPI):
     # Real-time монитор позиций (дефолт ON, ABC_WATCH=0 выключить): батч-цены DexScreener
     # ~2с + WS-пинок Helius (logsSubscribe по минтам) → свежий pnl и мгновенные стопы
     # для бот-сессий. Ручные/self-custody позиции не продаёт — только обновляет цену.
+    load_risk_state()                     # предохранители house-бота переживают деплой
     threading.Thread(target=_health_loop, daemon=True).start()
     notify.send(f"started: bot {'ON ' + ST.bot.cfg.get('mode', '') if ST.bot.enabled else 'OFF'}, "
                 f"{len(ST.positions)} open positions, mode {ST.mode}", key="boot", cooldown_s=300)
@@ -3087,7 +3190,8 @@ def _n3_execute(sess: UserSession, side: str, chain: str, address: str,
                 size_sol: float = 0.0, fraction: float = 1.0, reason: str | None = None) -> dict:
     """N3-автопилот: реальное исполнение session-кошельком (только sol). Заперто
     ENABLE_LIVE_TRADING: пока замок закрыт — обычный бумажный учёт (обкатка без денег)."""
-    if LIVE_TRADING_DISABLED or chain != "sol":
+    # Аудит 28.09: раньше реальная tx шла даже в SHADOW (проверялся только env-замок).
+    if LIVE_TRADING_DISABLED or chain != "sol" or sess.mode != "LIVE":
         if side == "buy":
             return do_buy(chain, address, size_sol, sess)
         return do_sell(address, fraction, reason, sess)
@@ -3095,6 +3199,10 @@ def _n3_execute(sess: UserSession, side: str, chain: str, address: str,
     spk = str(kp.pubkey())
     if side == "buy":
         size_sol = min(size_sol, CFG["auto_max_per_trade_sol"])   # автопилот: самый строгий потолок
+        allow, rnote = sess.risk.gate(size_sol, len(sess.positions), sess.exposure())
+        if not allow:                                # kill-switch/котёл/экспозиция — как у do_buy
+            log("BUY_BLOCK", address[:8], rnote, mode=sess.mode, pubkey=sess.pubkey)
+            raise HTTPException(409, rnote)
         built = execution.build_buy(spk, address, size_sol)
         sig = sessionwallet.sign_and_send(built["tx"], kp)
         g = MK.adapter_for("sol")

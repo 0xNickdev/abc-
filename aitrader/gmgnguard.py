@@ -41,6 +41,11 @@ class GMGNUnavailable(RuntimeError):
     Текст содержит «429», чтобы app._is_rate_limited и фолбэки обрабатывали как бан."""
 
 
+class GMGNThrottled(GMGNUnavailable):
+    """Очередь лимитера переполнена (бана НЕТ). Трендинг не должен уходить в 60-секундный
+    кулдаун из-за собственной очереди (аудит 28.09)."""
+
+
 def is_ban_text(s: str) -> bool:
     s = (s or "").lower()
     return "429" in s or "rate_limit" in s or "rate limit" in s or "banned" in s
@@ -73,6 +78,7 @@ class Guard:
         self.min_interval_s = min_interval_s
         self.interval_s = min_interval_s        # текущий (адаптивный) интервал
         self._ok_streak = 0
+        self._fail_streak = 0
         self.max_wait_s = max_wait_s
         self._lock = threading.Lock()
         self._banned_until = 0.0         # monotonic
@@ -96,17 +102,22 @@ class Guard:
             wait = slot - now
             if wait > self.max_wait_s:
                 self.skipped += 1
-                raise GMGNUnavailable(f"429 GMGN local throttle: queue {wait:.0f}s")
+                raise GMGNThrottled(f"429 GMGN local throttle: queue {wait:.0f}s")
             self._next_slot = slot + self.interval_s
             self.calls += 1
         if wait > 0:
             time.sleep(wait)
+            if time.monotonic() < self._banned_until:   # пока стояли в очереди, пришёл бан —
+                with self._lock:                        # не стреляем в свежий бан (он продлевается)
+                    self.skipped += 1
+                raise GMGNUnavailable("429 GMGN paused locally (ban arrived while queued)")
 
     # ── после вызова ───────────────────────────────────────────────────────
     def ok(self):
         with self._lock:
             self.ok_count += 1
             self._ok_streak += 1
+            self._fail_streak = 0
             if self._ok_streak >= RECOVER_AFTER_OK and self.interval_s > self.min_interval_s:
                 self.interval_s = max(self.min_interval_s, self.interval_s / 1.5)
                 self._ok_streak = 0
@@ -117,7 +128,10 @@ class Guard:
     def fail(self, err_text: str):
         with self._lock:
             self.fails += 1
+            self._fail_streak += 1
             self.last_error = (err_text or "")[:300]
+            if self._fail_streak >= 3 and self.down_since_wall is None:
+                self.down_since_wall = time.time()      # таймауты/прокси подряд — тоже «лежит»
             if is_ban_text(err_text):
                 self.bans += 1
                 self._ok_streak = 0

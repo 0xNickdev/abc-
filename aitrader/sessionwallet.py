@@ -33,17 +33,21 @@ LAMPORTS = 1_000_000_000
 def _load_or_create(path: pathlib.Path) -> Keypair:
     """Ключ per-user: outputs/users/<pk>/session_key.json (chmod 600). Нет → создать."""
     if path.exists():
+        # Аудит 28.09: битый файл раньше молча перезаписывался НОВЫМ ключом → средства на
+        # старом адресе терялись навсегда. Теперь — ошибка, файл не трогаем.
         try:
             return Keypair.from_bytes(bytes(json.loads(path.read_text())))
-        except Exception:
-            pass
+        except Exception as e:
+            raise RuntimeError(f"session key file unreadable, refusing to overwrite: {path.name}") from e
     kp = Keypair()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(list(bytes(kp))))
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps(list(bytes(kp))))
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
     return kp
 
 
