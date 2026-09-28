@@ -54,19 +54,11 @@ def all_sells(records: list[dict]) -> list[dict]:
 
 
 def closed_trades(records: list[dict]) -> list[dict]:
-    """SELL-записи с посчитанным pnl → [{ts,symbol,pnl,size_sol,sol,attrib,hold_min}]."""
-    out = []
-    for r in records:
-        if not _is_full_sell(r):
-            continue
-        p = backtest._pnl_pct(r)
-        if p is None:
-            continue
-        size = float(r.get("size_sol", 0.0) or 0.0)
-        out.append(dict(ts=r.get("ts", ""), symbol=r.get("symbol", "?"), pnl=p,
-                        size_sol=size, sol=round(p * size, 6),
-                        attrib=r.get("attrib") or {}, hold_min=r.get("hold_min")))
-    return out
+    """Закрытые ПОЗИЦИИ (частичные TP + финал = одна сделка, pnl взвешен по размеру) →
+    [{ts,symbol,pnl,size_sol,sol,attrib,hold_min}]. Аудит 28.09: раньше брались только
+    финальные закрытия на остатке — терялась прибыль TP, а позиция «TP1 +60% → стоп» была
+    «проигрышем», хотя в плюсе (штрафовало кошельки/KOL/детекторы ранних пампов)."""
+    return backtest.positions_from_sells(records)
 
 
 # ── статистика/веса ─────────────────────────────────────────────────────────

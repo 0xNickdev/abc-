@@ -162,19 +162,67 @@ def funnel(records: list[dict]) -> dict:
                 total=len(records))
 
 
-def realized(records: list[dict], hard_stop_pct: float | None = None) -> dict:
-    """从 SELL 记录算已实现业绩。无平仓记录则返回 n=0（诚实留空，不编造）。"""
-    hs = hard_stop_pct if hard_stop_pct else strategy.PRESET["hard_stop_pct"]
-    sells = [r for r in records if r.get("action") == "SELL"]
-    pnls, total_sol = [], 0.0
-    for r in sells:
+def _is_full(r: dict) -> bool:
+    frac = r.get("fraction")
+    try:
+        return frac is None or float(frac) >= 0.999
+    except (TypeError, ValueError):
+        return True
+
+
+def positions_from_sells(records: list[dict]) -> list[dict]:
+    """SELL-записи → ЗАКРЫТЫЕ ПОЗИЦИИ (частичные TP + финальное закрытие = одна сделка).
+
+    Аудит 28.09: раньше «сделкой» считалась каждая SELL-запись. Частичные TP — всегда
+    выигрыши на малых долях, стоп — проигрыш на остатке → винрейт/avg_R/expectancy
+    выходили ПОЛОЖИТЕЛЬНЫМИ при отрицательном SOL; а «только полные закрытия» теряли
+    прибыль TP (−10.4 вместо реальных −3.5 SOL). Здесь: pnl позиции = ΣSOL / Σразмера
+    её продаж (взвешено по размеру), размер = исходный. Ещё открытые хвосты не входят."""
+    open_: dict[tuple, dict] = {}
+    out: list[dict] = []
+    for r in records:
+        if r.get("action") != "SELL":
+            continue
         p = _pnl_pct(r)
         if p is None:
             continue
-        pnls.append(p)
+        size = r.get("size_sol")
+        size = float(size) if isinstance(size, (int, float)) else 0.0
+        key = (r.get("pubkey") or "local", r.get("address") or r.get("symbol") or "?")
+        acc = open_.setdefault(key, dict(sol=0.0, size=0.0, attrib=None, legs=0))
+        acc["sol"] += p * size
+        acc["size"] += size
+        acc["legs"] += 1
+        if r.get("attrib"):
+            acc["attrib"] = r.get("attrib")
+        if _is_full(r):
+            open_.pop(key, None)
+            pnl = (acc["sol"] / acc["size"]) if acc["size"] > 0 else p
+            out.append(dict(ts=r.get("ts", ""), symbol=r.get("symbol", "?"), address=key[1],
+                            pubkey=key[0], mode=r.get("mode"), pnl=pnl,
+                            size_sol=round(acc["size"], 6), sol=round(acc["sol"], 6),
+                            attrib=acc["attrib"] or {}, hold_min=r.get("hold_min"),
+                            legs=acc["legs"], reason=r.get("reason", "")))
+    return out
+
+
+def realized(records: list[dict], hard_stop_pct: float | None = None) -> dict:
+    """Реализованный результат. total_pnl_sol — cash-flow ВСЕХ продаж (= календарь, реальные
+    деньги); winrate/R/expectancy — по закрытым ПОЗИЦИЯМ (см. positions_from_sells)."""
+    hs = hard_stop_pct if hard_stop_pct else strategy.PRESET["hard_stop_pct"]
+    total_sol, legs = 0.0, 0
+    for r in records:
+        if r.get("action") != "SELL":
+            continue
+        p = _pnl_pct(r)
+        if p is None:
+            continue
+        legs += 1
         size = r.get("size_sol")
         if isinstance(size, (int, float)):
             total_sol += p * float(size)
+    pos = positions_from_sells(records)
+    pnls = [t["pnl"] for t in pos]
     n = len(pnls)
     if n == 0:
         return dict(trades=0, note="No closed trades to review (run SELL under SHADOW first, then check real results)")
@@ -188,7 +236,7 @@ def realized(records: list[dict], hard_stop_pct: float | None = None) -> dict:
     # 期望 R = 胜率*平均盈利R - 败率*平均亏损R（亏损取绝对值）
     expectancy_r = win_rate * (avg_win / hs) - (1 - win_rate) * (abs(avg_loss) / hs)
     return dict(
-        trades=n, win_rate=round(win_rate, 3),
+        trades=n, sell_records=legs, win_rate=round(win_rate, 3),
         avg_pnl_pct=round(avg_pnl, 4), avg_R=round(sum(rs) / n, 3),
         avg_win_pct=round(avg_win, 4), avg_loss_pct=round(avg_loss, 4),
         expectancy_R=round(expectancy_r, 3),
@@ -229,7 +277,8 @@ def _paper_feats(feats: list[dict], trig: dict | None = None) -> dict:
     )
 
 
-def summary(path: pathlib.Path | str | None = None, trig: dict | None = None) -> dict:
+def summary(path: pathlib.Path | str | None = None, trig: dict | None = None,
+            hard_stop_pct: float | None = None) -> dict:
     # Потоково (hot + архивы): не материализуем журнал списком dict'ов — на
     # многомесячном журнале это гигабайты RSS при каждом вызове эндпоинта.
     c = collect(path)
@@ -237,8 +286,10 @@ def summary(path: pathlib.Path | str | None = None, trig: dict | None = None) ->
         strategy=strategy.NAME, version=strategy.VERSION,
         records=c["records"],
         funnel=dict(by_action=c["actions"], rejects_by_gate=c["gates"], total=c["records"]),
-        realized=realized(c["sells"]),
-        paper=_paper_feats(c["feats"], trig),
+        realized=realized(c["sells"], hard_stop_pct),
+        paper=dict(_paper_feats(c["feats"], trig),
+                   note="model estimate from entry score, NOT realized results; "
+                        "cannot go negative by construction — do not use for go/no-go"),
     )
 
 

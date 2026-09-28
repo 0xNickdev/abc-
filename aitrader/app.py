@@ -3056,7 +3056,8 @@ def api_backtest(x_wallet: str | None = WalletHeader):
     sess = get_session(x_wallet)
     # передаём актуальный путь журнала (backtest.py по умолчанию смотрит в HERE/outputs,
     # а с ABC_DATA_DIR журнал лежит на подключённом диске — иначе бэктест «видит» 0)
-    return backtest.summary(path=LOG_PATH, trig=strategy.get(sess.strategy_id)["trigger"])
+    return backtest.summary(path=LOG_PATH, trig=strategy.get(sess.strategy_id)["trigger"],
+                            hard_stop_pct=CFG["hard_stop_pct"])   # тот же стоп, что у бота (env)
 
 @app.get("/api/pnl/calendar")
 def api_pnl_calendar(month: str = "", x_wallet: str | None = WalletHeader):
