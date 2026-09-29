@@ -3722,6 +3722,7 @@ def api_token_quality(address: str):
     handle = dexadapter.token_twitter(address)
     out = dict(address=address,
                top10=dexadapter._top10_concentration(address) if dexadapter.TOP10_RPC else None,
+               top10_error=(dexadapter.TOP10_LAST_ERROR or None) if dexadapter.TOP10_RPC else None,
                fresh=dexadapter.fresh_wallet_count(address) or None,
                twitter=handle or None)
     if handle and xapi.key():

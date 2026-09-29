@@ -60,7 +60,25 @@ def _share_top10(largest: list, supply: float) -> float:
     if supply <= 0 or len(largest) < 2:
         return 0.0
     holders = largest[1:11]                         # пропускаем крупнейший (пул), берём следующие 10
-    return round(min(1.0, sum(_f(a.get("uiAmount")) for a in holders) / supply), 4)
+    return round(min(1.0, sum(_ui_amount(a) for a in holders) / supply), 4)
+
+
+def _ui_amount(v: dict) -> float:
+    """uiAmount бывает null (крупные суммы/Token-2022) → uiAmountString → amount/10^decimals."""
+    if not isinstance(v, dict):
+        return 0.0
+    x = v.get("uiAmount")
+    if x is None:
+        x = v.get("uiAmountString")
+    if x is None and v.get("amount") is not None:
+        try:
+            return int(v["amount"]) / (10 ** int(v.get("decimals") or 0))
+        except (TypeError, ValueError):
+            return 0.0
+    return _f(x)
+
+
+TOP10_LAST_ERROR = ""        # последняя причина сбоя (в /api/token/quality) — раньше молча «0%»
 
 
 def _top10_cache_get(mint: str):
@@ -83,14 +101,21 @@ def _top10_concentration(mint: str) -> float:
     c = _top10_cache_get(mint)
     if c is not None:
         return c
+    global TOP10_LAST_ERROR
     try:
         by = _rpc_post([
             dict(jsonrpc="2.0", id="lg", method="getTokenLargestAccounts", params=[mint]),
             dict(jsonrpc="2.0", id="sup", method="getTokenSupply", params=[mint])])
+        for k in ("lg", "sup"):
+            if "error" in (by.get(k) or {}):
+                raise RuntimeError(f"{k}: {by[k]['error']}")
         largest = (by["lg"]["result"]["value"]) or []
-        supply = _f((by["sup"]["result"]["value"] or {}).get("uiAmount"))
+        supply = _ui_amount(by["sup"]["result"]["value"] or {})
+        if supply <= 0 or len(largest) < 2:
+            raise RuntimeError(f"no data: supply={supply} accounts={len(largest)}")
         share = _share_top10(largest, supply)
-    except Exception:
+    except Exception as e:
+        TOP10_LAST_ERROR = str(e)[:200]
         return 0.0
     _top10_cache_put(mint, share)
     return share

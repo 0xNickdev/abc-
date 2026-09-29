@@ -1760,6 +1760,9 @@ class TestSnapshotDB:
         import db
         monkeypatch.setenv("ABC_SNAPSHOT_DB", "1")
         monkeypatch.setenv("ABC_DB_PATH", str(tmp_path / "abc.db"))
+        # изоляция: локальный ~/.config/gmgn/.env с реальным ключом включал LiveGMGN → сеть
+        monkeypatch.setattr(appmod, "ENV_PATH", tmp_path / ".env")
+        monkeypatch.setattr(appmod, "MK", appmod.MarketLayer())
         out = appmod.screen_once("sol")                             # mock-адаптер, реальная сеть не нужна
         snap = {r["address"] for r in db.recent(limit=1000)}
         dec = {d["decision"]["address"] for d in out["decisions"]}
