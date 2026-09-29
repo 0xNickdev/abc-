@@ -38,6 +38,7 @@ SMART_EXIT_DROP = float(os.getenv("ABC_SMART_EXIT_DROP", "0.35") or 0.35)
 WATCH_POLL_S = float(os.getenv("ABC_WATCH_POLL_S", "2.0") or 2.0)
 WS_ENABLED = os.getenv("ABC_WATCH_WS", "1").strip().lower() in ("1", "true", "yes", "on")
 _MAX_WS_SUBS = 25
+MIN_POLL_GAP_S = float(os.getenv("ABC_WATCH_MIN_GAP_S", "1.0") or 1.0)   # потолок частоты опроса
 STALE_AFTER_WAIT_S = 1.5   # цена старше этого после ожидания замка сессии не применяется          # Helius лимит подписок на соединение держим с запасом
 
 
@@ -216,6 +217,7 @@ class PositionWatcher:
 
     def _loop(self):
         while not self._stop.is_set():
+            started = time.monotonic()
             try:
                 self.poll_once()
                 self.smart_exit_once()
@@ -224,6 +226,12 @@ class PositionWatcher:
             timeout = WATCH_POLL_S if self._open_pairs() else 5.0
             self._kick.wait(timeout)
             self._kick.clear()
+            # WS-пинок будит сразу, но не чаще MIN_POLL_GAP_S: на активном токене Helius шлёт
+            # десятки событий в секунду (прод 29.09: 73k пинков → ~3.7 опроса/с — у порога
+            # DexScreener 300/мин и жжёт RPC-кредиты на curve/smart-exit).
+            gap = MIN_POLL_GAP_S - (time.monotonic() - started)
+            if gap > 0:
+                self._stop.wait(gap)
 
     # ── WS-пинок: Helius logsSubscribe по минтам позиций ───────────────────
     def _ws_loop(self):
