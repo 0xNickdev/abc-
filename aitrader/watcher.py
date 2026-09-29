@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 
@@ -255,8 +256,12 @@ class PositionWatcher:
                                 pass                      # тишина — просто проверяем состав
                             if frozenset(self._mints()[:_MAX_WS_SUBS]) != want:
                                 break                     # позиции сменились → переподписка
-                except Exception:
+                except Exception as e:
                     self.stats["ws_state"] = "reconnecting"
+                    self.stats["ws_reconnects"] = self.stats.get("ws_reconnects", 0) + 1
+                    # причина в /api/status (ключ из URL вырезаем) — раньше глоталась молча
+                    self.stats["ws_error"] = re.sub(r"(api[-_]?key=)[^&\s\"']+", r"\1***",
+                                                    f"{type(e).__name__}: {e}")[:200]
                     await asyncio.sleep(3.0)              # обрыв/бан — тихий реконнект
 
         try:
