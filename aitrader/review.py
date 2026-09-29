@@ -229,6 +229,8 @@ DETECTOR_RULES = {
     "holder_danger": lambda c: bool((c.get("holder") or {}).get("danger")),
     "top10_40": lambda c: float(c.get("top10") or 0) >= 0.4,
     "fresh_30": lambda c: float(c.get("fresh_ratio") or 0) >= 0.3,
+    # бумага: вход, который kill-switch/дневной/недельный лимит запретил бы (нужен ли он в LIVE)
+    "fuse_would_block": lambda c: bool(c.get("fuse")),
 }
 
 

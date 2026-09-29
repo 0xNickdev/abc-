@@ -213,7 +213,7 @@ class TestHealth:
         bot = types.SimpleNamespace(enabled=True, cfg={"poll_s": 20},
                                     stats={"last_tick": _t.strftime("%Y-%m-%d %H:%M:%S")})
         risk = types.SimpleNamespace(halted=False, consec_losses=0)
-        monkeypatch.setattr(appmod, "ST", types.SimpleNamespace(bot=bot, risk=risk, positions=[]))
+        monkeypatch.setattr(appmod, "ST", types.SimpleNamespace(bot=bot, risk=risk, positions=[], mode="SHADOW"))
         mk = types.SimpleNamespace(is_live_adapter=True, trending_age=lambda ch: 3600.0)
         monkeypatch.setattr(appmod, "MK", mk)
         h = appmod.health_snapshot()
@@ -285,7 +285,7 @@ class TestHealthMore:
                                     stats=dict(last_tick=kw.get("last_tick", _t.strftime("%Y-%m-%d %H:%M:%S")),
                                                last_error=kw.get("last_error")))
         risk = types.SimpleNamespace(halted=kw.get("halted", False), consec_losses=0)
-        monkeypatch.setattr(appmod, "ST", types.SimpleNamespace(bot=bot, risk=risk,
+        monkeypatch.setattr(appmod, "ST", types.SimpleNamespace(bot=bot, risk=risk, mode=kw.get("mode", "SHADOW"),
                                                                 positions=kw.get("positions", [])))
         monkeypatch.setattr(appmod, "MK", types.SimpleNamespace(is_live_adapter=True,
                                                                 trending_age=lambda ch: 5.0))
@@ -297,7 +297,7 @@ class TestHealthMore:
         assert any(a.startswith("House bot is OFF") for a in appmod.health_snapshot()["alerts"])
 
     def test_stuck_loop_and_kill_switch(self, monkeypatch):
-        self._st(monkeypatch, last_tick="2026-01-01 00:00:00", last_error="boom", halted=True)
+        self._st(monkeypatch, last_tick="2026-01-01 00:00:00", last_error="boom", halted=True, mode="LIVE")
         al = appmod.health_snapshot()["alerts"]
         assert any(a.startswith("Bot loop stuck") and "boom" in a for a in al)
         assert any(a.startswith("Kill-switch") for a in al)
@@ -362,3 +362,30 @@ class TestN3ShadowIsPaper:
         monkeypatch.setattr(appmod, "do_buy", lambda *a, **k: dict(ok=True, paper=True))
         res = appmod._n3_execute(sess, "buy", "sol", "CA", size_sol=0.05)
         assert res.get("paper") and not signed
+
+
+class TestPaperFuses:
+    def test_shadow_trades_through_kill_switch_but_records_it(self, tmp_path, monkeypatch):
+        _mu_client(tmp_path, monkeypatch)
+        s = appmod.ST
+        s.mode = "SHADOW"
+        s.risk.consec_losses = 7                              # kill-switch сработал бы
+        monkeypatch.setattr(appmod, "SHADOW_FUSES", False)
+        assert s.risk.halted_now(2.0, appmod._fuses_on(s)) is False
+        ok, why = s.risk.gate(0.1, 0, 0.0, fuses=appmod._fuses_on(s))
+        assert ok
+        addr = appmod.MK.trending_rows("sol")[0]["address"]   # токен mock-адаптера
+        res = appmod.do_buy("sol", addr, 0.1, s)
+        assert res["ok"]
+        p = s.positions[-1]
+        assert "kill-switch" in p["entry_attrib"]["checks"]["fuse"]
+
+    def test_live_still_blocked(self, tmp_path, monkeypatch):
+        _mu_client(tmp_path, monkeypatch)
+        s = appmod.ST
+        s.mode = "LIVE"
+        s.risk.consec_losses = 7
+        assert s.risk.halted_now(2.0, appmod._fuses_on(s)) is True
+        ok, why = s.risk.gate(0.1, 0, 0.0, fuses=appmod._fuses_on(s))
+        assert not ok and "kill-switch" in why
+        s.mode = "SHADOW"

@@ -1374,27 +1374,33 @@ class RiskManager:
             self.consec_losses = 0
             self.halted = False
 
-    def halted_now(self, daily_cap: float) -> bool:
-        """Для halted_fn бота: сброс дня и здесь — замерший на kill-switch бот не доходит
-        до gate() и иначе никогда не увидел бы новый день."""
+    def fuse_reason(self) -> str | None:
+        """Предохранители «по результату»: kill-switch (серия), дневной лимит, недельный котёл.
+        None — не сработали. Отдельно от лимитов размера/экспозиции (те работают всегда)."""
         self.roll_day()
         if self.consec_losses >= CFG["kill_switch_consec_losses"]:
             self.halted = True          # раньше взводился только в gate() — N3 его не звал
-        return (self.halted or self.realized_loss_today >= daily_cap
-                or WEEK_BUDGET.exhausted())
-
-    def gate(self, size_sol: float, n_positions: int, exposure: float):
-        """组合级硬风控：返回 (allow, reason)。"""
-        self.roll_day()
         if self.halted:
-            return False, "BLOCK kill-switch triggered"
-        if self.consec_losses >= CFG["kill_switch_consec_losses"]:
-            self.halted = True
-            return False, "BLOCK kill-switch (consecutive losses)"
+            return "BLOCK kill-switch (consecutive losses)"
         if self.realized_loss_today >= CFG["daily_loss_cap_sol"]:
-            return False, "BLOCK daily loss cap"
+            return "BLOCK daily loss cap"
         if WEEK_BUDGET.exhausted():
-            return False, f"BLOCK week budget exhausted ({CFG['week_budget_sol']} SOL)"
+            return f"BLOCK week budget exhausted ({CFG['week_budget_sol']} SOL)"
+        return None
+
+    def halted_now(self, daily_cap: float, fuses: bool = True) -> bool:
+        """Для halted_fn бота: сброс дня и здесь — замерший на kill-switch бот не доходит
+        до gate() и иначе никогда не увидел бы новый день. fuses=False (бумага) → не стопорим."""
+        r = self.fuse_reason()
+        return fuses and r is not None
+
+    def gate(self, size_sol: float, n_positions: int, exposure: float, fuses: bool = True):
+        """组合级硬风控：返回 (allow, reason). fuses=False — бумажный режим: предохранители
+        по результату не блокируют (решение юзера 29.09: в SHADOW копим данные без пауз,
+        а «сработал бы» пишем в сделку для контрфакта). Лимиты размера/экспозиции — всегда."""
+        r = self.fuse_reason()
+        if fuses and r:
+            return False, r
         if size_sol > CFG["max_per_trade_sol"]:
             return False, f"BLOCK size above per-trade cap ({CFG['max_per_trade_sol']} SOL)"
         if n_positions >= CFG["max_concurrent_positions"]:
@@ -1729,7 +1735,9 @@ def health_snapshot() -> dict:
         if (lt_age is None and time.time() - _PROC_START > 10 * poll) or (lt_age is not None and lt_age > 10 * poll):
             alerts.append(f"Bot loop stuck: no completed tick for {((lt_age or 0) / 60):.0f} min"
                           + (f" (last error: {_redact(st.get('last_error'))[:120]})" if st.get("last_error") else ""))
-        if ST.risk.halted or ST.risk.consec_losses >= CFG["kill_switch_consec_losses"]:
+        if not _fuses_on(ST):
+            pass                           # бумага: предохранители наблюдают, не стопорят
+        elif ST.risk.halted or ST.risk.consec_losses >= CFG["kill_switch_consec_losses"]:
             alerts.append("Kill-switch is ON: bot only closes positions today")
         elif WEEK_BUDGET.exhausted():
             alerts.append(f"Week budget exhausted ({CFG['week_budget_sol']} SOL): no entries until Monday UTC")
@@ -2096,7 +2104,7 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
             continue
         size = position_size(v.conviction, f.liquidity)
         # 组合风控不在此阻断，只标 risk_warn（人在环：提示而非硬拦）
-        allow, rnote = s.risk.gate(size, n_pos, exposure)
+        allow, rnote = s.risk.gate(size, n_pos, exposure, fuses=_fuses_on(s))
         pri = priority_score(f, v.conviction, v.crowdedness)
         _remember_attrib(f, pri)                       # снимок атрибуции для будущей сделки по этому адресу
         _ft = _feat(f)
@@ -2355,7 +2363,8 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
     под замком только запись позиции. Ручные эндпоинты держат замок сами (lock=None)."""
     s = s or ST
     # 成交前再过一次组合风控（硬拦；与筛选时的提示分离）
-    allow, rnote = s.risk.gate(size_sol, len(s.positions), s.exposure())
+    fuses = _fuses_on(s)
+    allow, rnote = s.risk.gate(size_sol, len(s.positions), s.exposure(), fuses=fuses)
     if not allow:
         log("BUY_BLOCK", address[:8], rnote, mode=s.mode)
         raise HTTPException(409, rnote)
@@ -2483,6 +2492,8 @@ def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbo
     _chk = _PREENTRY_CHECKS.pop(address, None)       # результаты pre-entry детекторов (бот) → контрфакт
     if _chk:
         attrib["checks"] = _chk
+    if not _fuses_on(s):                             # бумага: «остановил бы предохранитель?» → контрфакт
+        attrib.setdefault("checks", {})["fuse"] = s.risk.fuse_reason()
     _enrich_x_signal(attrib, address, s, entry_price)   # + соц-сигнал X на входе (opt-in, quota-safe)
     s.positions.append(dict(symbol=symbol, address=address, size_sol=round(size_sol, 4),
                             pnl=0.0, cycles=0, entry=entry, chain=chain,
@@ -2640,7 +2651,7 @@ async def _lifespan(_app: FastAPI):
         ST.bot.start("sol", screen_fn=lambda c: screen_once(c, ST),
                      buy_fn=_bot_buy_fn(ST), sell_fn=_bot_sell_fn(ST),
                      positions_fn=lambda: ST.positions, risk_cfg=CFG, lock=ST.lock,
-                     halted_fn=lambda: ST.risk.halted_now(CFG["daily_loss_cap_sol"]))
+                     halted_fn=lambda: ST.risk.halted_now(CFG["daily_loss_cap_sol"], _fuses_on(ST)))
         log("BOT", "ABC", f"автозапуск режим {_auto} (BOT_AUTOSTART)", mode=ST.mode)
     # Ночной review-loop (офлайн-обучение): opt-in через ABC_NIGHTLY_REVIEW=1.
     # Первый прогон при старте подтянет веса кошельков сразу, далее раз в сутки.
@@ -2695,6 +2706,13 @@ class ChainIn(BaseModel):
 
 class ModeIn(BaseModel):
     mode: str                # "LIVE" | "SHADOW"
+
+# SHADOW = сбор данных: kill-switch/дневной/недельный лимиты не останавливают бумажного бота
+# (они срезали выборку ровно в плохие периоды). В LIVE — всегда. ABC_SHADOW_FUSES=1 вернуть.
+SHADOW_FUSES = os.getenv("ABC_SHADOW_FUSES", "").strip().lower() in ("1", "true", "yes", "on")
+
+def _fuses_on(s) -> bool:
+    return s.mode == "LIVE" or SHADOW_FUSES
 
 def _block_if_public():
     """公开演示为只读：所有写操作（含触发 CLI / 改配置 / 买卖）一律拒绝。"""
@@ -3405,7 +3423,7 @@ def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader, x_auth: str | N
         buy_fn=_bot_buy_fn(sess),
         sell_fn=_bot_sell_fn(sess),
         positions_fn=lambda: sess.positions, risk_cfg=CFG, lock=sess.lock,
-        halted_fn=lambda: sess.risk.halted_now(CFG["daily_loss_cap_sol"]))
+        halted_fn=lambda: sess.risk.halted_now(CFG["daily_loss_cap_sol"], _fuses_on(sess)))
     log("BOT", "ABC", "Autonomous loop started" if started else "Already running (duplicate start ignored)", mode=sess.mode)
     return dict(ok=True, started=started, **sess.bot.status())
 
