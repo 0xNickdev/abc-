@@ -2098,6 +2098,8 @@ class TestPnlCalendar:
         d = client.get(f"/api/pnl/calendar?month={m}").json()
         assert d["total"]["trades"] == 2 and abs(d["total"]["pnl"] + 0.03) < 1e-9
         d = client.get(f"/api/pnl/calendar?month={m}", headers={"X-Wallet": "WX"}).json()
+        assert d["total"]["trades"] == 2                 # с кошельком по умолчанию тоже house-бот
+        d = client.get(f"/api/pnl/calendar?month={m}&scope=me", headers={"X-Wallet": "WX"}).json()
         assert d["total"]["trades"] == 1
 
     def test_function_still_filters_per_user(self, client):   # client → свежий tmp LOG_PATH

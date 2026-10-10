@@ -3078,7 +3078,7 @@ def api_backtest(x_wallet: str | None = WalletHeader):
                             hard_stop_pct=CFG["hard_stop_pct"])   # тот же стоп, что у бота (env)
 
 @app.get("/api/pnl/calendar")
-def api_pnl_calendar(month: str = "", x_wallet: str | None = WalletHeader):
+def api_pnl_calendar(month: str = "", scope: str = "house", x_wallet: str | None = WalletHeader):
     """Календарь дневного реализованного PnL за месяц (per-user). month=YYYY-MM (пусто=текущий)."""
     sess = get_session(x_wallet)
     m = month.strip() or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
@@ -3089,9 +3089,10 @@ def api_pnl_calendar(month: str = "", x_wallet: str | None = WalletHeader):
     # метрик в одном окне противоречат друг другу. Разбивку «мои/бот» добавим, когда
     # появятся реальные пользовательские сделки.
     # Аудит 28.09: «*» смешивал house-бота с любыми кошельковыми сессиями (включая фейковые
-    # записи через tx/confirm) → календарь, по которому решаем про реальные деньги, врал.
-    # Теперь: без кошелька — house-бот; с кошельком — только свои сделки.
-    return pnl_calendar(sess.pubkey, m)
+    # записи через tx/confirm) → календарь врал. По умолчанию — ТОЛЬКО house-бот (это его
+    # календарь, юзер 10.10 с подключённым кошельком не видел сделок бота вовсе);
+    # scope=me — только сделки своего кошелька.
+    return pnl_calendar(sess.pubkey if scope == "me" else DEFAULT_PUBKEY, m)
 
 # ── Ночной review-loop: отчёт (read-only) + форс-прогон + применение одного предложения ──
 def _block_if_not_owner(sess: UserSession, x_auth: str | None = None):
