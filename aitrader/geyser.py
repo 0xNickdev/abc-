@@ -66,6 +66,7 @@ class GeyserFeed:
         self._lock = threading.Lock()
         self._want: dict[str, str] = {}               # curve PDA -> mint
         self._prices: dict[str, tuple[float, float, bool]] = {}   # mint -> (px_sol, wall_ts, complete)
+        self._slot: dict[str, int] = {}               # mint -> последний применённый слот (монотонность)
         self._q: queue.Queue = queue.Queue()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -131,13 +132,15 @@ class GeyserFeed:
             req.accounts["positions"].account.extend(accs)
         return req
 
-    def _requests(self):
+    def _requests(self, q: queue.Queue):
+        """Генератор запросов ОДНОГО стрима со своей очередью: зависший генератор мёртвого
+        стрима не может «украсть» resubscribe нового (аудит 10.10)."""
         import geyser_pb2 as pb
         yield self._request()
         ping_id = 0
         while not self._stop.is_set():
             try:
-                item = self._q.get(timeout=PING_S)
+                item = q.get(timeout=PING_S)
             except queue.Empty:
                 ping_id += 1
                 yield pb.SubscribeRequest(ping=pb.SubscribeRequestPing(id=ping_id))
@@ -158,7 +161,12 @@ class GeyserFeed:
             return
         px, complete = parse_curve_bytes(bytes(info.data))
         now = time.time()
+        slot = int(getattr(upd.account, "slot", 0) or 0)
         with self._lock:
+            if slot and slot < self._slot.get(mint, 0):
+                return                                  # запоздалое/переупорядоченное обновление
+            if slot:
+                self._slot[mint] = slot
             self._prices[mint] = (px, now, complete)
         self._last_update = now
         self.stats["updates"] += 1
@@ -181,24 +189,30 @@ class GeyserFeed:
                         ("grpc.keepalive_time_ms", 20000),
                         ("grpc.max_receive_message_length", 64 * 1024 * 1024)]) as ch:
                     stub = pbg.GeyserStub(ch)
+                    q: queue.Queue = queue.Queue()
+                    self._q = q                         # set_mints пишет в очередь ТЕКУЩЕГО стрима
                     self.stats["state"] = "streaming"
-                    for upd in stub.Subscribe(self._requests()):
-                        backoff = 0.0
+                    for upd in stub.Subscribe(self._requests(q)):
+                        if upd.HasField("account") or upd.HasField("pong"):
+                            backoff = 0.0               # живые данные/ответ, а не только серверный ping
                         self._handle(upd)
                         if self._stop.is_set():
                             break
+                    q.put(None)                         # закрыть генератор этого стрима
+                    self.stats["error"] = "stream ended"
             except Exception as e:
-                self.stats["state"] = "reconnecting"
-                self.stats["reconnects"] += 1
                 self.stats["error"] = f"{type(e).__name__}: {str(e)[:160]}"
-                backoff = min(120.0, backoff * 2) if backoff else 2.0
-                self._stop.wait(backoff)
-                # новый стрим начнёт с полного запроса — очередь «resub» больше не нужна
-                while not self._q.empty():
-                    try:
-                        self._q.get_nowait()
-                    except queue.Empty:
-                        break
+            if self._stop.is_set():
+                return
+            # обрыв ИЛИ «чистое» завершение стрима — всё равно бэкофф (иначе горячий цикл
+            # реконнектов, как 147k у Helius WS) и сброс цен: застывшая цена прячет дамп
+            self.stats["state"] = "reconnecting"
+            self.stats["reconnects"] += 1
+            with self._lock:
+                self._prices.clear()
+                self._slot.clear()
+            backoff = min(120.0, backoff * 2) if backoff else 2.0
+            self._stop.wait(backoff)
 
 
 FEED = GeyserFeed()

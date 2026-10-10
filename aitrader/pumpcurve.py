@@ -58,9 +58,39 @@ def _parse_curve(data_b64: str) -> tuple[float, bool]:
         return 0.0, False
 
 
+_sol_fail_at = 0.0
+_sol_refresher_started = False
+
+
+def _sol_refresher():
+    """Фоновое обновление курса: контур стопов никогда не ждёт сеть (аудит 10.10: при лежащем
+    Jupiter каждый опрос watcher'а платил 8+8с таймаутов)."""
+    while True:
+        try:
+            _sol_fetch()
+        except Exception:
+            pass
+        time.sleep(max(10.0, SOL_TTL / 2))
+
+
 def sol_usd() -> float:
-    """Курс SOL/USD (Jupiter Price API, кэш 60с; сбой → последний известный)."""
-    global _sol_cache
+    """Курс SOL/USD из кэша (обновляется фоном). Сеть — только при самом первом вызове."""
+    global _sol_refresher_started
+    ts, usd = _sol_cache
+    if not _sol_refresher_started:
+        _sol_refresher_started = True
+        import threading
+        threading.Thread(target=_sol_refresher, daemon=True).start()
+    if usd > 0:
+        return usd
+    if time.monotonic() - _sol_fail_at < 30.0:
+        return 0.0                                    # недавно не смогли — не долбим и не ждём
+    return _sol_fetch()
+
+
+def _sol_fetch() -> float:
+    """Курс SOL/USD (Jupiter price v3 → DexScreener). Сбой → последний известный (+метка сбоя)."""
+    global _sol_cache, _sol_fail_at
     ts, usd = _sol_cache
     now = time.monotonic()
     if usd > 0 and now - ts < SOL_TTL:
@@ -89,6 +119,7 @@ def sol_usd() -> float:
     if px > 0:
         _sol_cache = (now, px)
         return px
+    _sol_fail_at = now
     return usd                                        # протухший лучше, чем ноль (SOL стабилен на минутах)
 
 

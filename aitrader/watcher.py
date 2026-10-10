@@ -39,6 +39,7 @@ SMART_EXIT_DROP = float(os.getenv("ABC_SMART_EXIT_DROP", "0.35") or 0.35)
 WATCH_POLL_S = float(os.getenv("ABC_WATCH_POLL_S", "2.0") or 2.0)
 WS_ENABLED = os.getenv("ABC_WATCH_WS", "1").strip().lower() in ("1", "true", "yes", "on")
 _MAX_WS_SUBS = 25
+CURVE_RPC_EVERY_S = 10.0   # RPC-фолбэк цены кривой не чаще раза в N с на токен
 REBASE_WINDOW_S = 120.0    # окно перебазирования цены входа на источник watcher'а
 MIN_POLL_GAP_S = float(os.getenv("ABC_WATCH_MIN_GAP_S", "1.0") or 1.0)   # потолок частоты опроса
 STALE_AFTER_WAIT_S = 1.5   # цена старше этого после ожидания замка сессии не применяется          # Helius лимит подписок на соединение держим с запасом
@@ -67,6 +68,7 @@ class PositionWatcher:
         self._kick = threading.Event()
         self._stop = threading.Event()
         self.stats = dict(polls=0, price_updates=0, exits=0, ws_kicks=0, ws_state="off")
+        self._curve_rpc_at: dict[str, float] = {}
 
     # ── lifecycle ──────────────────────────────────────────────────────────
     def start(self):
@@ -112,9 +114,14 @@ class PositionWatcher:
                 dx = {}
             prices.update(dx)
             src.update({m: "dex" for m in dx})
-        # 3) Запасной путь: кривая по RPC (Helius) — только если Geyser выключен/лежит
+        # 3) Запасной путь: кривая по RPC — для pump-токенов без цены (Geyser лежит ИЛИ по токену
+        #    ещё не было сделки с момента подписки: Yellowstone не шлёт стартовый снимок).
+        #    Не чаще раза в CURVE_RPC_EVERY_S на токен — Helius-кредиты не жжём.
+        now_m = time.monotonic()
         missing = [m for m in mints if not prices.get(m) and m.endswith("pump")
-                   and geyser.FEED.snapshot().get("state") != "streaming"]
+                   and now_m - self._curve_rpc_at.get(m, 0.0) >= CURVE_RPC_EVERY_S]
+        for m in missing:
+            self._curve_rpc_at[m] = now_m
         if missing:
             try:
                 got = pumpcurve.usd_prices(missing)
@@ -127,15 +134,17 @@ class PositionWatcher:
             return                                  # оба источника легли — ждём следующего круга
         self.stats["polls"] += 1
         fetched_at = time.monotonic()
+        own_s = 0.0                                  # время наших же продаж в этом круге
         for sess, p in pairs:
             px = float(prices.get(p["address"]) or 0.0)
             ep = float(p.get("entry_price", 0.0) or 0.0)
             if px <= 0 or ep <= 0:
                 continue
             with sess.lock:
-                # цена снята ДО ожидания замка: если ждали долго — она уже не «свежая»,
-                # не штампуем её как RT (следующий круг через ~2с возьмёт настоящую)
-                if time.monotonic() - fetched_at > STALE_AFTER_WAIT_S:
+                # цена снята ДО ожидания замка: если ждали ЧУЖОЙ замок долго — она уже не
+                # «свежая». Свои медленные продажи в этом круге не в счёт (аудит 10.10: одна
+                # LIVE-продажа на 12с выбивала все остальные позиции круга при общем дампе).
+                if time.monotonic() - fetched_at - own_s > STALE_AFTER_WAIT_S:
                     self.stats["stale_skips"] = self.stats.get("stale_skips", 0) + 1
                     continue
                 if p not in sess.positions:         # продана параллельным тиком бота
@@ -149,9 +158,10 @@ class PositionWatcher:
                     p["entry_src"] = s_
                     # ТОЛЬКО вверх: фальшивые иксы были от заниженной цены входа. Реальный обвал
                     # в первые секунды (раг) перебазированием прятать нельзя — это убыток.
-                    if px / ep - 1.0 > 0.30:
+                    if px / ep - 1.0 > 0.30 and p.get("entry_src_fill") is None:
                         p["entry_price_orig"] = ep
                         p["entry_price"] = ep = px
+                        p.pop("peak_pnl", None)      # пик, посчитанный от фальшивого входа, — в мусор
                         self.stats["entry_rebased"] = self.stats.get("entry_rebased", 0) + 1
                 p["px_src"] = s_
                 p["cur_price"] = px
@@ -159,8 +169,20 @@ class PositionWatcher:
                 p["peak_pnl"] = max(float(p.get("peak_pnl", p["pnl"])), p["pnl"])
                 p["rt_ts"] = time.time()   # штамп свежести: monitor_positions не перетирает
                 self.stats["price_updates"] += 1   # RT-цену устаревшей строкой хот-листа
-                # авто-выходы: только бот-сессии, только не self-custody
-                if not getattr(sess.bot, "enabled", False) or p.get("self_custody"):
+                # авто-выходы: позиции бота (флаг auto на позиции — стопы живут, даже если бот
+                # остановили/рестартнули) или включённый бот; Phantom (self_custody без session)
+                # продать может только владелец — ему алерт о пробитом стопе.
+                auto = p.get("auto") or getattr(sess.bot, "enabled", False)
+                if p.get("self_custody") and not p.get("session"):
+                    if p["pnl"] <= -float(self._risk_cfg.get("hard_stop_pct", 0.25)) and not p.get("stop_alerted"):
+                        p["stop_alerted"] = True
+                        try:
+                            import notify
+                            notify.send(f"STOP HIT {p.get('symbol', '?')} {p['pnl']:+.0%} — sell in Phantom")
+                        except Exception:
+                            pass
+                    continue
+                if not auto:
                     continue
                 p.setdefault("tp_taken", [])
                 ed = botmod.decide_exit(p, None, self._risk_cfg, sess.bot.cfg)
@@ -169,10 +191,13 @@ class PositionWatcher:
                 partial = ed.rung >= 0 and ed.fraction < 1.0
                 if partial:
                     p["tp_taken"].append(ed.rung)   # до продажи (do_sell пишет диск), откат ниже
+                t_sell = time.monotonic()
                 try:
                     res = self._sell_for(sess)(p["address"], fraction=ed.fraction,
                                                reason="RT " + ed.reason)
+                    own_s += time.monotonic() - t_sell
                 except Exception as e:              # 404 гонка с ботом и т.п. — не роняем цикл
+                    own_s += time.monotonic() - t_sell
                     if partial:
                         p["tp_taken"].remove(ed.rung)
                     self._log("WATCH_ERR", p.get("symbol", "?"), str(e))
@@ -207,7 +232,8 @@ class PositionWatcher:
         if not SMART_EXIT:
             return
         targets = [(s, p) for s, p in self._open_pairs()
-                   if getattr(s.bot, "enabled", False) and not p.get("self_custody")
+                   if (p.get("auto") or getattr(s.bot, "enabled", False))
+                   and (not p.get("self_custody") or p.get("session"))
                    and not p.get("smart_exit_done") and self._insider_atas(p)]
         if not targets:
             return

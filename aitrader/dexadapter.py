@@ -187,7 +187,9 @@ def spot_pair(addr: str) -> dict:
     r = httpx.get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}",
                   timeout=execution.TIMEOUT)
     r.raise_for_status()
-    pairs = [p for p in (r.json().get("pairs") or []) if p.get("chainId") == "solana"]
+    # только пары, где НАШ токен — base: иначе priceUsd — цена чужого токена (аудит 10.10)
+    pairs = [p for p in (r.json().get("pairs") or []) if p.get("chainId") == "solana"
+             and (p.get("baseToken") or {}).get("address") == addr]
     return max(pairs, key=lambda p: _f((p.get("liquidity", {}) or {}).get("usd"))) if pairs else {}
 
 

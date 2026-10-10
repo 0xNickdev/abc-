@@ -451,9 +451,13 @@ class TestBot:
     def test_decide_exit_trailing_after_activate(self):
         import bot
         cfg = dict(hard_stop_pct=0.35, trailing_pct=0.25, tp_ladder=[])
-        # 峰值 +40%（已过 30% 激活线），回撤到 +10% = 30% 回撤 ≥ 25% → 移动止盈
-        ed = bot.decide_exit(dict(pnl=0.10, peak_pnl=0.40, tp_taken=[]), 0, cfg)
+        # трейлинг = откат ЦЕНЫ от пика (аудит 10.10): пик +40% (цена 1.40) → 0% (1.00) = −28.6% ≥ 25%
+        ed = bot.decide_exit(dict(pnl=0.0, peak_pnl=0.40, tp_taken=[]), 0, cfg)
         assert ed.action == "SELL" and "Trailing take-profit" in ed.reason
+        # +40% → +10%: цена откатилась на 21% < 25% — держим (старая формула «пунктами» продавала)
+        assert bot.decide_exit(dict(pnl=0.10, peak_pnl=0.40, tp_taken=[]), 0, cfg).action == "HOLD"
+        # пик +300% → +270%: откат цены 7.5% — держим раннера (раньше 30 пунктов = продажа)
+        assert bot.decide_exit(dict(pnl=2.7, peak_pnl=3.0, tp_taken=[0, 1, 2]), 0, cfg).action == "HOLD"
 
     def test_decide_exit_tp_ladder_partial(self):
         import bot
@@ -1168,7 +1172,7 @@ class TestAutoVerifyPreEntry:
         monkeypatch.setattr(appmod, "preentry_red_flags", lambda a: None)
         seen = {}
         monkeypatch.setattr(appmod, "do_buy",
-                            lambda ch, a, sz, s=None, lock=None: seen.update(addr=a) or dict(ok=True))
+                            lambda ch, a, sz, s=None, lock=None, auto=False: seen.update(addr=a) or dict(ok=True))
         appmod._bot_buy_fn(appmod.get_session("AVWallet22222"))("sol", "CLEANCA", 0.05)
         assert seen["addr"] == "CLEANCA"
 
@@ -1365,7 +1369,7 @@ class TestPerModeTradeCaps:
         sess = appmod.get_session("CapWalletN2xxxx")
         seen = {}
         monkeypatch.setattr(appmod, "do_buy",
-                            lambda ch, a, sz, s=None, lock=None: seen.update(size=sz) or dict(ok=True))
+                            lambda ch, a, sz, s=None, lock=None, auto=False: seen.update(size=sz) or dict(ok=True))
         appmod._bot_buy_fn(sess)("sol", "ADDRN2", 0.4)      # дефолтный режим бота = n2
         assert seen["size"] == appmod.CFG["bot_max_per_trade_sol"]
 
@@ -1380,7 +1384,7 @@ class TestPerModeTradeCaps:
         sess.bot.cfg["mode"] = "n3"
         seen = {}
         monkeypatch.setattr(appmod, "do_buy",
-                            lambda ch, a, sz, s=None, lock=None: seen.update(size=sz) or dict(ok=True))
+                            lambda ch, a, sz, s=None, lock=None, auto=False: seen.update(size=sz) or dict(ok=True))
         appmod._bot_buy_fn(sess)("sol", "ADDRN3", 0.4)      # замок закрыт → бумажный fallback
         assert seen["size"] == appmod.CFG["auto_max_per_trade_sol"]
 

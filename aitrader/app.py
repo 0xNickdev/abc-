@@ -2242,7 +2242,7 @@ def prefetch_positions(chain: str, rows_by_addr: dict | None, s: UserSession) ->
     for p in list(s.positions):
         if p.get("chain", "sol") != chain or p["address"] in rows_by_addr:
             continue
-        rt_fresh = (time.time() - float(p.get("rt_ts", 0) or 0)) < 10.0
+        rt_fresh = (time.time() - float(p.get("rt_ts", 0) or 0)) < (300.0 if p.get("entry_src") else 10.0)
         pre[p["address"]] = _fetch_offlist(g, p, rt_fresh)
     return pre
 
@@ -2262,7 +2262,10 @@ def monitor_positions(chain: str, rows_by_addr: dict | None = None,
             # Real-time контур (watcher) обновляет cur_price каждые ~2с. Его цена свежее
             # строки хот-листа: та живёт в кэше 20с, а при бане GMGN — с диска (минуты).
             # Свежий RT-штамп → цена позиции от watcher; строка остаётся источником security.
-            rt_fresh = (time.time() - float(p.get("rt_ts", 0) or 0)) < 10.0
+            # watcher-управляемая позиция (entry_src) — его цена авторитетна 5 мин: строки хот-листа/
+            # GMGN другого источника не перетирают pnl (аудит 10.10: смешение → фальшивые стопы)
+            rt_win = 300.0 if p.get("entry_src") else 10.0
+            rt_fresh = (time.time() - float(p.get("rt_ts", 0) or 0)) < rt_win
             if row is not None:                  # 持仓币在本轮热榜里 → 复用行数据，零额外 cli
                 cur_sec = _sec_from_row(row)
                 cur_price = float(p.get("cur_price", 0.0)) if rt_fresh else _f(row.get("price"))
@@ -2358,7 +2361,7 @@ def _mock_drift(p):
 # 12. 成交（人按下才发生）
 # ──────────────────────────────────────────────────────────────────────────
 def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = None,
-           lock=None) -> dict:
+           lock=None, auto: bool = False) -> dict:
     """lock — замок сессии, если вызывающий его НЕ держит (бот): сеть идёт без замка,
     под замком только запись позиции. Ручные эндпоинты держат замок сами (lock=None)."""
     s = s or ST
@@ -2455,8 +2458,13 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         status_msg = "SHADOW (not sent on-chain — switch to LIVE + signing key)"
 
     with (lock if lock is not None else contextlib.nullcontext()):
-        return _buy_commit(s, chain, address, size_sol, symbol, entry, entry_price,
-                           filled, status_msg)
+        res = _buy_commit(s, chain, address, size_sol, symbol, entry, entry_price,
+                          filled, status_msg)
+        if auto:                     # позиция бота: стопы watcher'а живут и после остановки бота
+            for x in s.positions:
+                if x["address"] == address and not x.get("self_custody"):
+                    x["auto"] = True
+        return res
 
 def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbol: str,
                 entry: dict, entry_price: float, filled: bool, status_msg: str) -> dict:
@@ -3393,7 +3401,7 @@ def _bot_buy_fn(sess: UserSession):
         if mode == "n3":
             with sess.lock:
                 return _n3_execute(sess, "buy", chain, address, size_sol=size_sol)
-        return do_buy(chain, address, size_sol, sess, lock=sess.lock)
+        return do_buy(chain, address, size_sol, sess, lock=sess.lock, auto=True)
     return fn
 
 def _bot_sell_fn(sess: UserSession):

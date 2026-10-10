@@ -140,3 +140,78 @@ class TestShadowUnlimited:
         assert not ok and "concurrent" in why
         assert appmod._max_positions(s) == appmod.CFG["max_concurrent_positions"]
         s.mode = "SHADOW"
+
+
+class TestAudit1010:
+    def test_out_of_order_slot_ignored(self, monkeypatch):
+        import base58
+        monkeypatch.setattr(geyser.pumpcurve, "sol_usd", lambda: 100.0)
+        f = geyser.GeyserFeed()
+        f.set_mints([MINT])
+        pda = next(iter(f._want))
+
+        def upd(raw, slot):
+            return types.SimpleNamespace(
+                HasField=lambda n: n == "account",
+                account=types.SimpleNamespace(slot=slot, account=types.SimpleNamespace(
+                    pubkey=base58.b58decode(pda), data=raw)))
+        f._handle(upd(_curve_bytes(10**15, 3 * 10**10), 200))
+        f._handle(upd(_curve_bytes(10**15, 9 * 10**10), 150))          # старый слот — мимо
+        assert f.prices_usd([MINT])[MINT] == pytest.approx(3e-8 * 100)
+
+    def _watch(self, monkeypatch, p, bot_enabled=False):
+        s = _Sess([p])
+        s.bot.enabled = bot_enabled
+        s.bot.cfg = {"escape_severity_exit": 60, "trail_activate_pct": 0.3}
+        monkeypatch.setattr(w.geyser.FEED, "set_mints", lambda m: None)
+        monkeypatch.setattr(w.geyser.FEED, "prices_usd", lambda m: {MINT: 0.5})
+        sold = []
+        pw = w.PositionWatcher(lambda: [s], dict(hard_stop_pct=0.25),
+                               lambda sess: (lambda a, fraction=1.0, reason=None: sold.append(reason) or {"ok": True}))
+        return pw, sold
+
+    def test_auto_position_stopped_even_if_bot_off(self, monkeypatch):
+        p = dict(address=MINT, entry_price=1.0, cur_price=1.0, pnl=0.0, chain="sol", auto=True,
+                 entry_src="geyser")
+        pw, sold = self._watch(monkeypatch, p, bot_enabled=False)
+        pw.poll_once()
+        assert sold and "Hard stop" in sold[0]
+
+    def test_n3_session_position_gets_rt_stop(self, monkeypatch):
+        p = dict(address=MINT, entry_price=1.0, cur_price=1.0, pnl=0.0, chain="sol",
+                 self_custody=True, session=True, entry_src="geyser")
+        pw, sold = self._watch(monkeypatch, p, bot_enabled=True)
+        pw.poll_once()
+        assert sold
+
+    def test_phantom_position_alert_not_sold(self, monkeypatch):
+        import notify
+        sent = []
+        monkeypatch.setattr(notify, "send", lambda text, **k: sent.append(text))
+        p = dict(address=MINT, entry_price=1.0, cur_price=1.0, pnl=0.0, chain="sol",
+                 self_custody=True, entry_src="geyser")
+        pw, sold = self._watch(monkeypatch, p, bot_enabled=True)
+        pw.poll_once()
+        pw.poll_once()
+        assert not sold and len(sent) == 1 and "STOP HIT" in sent[0]
+
+    def test_bot_tick_never_paper_closes_phantom(self):
+        import bot as botmod
+        r = botmod.BotRunner()
+        sold = []
+        p = dict(address="PH", pnl=-0.9, chain="sol", self_custody=True)
+        r._fns = dict(screen=lambda ch: dict(decisions=[], positions=[]), buy=None,
+                      sell=lambda a, fraction=1.0, reason=None: sold.append(a),
+                      positions=lambda: [p], risk_cfg=dict(hard_stop_pct=0.25), lock=threading.Lock(),
+                      halted=lambda: True)
+        r.tick()
+        assert sold == []
+
+    def test_sol_rate_failure_does_not_block(self, monkeypatch):
+        import pumpcurve
+        monkeypatch.setattr(pumpcurve, "_sol_cache", (0.0, 0.0))
+        monkeypatch.setattr(pumpcurve, "_sol_refresher_started", True)
+        monkeypatch.setattr(pumpcurve, "_sol_fail_at", time.monotonic())
+        calls = []
+        monkeypatch.setattr(pumpcurve, "_sol_fetch", lambda: calls.append(1) or 0.0)
+        assert pumpcurve.sol_usd() == 0.0 and calls == []               # недавний сбой — не ждём сеть

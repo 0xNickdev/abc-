@@ -94,8 +94,11 @@ def decide_exit(pos: dict, severity, risk_cfg: dict, bot_cfg: dict | None = None
         return ExitDecision("SELL", 1.0, f"Hard stop PnL {pnl:+.0%} ≤ -{hard_stop:.0%}")
     if severity is not None and float(severity) >= bc["escape_severity_exit"]:
         return ExitDecision("SELL", 1.0, f"Escape exit severity {severity}≥{bc['escape_severity_exit']}")
-    if peak >= bc["trail_activate_pct"] and (peak - pnl) >= trail:
-        return ExitDecision("SELL", 1.0, f"Trailing take-profit from peak {peak:+.0%} drawdown {peak - pnl:.0%}≥{trail:.0%}")
+    # Трейлинг — откат ЦЕНЫ от пика в %, а не «пункты PnL» (аудит 10.10: при пике +150% старая
+    # формула выходила на откате цены 10%, при +300% — на 6%, раннер до TP3 не доживал).
+    drawdown = 1.0 - (1.0 + pnl) / (1.0 + peak) if peak > -1.0 else 0.0
+    if peak >= bc["trail_activate_pct"] and drawdown >= trail:
+        return ExitDecision("SELL", 1.0, f"Trailing take-profit from peak {peak:+.0%} price drawdown {drawdown:.0%}≥{trail:.0%}")
     # TP 阶梯：命中尚未兑现的【最低未取】档，分批落袋（一轮只取一档，避免一次扫光）
     for i, rung in enumerate(ladder):
         if i in taken:
@@ -202,6 +205,9 @@ class BotRunner:
         for p in list(f["positions"]()):
             if p.get("chain", "sol") != self.chain:
                 continue
+            if p.get("self_custody") and not p.get("session"):
+                continue                    # Phantom-позиция: продать может только владелец подписью;
+                                            # do_sell закрыл бы её «бумажно», а токены остались бы в кошельке
             pnl = float(p.get("pnl", 0.0))
             p["peak_pnl"] = max(float(p.get("peak_pnl", pnl)), pnl)
             p.setdefault("tp_taken", [])
