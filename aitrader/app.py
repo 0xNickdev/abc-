@@ -357,6 +357,59 @@ def _save_trending_disk(chain: str, rows: list):
 # Дефолт 2.5%; на прямом Jupiter без bot-налога ставь ниже (ABC_FEE_PCT=0.015).
 FEE_ROUNDTRIP_PCT = float(os.getenv("ABC_FEE_PCT", "0.025") or 0.025)
 
+# ── Реалистичная модель издержек бумажной торговли (решение юзера 10.10) ─────────────
+# Раньше SHADOW торговал по «чистой» цене, а издержки вычитались одним процентом в календаре.
+# Теперь каждая бумажная сделка платит то же, что заплатила бы реальная:
+#   вход:  комиссия площадки + влияние размера на пул + проскальзывание исполнения,
+#          фикс: priority/base fee транзакции + рента токен-аккаунта (ATA);
+#   выход: комиссия + влияние + проскальзывание (на стопах/аварийных — больше) + tx fee.
+# Цена входа = эффективная (с издержками) → стопы/TP считаются как в реальности.
+# Записи помечаются costed=True — календарь/review не вычитают ABC_FEE_PCT повторно.
+SIM_COSTS = os.getenv("ABC_SIM_COSTS", "1").strip().lower() in ("1", "true", "yes", "on")
+SIM_FEE_CURVE = float(os.getenv("ABC_SIM_FEE_CURVE", "0.0125") or 0.0125)   # pump.fun кривая
+SIM_FEE_AMM = float(os.getenv("ABC_SIM_FEE_AMM", "0.003") or 0.003)         # PumpSwap/Raydium
+SIM_SLIP = float(os.getenv("ABC_SIM_SLIP", "0.015") or 0.015)               # латентность/движение
+SIM_SLIP_STOP = float(os.getenv("ABC_SIM_SLIP_STOP", "0.05") or 0.05)       # стоп на падающем рынке
+SIM_TX_FEE_SOL = float(os.getenv("ABC_SIM_TX_FEE_SOL", "0.00025") or 0.00025)  # priority (≤200k lam) + base
+SIM_ATA_RENT_SOL = 0.00204                                                   # рента токен-аккаунта
+_SOL_USD_FALLBACK = 150.0
+
+
+def _sim_venue_fee(address: str, liq_usd: float) -> float:
+    # pump-токен без заметной ликвидности пула — ещё на кривой (там комиссия выше)
+    return SIM_FEE_CURVE if str(address).endswith("pump") and liq_usd < 30000 else SIM_FEE_AMM
+
+
+def _sim_impact(size_sol: float, liq_usd: float) -> float:
+    """Влияние размера на цену в пуле x*y=k: ≈ размер / резерв SOL-стороны (= половина
+    ликвидности в $). Нет данных о ликвидности → 1%."""
+    if liq_usd <= 0:
+        return 0.01
+    rate = pumpcurve.sol_usd() or _SOL_USD_FALLBACK
+    return min(0.5, 2.0 * size_sol * rate / liq_usd)
+
+
+def sim_entry(address: str, px: float, size_sol: float, liq_usd: float) -> tuple[float, float, dict]:
+    """(эффективная цена входа, фиксированные издержки SOL, разбивка)."""
+    fee = _sim_venue_fee(address, liq_usd)
+    imp = _sim_impact(size_sol, liq_usd)
+    eff = px * (1.0 + fee + imp + SIM_SLIP)
+    fixed = SIM_TX_FEE_SOL + SIM_ATA_RENT_SOL
+    return eff, fixed, dict(fee=round(fee, 4), impact=round(imp, 4), slip=SIM_SLIP, fixed_sol=fixed)
+
+
+def sim_exit(p: dict, pnl_mark: float, frac: float, sold_sol: float, reason: str) -> tuple[float, float]:
+    """(pnl после издержек выхода и доли фикс-издержек, издержки SOL этой продажи)."""
+    liq = float(p.get("entry_liq", 0.0) or 0.0)
+    stopish = any(k in (reason or "") for k in ("Hard stop", "Escape", "SMART-EXIT", "DEAD", "stop"))
+    slip = SIM_SLIP_STOP if stopish else SIM_SLIP
+    fee = _sim_venue_fee(p.get("address", ""), liq)
+    imp = _sim_impact(sold_sol * (1.0 + max(pnl_mark, -0.99)), liq)
+    gross_back = (1.0 + pnl_mark) * (1.0 - fee - imp - slip)          # что вернётся на 1 SOL вложений
+    fixed = SIM_TX_FEE_SOL + float(p.get("sim_fixed_sol", 0.0) or 0.0) * frac   # своя tx + доля входных
+    net = gross_back - 1.0 - (fixed / sold_sol if sold_sol > 0 else 0.0)
+    return round(max(-1.0, net), 4), round(fixed + (1.0 + pnl_mark - gross_back) * sold_sol, 6)
+
 # ──────────────────────────────────────────────────────────────────────────
 # 1. .env 读写（凭据落地本机）
 # ──────────────────────────────────────────────────────────────────────────
@@ -1821,9 +1874,14 @@ def pnl_calendar(pubkey: str, month: str) -> dict:
         if pk != "*" and r.get("pubkey", DEFAULT_PUBKEY) != pk:
             continue
         d = r["ts"][:10]
-        pct = float(r.get("pnl", 0.0)); size = float(r.get("size_sol", 0.0))
-        sol = pct * size
-        net = sol - FEE_ROUNDTRIP_PCT * size          # чистый: минус оценочный round-trip cost (fee+priority+slippage)
+        pct = float(r.get("pnl", 0.0) or 0.0); size = float(r.get("size_sol", 0.0) or 0.0)
+        if r.get("costed"):                           # издержки уже внутри pnl (модель/факт LIVE)
+            pg = r.get("pnl_gross")
+            pct_g = float(pg) if pg is not None else pct
+            sol, net = pct_g * size, pct * size
+        else:                                         # старые записи — оценочный процент как раньше
+            sol = pct * size
+            net = sol - FEE_ROUNDTRIP_PCT * size
         cell = days.setdefault(d, dict(pnl=0.0, net=0.0, trades=0, wins=0, list=[]))
         cell["pnl"] = round(cell["pnl"] + sol, 6); cell["net"] = round(cell["net"] + net, 6); cell["trades"] += 1
         # детализация сделки: токен, PnL% и в SOL (вал/чистый), время (для клика по дню)
@@ -2488,6 +2546,12 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
 def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbol: str,
                 entry: dict, entry_price: float, filled: bool, status_msg: str) -> dict:
     """Запись позиции после исполнения (под замком сессии)."""
+    sim = None
+    if SIM_COSTS and not (filled and s.mode == "LIVE") and entry_price > 0:
+        liq = float((_attrib_for(address) or {}).get("liquidity", 0.0) or 0.0)
+        entry_price_mid = entry_price
+        entry_price, sim_fixed, sim = sim_entry(address, entry_price, size_sol, liq)
+        sim.update(mid=entry_price_mid)
     # Докупка того же токена = усреднение в ОДНУ позицию (средневзвешенный вход, суммарный
     # размер), а не вторая запись: карточка в UI одна на адрес, и трейдер ждёт среднюю.
     # Бумажные и self-custody записи не смешиваем (разная природа учёта).
@@ -2503,8 +2567,11 @@ def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbo
         elif entry_price > 0:
             existing["entry_price"] = entry_price
         existing["size_sol"] = new_sz
+        if sim:
+            existing["sim_fixed_sol"] = round(float(existing.get("sim_fixed_sol", 0.0) or 0.0)
+                                              + SIM_TX_FEE_SOL, 6)        # докупка: ATA уже есть
         if entry_price > 0:
-            existing["cur_price"] = entry_price
+            existing["cur_price"] = sim["mid"] if sim else entry_price
         existing.pop("peak_pnl", None)           # новая средняя → трейлинг с чистого листа
         existing["tp_taken"] = []                # ступени TP считаются от новой средней
         cp = float(existing.get("cur_price", 0.0) or 0.0)
@@ -2524,7 +2591,9 @@ def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbo
     _enrich_x_signal(attrib, address, s, entry_price)   # + соц-сигнал X на входе (opt-in, quota-safe)
     s.positions.append(dict(symbol=symbol, address=address, size_sol=round(size_sol, 4),
                             pnl=0.0, cycles=0, entry=entry, chain=chain,
-                            entry_price=entry_price, cur_price=entry_price,
+                            entry_price=entry_price,
+                            cur_price=(sim["mid"] if sim else entry_price),
+                            sim_fixed_sol=(sim["fixed_sol"] if sim else 0.0), sim_entry=sim,
                             opened_ts=time.time(), entry_attrib=attrib,
                             entry_liq=float(attrib.get("liquidity", 0.0) or 0.0),   # базовая ликвидность для escape-диффа
                             live=bool(filled and s.mode == "LIVE")))
@@ -2635,6 +2704,10 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
     # «марк»-цена: им же кормим kill-switch/дневной/недельный учёт (аудит 10.10 F7)
     pnl = pnl_override if pnl_override is not None else p.get("pnl", 0)
     sold_sol = round(p["size_sol"] * frac, 6)        # 本次了结的本金（按比例）
+    pnl_gross, cost_sol, costed = pnl, 0.0, pnl_override is not None   # LIVE: факт уже «нетто»
+    if pnl_override is None and SIM_COSTS and not p.get("live") and p.get("sim_entry"):
+        pnl, cost_sol = sim_exit(p, float(pnl), frac, sold_sol, reason or "")
+        costed = True
     tag = (f" · {reason}" if reason else "")
     # атрибуция входа + время удержания → в SELL-запись (топливо review-loop: исход × кошельки/KOL)
     attrib = p.get("entry_attrib") or {}
@@ -2657,7 +2730,8 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
             _RECENT_EXITS.pop(next(iter(_RECENT_EXITS)))
         log("SELL", p["symbol"], f"{s.mode} closed PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=p.get("size_sol", 0.0), address=p.get("address"), fraction=1.0,
-                 attrib=attrib, hold_min=hold_min),
+                 attrib=attrib, hold_min=hold_min, pnl_gross=pnl_gross, cost_sol=cost_sol,
+                 costed=costed, live=bool(p.get("live"))),
             mode=s.mode, pubkey=s.pubkey)
         s.positions.pop(idx)
     else:
@@ -2668,7 +2742,8 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         p["size_sol"] = round(p["size_sol"] - sold_sol, 6)
         log("SELL", p["symbol"], f"{s.mode} partial {pct}% PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac,
-                 attrib=attrib, hold_min=hold_min),
+                 attrib=attrib, hold_min=hold_min, pnl_gross=pnl_gross, cost_sol=cost_sol,
+                 costed=costed, live=bool(p.get("live"))),
             mode=s.mode, pubkey=s.pubkey)
     s.save_positions()
     if s.pubkey == DEFAULT_PUBKEY or p.get("live") or s.mode == "LIVE":

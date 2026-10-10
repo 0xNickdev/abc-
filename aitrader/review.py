@@ -49,7 +49,7 @@ def all_sells(records: list[dict]) -> list[dict]:
         if p is None:
             continue
         size = float(r.get("size_sol", 0.0) or 0.0)
-        out.append(dict(pnl=p, size_sol=size, sol=round(p * size, 6)))
+        out.append(dict(pnl=p, size_sol=size, sol=round(p * size, 6), costed=bool(r.get("costed"))))
     return out
 
 
@@ -247,7 +247,8 @@ def detector_edge(records: list[dict], hard_stop: float = DEFAULT_HARD_STOP,
     for name, rule in DETECTOR_RULES.items():
         flagged = [t for t in trades if rule(t["attrib"]["checks"])]
         rest = [t for t in trades if not rule(t["attrib"]["checks"])]
-        net = round(sum((t["pnl"] - fee_pct) * t["size_sol"] for t in flagged), 4)
+        net = round(sum((t["pnl"] - (0.0 if t.get("costed") else fee_pct)) * t["size_sol"]
+                        for t in flagged), 4)
         out["rules"][name] = dict(
             flagged=_stats([t["pnl"] for t in flagged], hard_stop) | dict(net_sol=net),
             rest=_stats([t["pnl"] for t in rest], hard_stop),
@@ -270,7 +271,8 @@ def _summ(trades: list[dict], hs: float, fee_pct: float) -> dict:
     """Сводка по сделкам: реализованная статистика + вал/чистый SOL (минус round-trip cost)."""
     return _stats([t["pnl"] for t in trades], hs) | dict(
         total_sol=round(sum(t["sol"] for t in trades), 4),
-        net_total_sol=round(sum((t["pnl"] - fee_pct) * t["size_sol"] for t in trades), 4))
+        net_total_sol=round(sum((t["pnl"] - (0.0 if t.get("costed") else fee_pct)) * t["size_sol"]
+                                for t in trades), 4))
 
 
 def daily_report(records: list[dict], day: str | None = None, cfg: dict | None = None,

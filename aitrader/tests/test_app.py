@@ -1297,7 +1297,8 @@ class TestBuyResilience:
         r = client.post("/api/buy", json={"address": "GODXICA111", "size_sol": 0.3, "chain": "sol"})
         assert r.status_code == 200 and r.json()["symbol"] == "GODXI"
         pos = appmod.get_session(None).positions
-        assert pos and pos[0]["entry_price"] == 0.002    # стоп не слепой: цена входа с fallback'а
+        assert pos and pos[0]["sim_entry"]["mid"] == 0.002 and pos[0]["cur_price"] == 0.002   # цена с fallback'а
+        assert pos[0]["entry_price"] > 0.002                 # вход с издержками (модель SHADOW)
 
     def test_buy_fails_cleanly_when_both_feeds_down(self, tmp_path, monkeypatch):
         client = _mu_client(tmp_path, monkeypatch)

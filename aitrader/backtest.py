@@ -231,7 +231,8 @@ def positions_from_sells(records: list[dict]) -> list[dict]:
         size = r.get("size_sol")
         size = float(size) if isinstance(size, (int, float)) else 0.0
         key = (r.get("pubkey") or "local", r.get("address") or r.get("symbol") or "?")
-        acc = open_.setdefault(key, dict(sol=0.0, size=0.0, attrib=None, legs=0))
+        acc = open_.setdefault(key, dict(sol=0.0, size=0.0, attrib=None, legs=0, costed=False))
+        acc["costed"] = acc["costed"] or bool(r.get("costed"))
         acc["sol"] += p * size
         acc["size"] += size
         acc["legs"] += 1
@@ -244,7 +245,7 @@ def positions_from_sells(records: list[dict]) -> list[dict]:
                             pubkey=key[0], mode=r.get("mode"), pnl=pnl,
                             size_sol=round(acc["size"], 6), sol=round(acc["sol"], 6),
                             attrib=acc["attrib"] or {}, hold_min=r.get("hold_min"),
-                            legs=acc["legs"], reason=r.get("reason", "")))
+                            legs=acc["legs"], reason=r.get("reason", ""), costed=acc["costed"]))
     return out
 
 
