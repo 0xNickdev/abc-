@@ -114,6 +114,18 @@ class TestWatcherUsesGeyser:
         assert p["entry_price"] == 1e-6 and p["pnl"] == 1.0
 
 
+class TestRebaseNeverHidesCrash:
+    def test_early_crash_is_kept_as_loss(self, monkeypatch):
+        p = dict(address=MINT, entry_price=1e-5, cur_price=1e-5, pnl=0.0, chain="sol",
+                 opened_ts=time.time() - 5)
+        s = _Sess([p])
+        monkeypatch.setattr(w.geyser.FEED, "set_mints", lambda m: None)
+        monkeypatch.setattr(w.geyser.FEED, "prices_usd", lambda m: {MINT: 3e-6})   # −70% раг
+        pw = w.PositionWatcher(lambda: [s], dict(hard_stop_pct=0.25), lambda sess: None)
+        pw.poll_once()
+        assert p["entry_price"] == 1e-5 and p["pnl"] == pytest.approx(-0.7)
+
+
 class TestShadowUnlimited:
     def test_shadow_no_position_cap_live_capped(self, tmp_path, monkeypatch):
         from test_app import _mu_client

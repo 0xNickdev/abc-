@@ -147,7 +147,9 @@ class PositionWatcher:
                 if (not p.get("entry_src") and s_ and p.get("opened_ts")
                         and time.time() - float(p["opened_ts"]) < REBASE_WINDOW_S):
                     p["entry_src"] = s_
-                    if abs(px / ep - 1.0) > 0.30:
+                    # ТОЛЬКО вверх: фальшивые иксы были от заниженной цены входа. Реальный обвал
+                    # в первые секунды (раг) перебазированием прятать нельзя — это убыток.
+                    if px / ep - 1.0 > 0.30:
                         p["entry_price_orig"] = ep
                         p["entry_price"] = ep = px
                         self.stats["entry_rebased"] = self.stats.get("entry_rebased", 0) + 1
