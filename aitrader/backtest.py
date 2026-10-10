@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import gzip
 import json
+import os
 import pathlib
 import re
+import threading
 
 import strategy
 
@@ -82,6 +84,34 @@ def _scan_file(p: pathlib.Path) -> dict:
 
 
 _SCAN_CACHE: dict[str, tuple[tuple, dict]] = {}   # str(path) -> ((size, mtime_ns), выжимка)
+_SCAN_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+ARCHIVE_FEATS_CAP = 20000   # paper-оценка — модельная; из архивов хватает хвоста (память/диск)
+
+
+def _sidecar(p: pathlib.Path) -> pathlib.Path:
+    return p.with_name(p.name + ".ext.json")
+
+
+def _load_sidecar(p: pathlib.Path, sig: tuple) -> dict | None:
+    """Выжимка архива с диска: после деплоя (пустой кэш) календарь больше не ждёт минуты,
+    пока распакуются ~150 МБ gzip (прод 10.10: первый запрос висел >120с)."""
+    try:
+        d = json.loads(_sidecar(p).read_text())
+        if tuple(d.get("sig") or ()) == sig:
+            return d["ext"]
+    except Exception:
+        pass
+    return None
+
+
+def _save_sidecar(p: pathlib.Path, sig: tuple, ext: dict):
+    try:
+        tmp = _sidecar(p).with_name(_sidecar(p).name + ".tmp")
+        tmp.write_text(json.dumps(dict(sig=list(sig), ext=ext), ensure_ascii=False))
+        os.replace(tmp, _sidecar(p))
+    except Exception:
+        pass
 
 
 def _scan_cached(p: pathlib.Path) -> dict | None:
@@ -94,11 +124,23 @@ def _scan_cached(p: pathlib.Path) -> dict | None:
     hit = _SCAN_CACHE.get(key)
     if hit and hit[0] == sig:
         return hit[1]
-    ext = _scan_file(p)
-    if len(_SCAN_CACHE) > 64:
-        _SCAN_CACHE.pop(next(iter(_SCAN_CACHE)))
-    _SCAN_CACHE[key] = (sig, ext)
-    return ext
+    with _LOCKS_GUARD:
+        lk = _SCAN_LOCKS.setdefault(key, threading.Lock())
+    with lk:                                   # параллельные запросы ждут ОДИН проход, а не делают свои
+        hit = _SCAN_CACHE.get(key)
+        if hit and hit[0] == sig:
+            return hit[1]
+        is_archive = p.suffix == ".gz"
+        ext = _load_sidecar(p, sig) if is_archive else None
+        if ext is None:
+            ext = _scan_file(p)
+            if is_archive:
+                ext["feats"] = ext["feats"][-ARCHIVE_FEATS_CAP:]
+                _save_sidecar(p, sig, ext)
+        if len(_SCAN_CACHE) > 64:
+            _SCAN_CACHE.pop(next(iter(_SCAN_CACHE)))
+        _SCAN_CACHE[key] = (sig, ext)
+        return ext
 
 
 def journal_files(path: pathlib.Path | str | None = None) -> list[pathlib.Path]:

@@ -103,3 +103,24 @@ class TestScanCache:
         with gzip.open(ad / "trade_decisions-2026-01.jsonl.gz", "at", encoding="utf-8") as gz:
             gz.write(json.dumps(_sell("2026-01-05T10:00:00+00:00", 0.5)) + "\n")
         assert len(backtest.sell_records(hot)) == 2
+
+
+class TestArchiveSidecar:
+    def test_cold_start_uses_disk_sidecar(self, tmp_path, monkeypatch):
+        import gzip
+        import json
+
+        import backtest
+        ad = tmp_path / "archive"
+        ad.mkdir()
+        arc = ad / "trade_decisions-2026-07.jsonl.gz"
+        with gzip.open(arc, "wt") as fh:
+            fh.write(json.dumps(dict(action="SELL", pnl=0.5, size_sol=0.1, address="A")) + "\n")
+        hot = tmp_path / "trade_decisions.jsonl"
+        hot.write_text("")
+        backtest._SCAN_CACHE.clear()
+        assert len(backtest.sell_records(hot)) == 1
+        assert (ad / (arc.name + ".ext.json")).exists()
+        backtest._SCAN_CACHE.clear()                         # «деплой»: память пуста
+        monkeypatch.setattr(backtest, "_scan_file", lambda p: (_ for _ in ()).throw(AssertionError("rescanned")) if p.suffix == ".gz" else dict(records=0, actions={}, gates={}, sells=[], feats=[]))
+        assert len(backtest.sell_records(hot)) == 1          # из сайдкара, без распаковки

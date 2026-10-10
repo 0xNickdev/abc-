@@ -2661,6 +2661,8 @@ async def _lifespan(_app: FastAPI):
     # ~2с + WS-пинок Helius (logsSubscribe по минтам) → свежий pnl и мгновенные стопы
     # для бот-сессий. Ручные/self-custody позиции не продаёт — только обновляет цену.
     load_risk_state()                     # предохранители house-бота переживают деплой
+    # прогрев выжимки журнала в фоне: первый посетитель календаря не ждёт минуты после деплоя
+    threading.Thread(target=lambda: backtest.collect(LOG_PATH), daemon=True).start()
     threading.Thread(target=_health_loop, daemon=True).start()
     notify.send(f"started: bot {'ON ' + ST.bot.cfg.get('mode', '') if ST.bot.enabled else 'OFF'}, "
                 f"{len(ST.positions)} open positions, mode {ST.mode}", key="boot", cooldown_s=300)
