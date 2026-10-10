@@ -1403,9 +1403,9 @@ class RiskManager:
             return False, r
         if size_sol > CFG["max_per_trade_sol"]:
             return False, f"BLOCK size above per-trade cap ({CFG['max_per_trade_sol']} SOL)"
-        if n_positions >= CFG["max_concurrent_positions"]:
+        if fuses and n_positions >= CFG["max_concurrent_positions"]:
             return False, f"BLOCK max concurrent positions reached ({CFG['max_concurrent_positions']})"
-        if exposure + size_sol > CFG["max_total_exposure_sol"]:
+        if fuses and exposure + size_sol > CFG["max_total_exposure_sol"]:
             return False, "BLOCK total exposure cap exceeded"
         return True, "ok"
 
@@ -2651,7 +2651,8 @@ async def _lifespan(_app: FastAPI):
         ST.bot.start("sol", screen_fn=lambda c: screen_once(c, ST),
                      buy_fn=_bot_buy_fn(ST), sell_fn=_bot_sell_fn(ST),
                      positions_fn=lambda: ST.positions, risk_cfg=CFG, lock=ST.lock,
-                     halted_fn=lambda: ST.risk.halted_now(CFG["daily_loss_cap_sol"], _fuses_on(ST)))
+                     halted_fn=lambda: ST.risk.halted_now(CFG["daily_loss_cap_sol"], _fuses_on(ST)),
+                     max_positions_fn=lambda: _max_positions(ST))
         log("BOT", "ABC", f"автозапуск режим {_auto} (BOT_AUTOSTART)", mode=ST.mode)
     # Ночной review-loop (офлайн-обучение): opt-in через ABC_NIGHTLY_REVIEW=1.
     # Первый прогон при старте подтянет веса кошельков сразу, далее раз в сутки.
@@ -2715,6 +2716,11 @@ SHADOW_FUSES = os.getenv("ABC_SHADOW_FUSES", "").strip().lower() in ("1", "true"
 
 def _fuses_on(s) -> bool:
     return s.mode == "LIVE" or SHADOW_FUSES
+
+def _max_positions(s) -> int:
+    """SHADOW — без потолка числа позиций/экспозиции (решение юзера 10.10: «пусть торгует
+    неограниченно», бумага копит выборку). LIVE — CFG. Размер сделки ограничен всегда."""
+    return CFG["max_concurrent_positions"] if _fuses_on(s) else 10 ** 6
 
 def _block_if_public():
     """公开演示为只读：所有写操作（含触发 CLI / 改配置 / 买卖）一律拒绝。"""
@@ -3426,7 +3432,8 @@ def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader, x_auth: str | N
         buy_fn=_bot_buy_fn(sess),
         sell_fn=_bot_sell_fn(sess),
         positions_fn=lambda: sess.positions, risk_cfg=CFG, lock=sess.lock,
-        halted_fn=lambda: sess.risk.halted_now(CFG["daily_loss_cap_sol"], _fuses_on(sess)))
+        halted_fn=lambda: sess.risk.halted_now(CFG["daily_loss_cap_sol"], _fuses_on(sess)),
+        max_positions_fn=lambda: _max_positions(sess))
     log("BOT", "ABC", "Autonomous loop started" if started else "Already running (duplicate start ignored)", mode=sess.mode)
     return dict(ok=True, started=started, **sess.bot.status())
 

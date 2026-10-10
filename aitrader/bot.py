@@ -121,14 +121,15 @@ class BotRunner:
 
     # ── 生命周期 ───────────────────────────────────────────────────────────
     def start(self, chain: str, *, screen_fn, buy_fn, sell_fn, positions_fn,
-              risk_cfg, lock, halted_fn=None) -> bool:
+              risk_cfg, lock, halted_fn=None, max_positions_fn=None) -> bool:
         """注入 app 的能力并启动。已在跑则返回 False（幂等）。"""
         if self.enabled:
             return False
         self.chain = chain
         self._fns = dict(screen=screen_fn, buy=buy_fn, sell=sell_fn,
                          positions=positions_fn, risk_cfg=risk_cfg, lock=lock,
-                         halted=halted_fn or (lambda: False))
+                         halted=halted_fn or (lambda: False),
+                         max_positions=max_positions_fn)
         self.enabled = True
         # Своё Event на каждый запуск: stop→start подряд раньше очищал общий _stop раньше,
         # чем старая нить его видела → крутились ДВА цикла (двойная нагрузка на GMGN/входы).
@@ -179,7 +180,8 @@ class BotRunner:
                 held = {p["address"] for p in positions}
                 entries = select_entries(
                     decisions, held, len(positions),
-                    risk_cfg.get("max_concurrent_positions", 3),
+                    (f["max_positions"]() if f.get("max_positions")
+                     else risk_cfg.get("max_concurrent_positions", 3)),
                     self.cfg["max_new_per_tick"],
                     require_trigger=self.cfg["require_abc_trigger"],
                     min_priority=self.cfg.get("min_priority", 0))

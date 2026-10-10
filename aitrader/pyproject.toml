@@ -1,6 +1,7 @@
 [tool.ruff]
 line-length = 120
 target-version = "py310"
+extend-exclude = ["ysproto"]   # сгенерированные gRPC-стабы Yellowstone (grpc_tools.protoc)
 
 [tool.ruff.lint]
 # 实用子集：错误类 + pyflakes + import 排序 + 升级建议；不强求风格洁癖（项目注释密度高、中文多）

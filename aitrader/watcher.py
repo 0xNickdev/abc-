@@ -26,6 +26,7 @@ import time
 
 import bot as botmod
 import dexadapter
+import geyser
 import pumpcurve
 import wallets
 
@@ -38,6 +39,7 @@ SMART_EXIT_DROP = float(os.getenv("ABC_SMART_EXIT_DROP", "0.35") or 0.35)
 WATCH_POLL_S = float(os.getenv("ABC_WATCH_POLL_S", "2.0") or 2.0)
 WS_ENABLED = os.getenv("ABC_WATCH_WS", "1").strip().lower() in ("1", "true", "yes", "on")
 _MAX_WS_SUBS = 25
+REBASE_WINDOW_S = 120.0    # окно перебазирования цены входа на источник watcher'а
 MIN_POLL_GAP_S = float(os.getenv("ABC_WATCH_MIN_GAP_S", "1.0") or 1.0)   # потолок частоты опроса
 STALE_AFTER_WAIT_S = 1.5   # цена старше этого после ожидания замка сессии не применяется          # Helius лимит подписок на соединение держим с запасом
 
@@ -68,6 +70,8 @@ class PositionWatcher:
 
     # ── lifecycle ──────────────────────────────────────────────────────────
     def start(self):
+        geyser.FEED._on_update = lambda mint: self._kick.set()   # событие кривой → цена сейчас
+        geyser.FEED.start()
         threading.Thread(target=self._loop, daemon=True).start()
         if WS_ENABLED and ws_url():
             threading.Thread(target=self._ws_loop, daemon=True).start()
@@ -94,17 +98,28 @@ class PositionWatcher:
         if not pairs:
             return
         mints = sorted({p["address"] for _, p in pairs})
-        try:
-            prices = dexadapter.spot_prices(mints)
-        except Exception:
-            prices = {}
-        # Свежие pump.fun-токены до индексации DexScreener: цена напрямую из bonding curve
-        # (RPC) — watcher видит токен с первой секунды, стоп не слепнет на самых молодых.
-        missing = [m for m in mints if not prices.get(m) and m.endswith("pump")]
+        # 1) Geyser (Shyft gRPC): токены на bonding curve — цена из резервов, обновление за
+        #    десятки мс, без RPC-кредитов Helius. Авторитетный источник для кривой.
+        geyser.FEED.set_mints(mints)
+        prices = geyser.FEED.prices_usd(mints)
+        src = {m: "geyser" for m in prices}
+        # 2) DexScreener — для мигрировавших (AMM) и всего, чего нет в Geyser
+        rest = [m for m in mints if m not in prices]
+        if rest:
+            try:
+                dx = dexadapter.spot_prices(rest)
+            except Exception:
+                dx = {}
+            prices.update(dx)
+            src.update({m: "dex" for m in dx})
+        # 3) Запасной путь: кривая по RPC (Helius) — только если Geyser выключен/лежит
+        missing = [m for m in mints if not prices.get(m) and m.endswith("pump")
+                   and geyser.FEED.snapshot().get("state") != "streaming"]
         if missing:
             try:
                 got = pumpcurve.usd_prices(missing)
                 prices.update(got)
+                src.update({m: "curve-rpc" for m in got})
                 self.stats["curve_prices"] = self.stats.get("curve_prices", 0) + len(got)
             except Exception:
                 pass
@@ -125,6 +140,18 @@ class PositionWatcher:
                     continue
                 if p not in sess.positions:         # продана параллельным тиком бота
                     continue
+                # Перебазирование входа (аудит 28.09/10.10): цена входа бралась из GMGN, выход —
+                # из кривой/DexScreener → фальшивые ×45/×94. Первая RT-цена в первые
+                # REBASE_WINDOW_S после входа, расходящаяся >30%, становится ценой входа.
+                s_ = src.get(p["address"])
+                if (not p.get("entry_src") and s_ and p.get("opened_ts")
+                        and time.time() - float(p["opened_ts"]) < REBASE_WINDOW_S):
+                    p["entry_src"] = s_
+                    if abs(px / ep - 1.0) > 0.30:
+                        p["entry_price_orig"] = ep
+                        p["entry_price"] = ep = px
+                        self.stats["entry_rebased"] = self.stats.get("entry_rebased", 0) + 1
+                p["px_src"] = s_
                 p["cur_price"] = px
                 p["pnl"] = round((px - ep) / ep, 4)
                 p["peak_pnl"] = max(float(p.get("peak_pnl", p["pnl"])), p["pnl"])
@@ -289,7 +316,11 @@ _start_lock = threading.Lock()
 
 def stats() -> dict | None:
     """Снимок статистики контура для /api/status (None = не запущен)."""
-    return dict(_started.stats) if _started else None
+    if not _started:
+        return None
+    s = dict(_started.stats)
+    s["geyser"] = geyser.FEED.snapshot() if geyser.enabled() else "off"
+    return s
 
 
 def ensure_started(sessions_fn, risk_cfg, sell_fn_factory, log_fn=None) -> PositionWatcher:
