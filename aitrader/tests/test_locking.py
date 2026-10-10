@@ -15,7 +15,8 @@ def _runner(screen, buy, sell, positions, halted=lambda: False):
                   positions=lambda: positions, risk_cfg=dict(hard_stop_pct=0.25, trailing_pct=0.25,
                                                              tp_ladder=[[0.6, 0.4]], max_concurrent_positions=5),
                   lock=lock, halted=halted)
-    r.cfg.update(require_abc_trigger=False, min_priority=0, max_new_per_tick=2)
+    r.cfg.update(require_abc_trigger=False, min_priority=0, max_new_per_tick=2,
+                 min_buy_ratio=0, max_sm_confluence=0)
     return r, lock
 
 
@@ -102,3 +103,17 @@ class TestWatcherStalePrice:
         time.sleep(0.01)
         pw.poll_once()                                      # замок свободен → цена применяется
         assert p["pnl"] == -0.1
+
+
+class TestEdgeFilter:
+    def _d(self, addr, br, sm):
+        return dict(decision=dict(address=addr, action="ACTION", size_sol=0.1, symbol=addr, priority=90,
+                                  abc=dict(triggered=True, score=50), features=dict(buy_ratio=br, sm_confluence=sm)))
+
+    def test_buy_ratio_and_confluence_gate(self):
+        ds = [self._d("LOW", 0.58, 2), self._d("GOOD", 0.70, 3), self._d("CROWD", 0.80, 12)]
+        got = botmod.select_entries(ds, set(), 0, 10, 5, require_trigger=True,
+                                    min_buy_ratio=0.65, max_sm_confluence=8)
+        assert [a for a, _, _ in got] == ["GOOD"]
+        off = botmod.select_entries(ds, set(), 0, 10, 5, require_trigger=True)
+        assert len(off) == 3                                  # 0 = фильтр выключен

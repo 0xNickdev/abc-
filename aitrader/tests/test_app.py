@@ -485,7 +485,8 @@ class TestBot:
                           pnl=-0.40, peak_pnl=0.0)]   # 持仓亏损 → 应硬止损平掉
         screened = dict(
             decisions=[dict(decision=dict(action="ACTION", address="new", symbol="NEW",
-                            size_sol=0.1, abc=dict(triggered=True, score=80)))],
+                            size_sol=0.1, abc=dict(triggered=True, score=80),
+                            features=dict(buy_ratio=0.7, sm_confluence=2)))],
             positions=[dict(address="old", severity=0)])
         r = bot.BotRunner()
 
@@ -842,9 +843,14 @@ class TestTxEndpoints:
                         headers=headers).json()
         assert d["tx"] == "dGVzdA==" and d["out_amount"] == 777
 
-    def test_confirm_buy_then_sell_roundtrip(self, client):
+    def test_confirm_buy_then_sell_roundtrip(self, client, monkeypatch):
         pk, headers = _wallet_auth(client)
         addr = "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        appmod.get_session(pk).mode = "LIVE"
+        fills = {"SIGSIGSIG": dict(ok=True, signer=pk, sol_delta=-0.1, token_delta_raw=777, decimals=6),
+                 "SIG2": dict(ok=True, signer=pk, sol_delta=0.12, token_delta_raw=-777, decimals=6)}
+        monkeypatch.setattr(appmod.execution, "confirm_fill", lambda sig, owner, mint, **k: fills[sig])
+        monkeypatch.setattr(appmod.pumpcurve, "sol_usd", lambda: 100.0)
         r = client.post("/api/tx/confirm", json={
             "address": addr, "side": "buy", "size_sol": 0.1,
             "token_amount": 777, "signature": "SIGSIGSIG", "symbol": "CLEANCAT"},
@@ -857,6 +863,21 @@ class TestTxEndpoints:
             headers=headers)
         assert r2.status_code == 200 and r2.json()["closed"] is True
         assert client.get("/api/positions", headers=headers).json()["positions"] == []
+        recs = [ln for ln in appmod.LOG_PATH.read_text().splitlines() if '"SELL"' in ln]
+        assert '"pnl": 0.2' in recs[-1]                  # 0.12 получено на 0.1 вложенных = +20% по факту
+
+    def test_confirm_rejects_foreign_or_unconfirmed_tx(self, client, monkeypatch):
+        pk, headers = _wallet_auth(client)
+        appmod.get_session(pk).mode = "LIVE"
+        addr = "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        monkeypatch.setattr(appmod.execution, "confirm_fill", lambda sig, owner, mint, **k: dict(
+            ok=True, signer="SomeoneElse", sol_delta=-0.1, token_delta_raw=5, decimals=6))
+        body = {"address": addr, "side": "buy", "size_sol": 0.1, "signature": "FAKE"}
+        assert client.post("/api/tx/confirm", json=body, headers=headers).status_code == 403
+        monkeypatch.setattr(appmod.execution, "confirm_fill",
+                            lambda sig, owner, mint, **k: dict(ok=False, err="not found"))
+        assert client.post("/api/tx/confirm", json=body, headers=headers).status_code == 409
+        assert appmod.get_session(pk).positions == []
 
 
 # ── Self-custody LIVE: кошельковая сессия торгует своим кошельком (Phantom),
@@ -909,9 +930,16 @@ class TestSelfCustodyLive:
     def test_paper_sell_refused_for_self_custody_position(self, client):
         # self_custody позицию нельзя закрыть «бумажно»: только Wallet sell (Phantom) / Unmonitor
         pk, h = _wallet_auth(client)
-        client.post("/api/tx/confirm", json={
-            "address": self.ADDR, "side": "buy", "size_sol": 0.1,
-            "token_amount": 5, "signature": "SIG", "symbol": "CLEANCAT"}, headers=h)
+        appmod.get_session(pk).mode = "LIVE"
+        import app as _a
+        _a.execution.confirm_fill, _orig = (lambda sig, owner, mint, **k: dict(
+            ok=True, signer=pk, sol_delta=-0.1, token_delta_raw=5, decimals=6)), _a.execution.confirm_fill
+        try:
+            client.post("/api/tx/confirm", json={
+                "address": self.ADDR, "side": "buy", "size_sol": 0.1,
+                "token_amount": 5, "signature": "SIG", "symbol": "CLEANCAT"}, headers=h)
+        finally:
+            _a.execution.confirm_fill = _orig
         r = client.post("/api/sell", json={"address": self.ADDR}, headers=h)
         assert r.status_code == 400 and "Wallet sell" in r.json()["detail"]
         # Unmonitor (без продажи) остаётся доступен
@@ -1496,11 +1524,66 @@ class TestSessionWallet:
                             lambda pk, ca, sz, sl=100: dict(tx="dGVzdA==", out_amount=555))
         monkeypatch.setattr(appmod.sessionwallet, "sign_and_send",
                             lambda tx, kp: "N3TXSIG")
+        monkeypatch.setattr(appmod.execution, "mint_risk", lambda m: None)
+        # фактическое исполнение из getTransaction: потрачено 0.1006 SOL (вкл. комиссии), 555 токенов
+        monkeypatch.setattr(appmod.execution, "confirm_fill", lambda sig, owner, mint, **k: dict(
+            ok=True, sol_delta=-0.1006, token_delta_raw=555_000_000, decimals=6))
+        monkeypatch.setattr(appmod.pumpcurve, "sol_usd", lambda: 100.0)
         res = appmod._bot_buy_fn(sess)("sol",
               "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", 0.1)
         assert res["filled"] is True
         p = sess.positions[-1]
-        assert p["session"] is True and p["wallet_tx"] == "N3TXSIG" and p["token_amount"] == 555
+        assert p["session"] is True and p["wallet_tx"] == "N3TXSIG" and p["live"] is True
+        assert p["token_amount"] == 555_000_000 and p["size_sol"] == 0.1006   # факт, не quote
+        assert abs(p["entry_price"] - 0.1006 / 555 * 100) < 1e-12 and p["entry_src"] == "fill"
+
+    def test_n3_unfilled_buy_records_nothing(self, client, monkeypatch):
+        sess = appmod.get_session("N3WalletCCCC")
+        sess.bot.cfg["mode"] = "n3"
+        sess.mode = "LIVE"
+        monkeypatch.setattr(appmod, "LIVE_TRADING_DISABLED", False)
+        monkeypatch.setattr(appmod.execution, "mint_risk", lambda m: None)
+        monkeypatch.setattr(appmod.execution, "build_buy", lambda pk, ca, sz, sl=None: dict(tx="dGVzdA=="))
+        monkeypatch.setattr(appmod.sessionwallet, "sign_and_send", lambda tx, kp: "DROPPED")
+        monkeypatch.setattr(appmod.execution, "confirm_fill",
+                            lambda sig, owner, mint, **k: dict(ok=False, err="not confirmed in time"))
+        with pytest.raises(appmod.HTTPException) as ei:
+            appmod._bot_buy_fn(sess)("sol", "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", 0.1)
+        assert ei.value.status_code == 502 and sess.positions == []
+
+    def test_n3_freeze_authority_blocks_live_entry(self, client, monkeypatch):
+        sess = appmod.get_session("N3WalletDDDD")
+        sess.bot.cfg["mode"] = "n3"
+        sess.mode = "LIVE"
+        monkeypatch.setattr(appmod, "LIVE_TRADING_DISABLED", False)
+        monkeypatch.setattr(appmod.execution, "mint_risk", lambda m: "freeze authority active")
+        sent = []
+        monkeypatch.setattr(appmod.sessionwallet, "sign_and_send", lambda tx, kp: sent.append(1))
+        with pytest.raises(appmod.HTTPException) as ei:
+            appmod._bot_buy_fn(sess)("sol", "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", 0.1)
+        assert ei.value.status_code == 409 and not sent
+
+    def test_n3_live_sell_books_real_pnl_and_failed_sell_keeps_position(self, client, monkeypatch):
+        sess = appmod.get_session("N3WalletEEEE")
+        sess.mode = "LIVE"
+        monkeypatch.setattr(appmod, "LIVE_TRADING_DISABLED", False)
+        sess.positions = [dict(symbol="R", address="REALCA", size_sol=0.1, pnl=-0.2, cycles=0, entry={},
+                               chain="sol", entry_price=1.0, token_amount=1_000_000, live=True,
+                               self_custody=True, session=True)]
+        monkeypatch.setattr(appmod.execution, "build_sell", lambda pk, ca, fr, token_amount=0: dict(tx="dGVzdA=="))
+        monkeypatch.setattr(appmod.sessionwallet, "sign_and_send", lambda tx, kp: "SELLSIG")
+        monkeypatch.setattr(appmod.execution, "confirm_fill",
+                            lambda sig, owner, mint, **k: dict(ok=False, err="slippage"))
+        with pytest.raises(appmod.HTTPException):
+            appmod._n3_execute(sess, "sell", "sol", "REALCA", fraction=1.0, reason="stop")
+        assert len(sess.positions) == 1                              # не продали — позиция остаётся
+        monkeypatch.setattr(appmod.execution, "confirm_fill", lambda sig, owner, mint, **k: dict(
+            ok=True, sol_delta=0.06, token_delta_raw=-1_000_000, decimals=6))
+        appmod._n3_execute(sess, "sell", "sol", "REALCA", fraction=1.0, reason="stop")
+        assert sess.positions == []
+        recs = [ln for ln in appmod.LOG_PATH.read_text().splitlines() if '"SELL"' in ln]
+        assert '"pnl": -0.4' in recs[-1]                     # реально получено 0.06 из 0.1 = −40%, не марк −20%
+        assert sess.risk.consec_losses == 1
 
     def test_mode_n3_accepted_by_config(self, client):
         assert client.post("/api/bot/config", json={"mode": "n3"},

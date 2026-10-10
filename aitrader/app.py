@@ -107,7 +107,7 @@ CFG = {
     # Всё крутится env'ами без кода: ABC_MAX_EXPOSURE_SOL / ABC_WEEK_BUDGET_SOL /
     # ABC_DAILY_CAP_SOL / ABC_KILL_CONSEC.
     "max_total_exposure_sol": float(os.getenv("ABC_MAX_EXPOSURE_SOL", "10") or 10),
-    "max_concurrent_positions": 20,   # 感受阶段放宽（SHADOW 不动真钱）；真实上线前按纪律调回（如 2~3）
+    "max_concurrent_positions": int(os.getenv("ABC_MAX_POSITIONS", "20") or 20),   # 感受阶段放宽（SHADOW 不动真钱）；真实上线前按纪律调回（如 2~3）
     "week_budget_sol": float(os.getenv("ABC_WEEK_BUDGET_SOL", "10") or 10),
     "daily_loss_cap_sol": float(os.getenv("ABC_DAILY_CAP_SOL", "2.0") or 2.0),
     "kill_switch_consec_losses": int(os.getenv("ABC_KILL_CONSEC", "5") or 5),
@@ -1560,6 +1560,14 @@ class UserSession:
     def exposure(self):
         return round(sum(p["size_sol"] for p in self.positions), 4)
 
+    def live_load(self) -> tuple[int, float]:
+        """(число, экспозиция) для LIVE-лимитов: в LIVE считаются только РЕАЛЬНЫЕ позиции
+        (бумажные из SHADOW без потолка иначе забили бы лимиты пилота). Аудит 10.10 F1."""
+        if self.mode != "LIVE":
+            return len(self.positions), self.exposure()
+        live = [p for p in self.positions if p.get("live")]
+        return len(live), round(sum(p["size_sol"] for p in live), 4)
+
     def save_positions(self):
         if self._default:
             save_positions(self.positions)
@@ -1608,6 +1616,11 @@ def get_session(pubkey: str | None) -> UserSession:
                 _evict_idle_session()
             s = UserSession(pk)
             SESSIONS[pk] = s
+            if pk != DEFAULT_PUBKEY:
+                try:
+                    _restore_wallet_risk(s)
+                except Exception:
+                    pass
         return s
 
 MAX_SESSIONS = int(os.getenv("ABC_MAX_SESSIONS", "300") or 300)
@@ -2367,7 +2380,7 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
     s = s or ST
     # 成交前再过一次组合风控（硬拦；与筛选时的提示分离）
     fuses = _fuses_on(s)
-    allow, rnote = s.risk.gate(size_sol, len(s.positions), s.exposure(), fuses=fuses)
+    allow, rnote = s.risk.gate(size_sol, *s.live_load(), fuses=fuses)
     if not allow:
         log("BUY_BLOCK", address[:8], rnote, mode=s.mode)
         raise HTTPException(409, rnote)
@@ -2419,6 +2432,12 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         raise HTTPException(400, "LIVE here is self-custody: use the Phantom buy button "
                                  "(your wallet signs the transaction). Switch to SHADOW for paper records.")
     # LIVE 且未锁：真实买入（input=本链原生币，output=目标币，amount=最小单位）。
+    # Аудит 10.10: house-путь через GMGN swap не подтверждает исполнение и блокируется банами
+    # GMGN ровно тогда, когда нужен стоп → для пилота закрыт; реальные деньги — только N3.
+    if s.mode == "LIVE" and not LIVE_TRADING_DISABLED and not HOUSE_LIVE:
+        log("BUY_BLOCK", address[:8], "house GMGN LIVE disabled (use N3 session wallet)", mode=s.mode)
+        raise HTTPException(400, "House LIVE via GMGN is disabled for the pilot: use the N3 "
+                                 "session wallet (bot mode n3) for real-money trades.")
     if s.mode == "LIVE" and not LIVE_TRADING_DISABLED:
         try:
             wallet = g.wallet_address()              # 绑定 Key 的本链钱包，--from 必须一致
@@ -2507,7 +2526,8 @@ def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbo
                             pnl=0.0, cycles=0, entry=entry, chain=chain,
                             entry_price=entry_price, cur_price=entry_price,
                             opened_ts=time.time(), entry_attrib=attrib,
-                            entry_liq=float(attrib.get("liquidity", 0.0) or 0.0)))   # базовая ликвидность для escape-диффа
+                            entry_liq=float(attrib.get("liquidity", 0.0) or 0.0),   # базовая ликвидность для escape-диффа
+                            live=bool(filled and s.mode == "LIVE")))
     s.save_positions()
     _verb = "filled" if filled else ("submitted·pending" if s.mode == "LIVE" else "recorded")
     log("BUY", symbol, f"{s.mode} {_verb} {size_sol} ({chain})",
@@ -2529,11 +2549,19 @@ def save_risk_state():
         r = ST.risk
         now = time.time()
         exits = [[k[0], k[1], v[0], v[1]] for k, v in _RECENT_EXITS.items()
-                 if now - v[0] < LOSS_REENTRY_HOURS * 3600 and k[0] == DEFAULT_PUBKEY]
+                 if now - v[0] < LOSS_REENTRY_HOURS * 3600]
+        # кошельковые сессии с реальными деньгами (LIVE/реальные позиции) — их предохранители
+        # тоже переживают рестарт (аудит 10.10 B7: сохранялся только house)
+        with _sessions_lock:
+            sess_list = list(SESSIONS.values())
+        wallets_ = {x.pubkey: dict(day=x.risk._day, realized_loss_today=x.risk.realized_loss_today,
+                                   consec_losses=x.risk.consec_losses, halted=x.risk.halted)
+                    for x in sess_list if x.pubkey != DEFAULT_PUBKEY
+                    and (x.mode == "LIVE" or any(p.get("live") for p in x.positions))}
         _atomic_write(OUT_DIR / "risk_state.json", json.dumps(dict(
             day=r._day, realized_loss_today=r.realized_loss_today, consec_losses=r.consec_losses,
             halted=r.halted, week=WEEK_BUDGET._week, week_loss=WEEK_BUDGET.loss,
-            recent_exits=exits[-500:])))
+            recent_exits=exits[-1000:], sessions=wallets_)))
     except Exception:
         pass
 
@@ -2551,6 +2579,17 @@ def load_risk_state():
         WEEK_BUDGET.loss = float(d.get("week_loss") or 0.0)
     for pk, addr, ts, pnl in d.get("recent_exits") or []:
         _RECENT_EXITS[(pk, addr)] = (float(ts), float(pnl))
+    _SAVED_WALLET_RISK.update(d.get("sessions") or {})
+
+_SAVED_WALLET_RISK: dict[str, dict] = {}
+
+def _restore_wallet_risk(s) -> None:
+    """При создании кошельковой сессии — вернуть её дневные предохранители (если тот же день)."""
+    d = _SAVED_WALLET_RISK.get(s.pubkey)
+    if d and d.get("day") == s.risk._day:
+        s.risk.realized_loss_today = float(d.get("realized_loss_today") or 0.0)
+        s.risk.consec_losses = int(d.get("consec_losses") or 0)
+        s.risk.halted = bool(d.get("halted"))
 
 def _reentry_block(pubkey: str, address: str) -> str | None:
     ex = _RECENT_EXITS.get((pubkey, address))
@@ -2564,7 +2603,8 @@ def _reentry_block(pubkey: str, address: str) -> str | None:
     return None
 
 def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
-            s: UserSession | None = None, count_risk: bool = True) -> dict:
+            s: UserSession | None = None, count_risk: bool = True,
+            pnl_override: float | None = None) -> dict:
     """平仓。fraction<1.0 为分批落袋（TP 阶梯用）：减仓不清仓、不计连亏；
     fraction>=1.0 为全清：连亏/当日亏损照常入账并移除持仓。reason 仅丰富日志（机器人标注离场原因）。"""
     s = s or ST
@@ -2579,7 +2619,9 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
     # self_custody-позиции исполняются в Phantom (см. /api/tx/*) — GMGN-swap оператора не трогаем.
     # Кошельковые сессии тоже не трогают операторский ключ: их бумажные позиции закрываются
     # учётно, реальные (self_custody) — через Phantom.
-    if (s.mode == "LIVE" and not LIVE_TRADING_DISABLED
+    # маршрут продажи — по ПРОИСХОЖДЕНИЮ позиции (p.live), а не по текущему режиму сессии:
+    # бумажную позицию после SHADOW→LIVE нельзя «продавать» за реальные деньги и наоборот
+    if (p.get("live") and HOUSE_LIVE and not LIVE_TRADING_DISABLED
             and s.pubkey == DEFAULT_PUBKEY and not p.get("self_custody")):
         g = s.adapter_for(pchain)
         # 清仓：input=持仓币(非 currency，可用 percent)，output=该链原生币，percent 按比例。
@@ -2589,7 +2631,9 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         except Exception as e:                       # 卖出失败→保留持仓，回清晰错误
             log("SELL_FAIL", p["symbol"], str(e))
             raise HTTPException(502, f"On-chain sell failed: {e}")
-    pnl = p.get("pnl", 0)
+    # pnl_override — реальный результат по фактически полученным SOL (LIVE), а не последняя
+    # «марк»-цена: им же кормим kill-switch/дневной/недельный учёт (аудит 10.10 F7)
+    pnl = pnl_override if pnl_override is not None else p.get("pnl", 0)
     sold_sol = round(p["size_sol"] * frac, 6)        # 本次了结的本金（按比例）
     tag = (f" · {reason}" if reason else "")
     # атрибуция входа + время удержания → в SELL-запись (топливо review-loop: исход × кошельки/KOL)
@@ -2601,7 +2645,7 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         elif pnl < 0:
             s.risk.consec_losses += 1
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * p["size_sol"], 4)
-            if s.pubkey == DEFAULT_PUBKEY:   # котёл = house-бот; чужие (в т.ч. фейковые) сессии его не жгут
+            if s.pubkey == DEFAULT_PUBKEY or p.get("live"):   # house-бот + подтверждённые реальные сделки
                 WEEK_BUDGET.add(abs(pnl) * p["size_sol"])
         else:
             s.risk.consec_losses = 0
@@ -2619,15 +2663,15 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
     else:
         if pnl < 0:                                  # 分批离场若为亏损也按比例入账当日亏损
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * sold_sol, 4)
-            if s.pubkey == DEFAULT_PUBKEY:
-                WEEK_BUDGET.add(abs(pnl) * sold_sol)    # недельный котёл house-бота
+            if s.pubkey == DEFAULT_PUBKEY or p.get("live"):
+                WEEK_BUDGET.add(abs(pnl) * sold_sol)    # недельный котёл: house + реальные сделки
         p["size_sol"] = round(p["size_sol"] - sold_sol, 6)
         log("SELL", p["symbol"], f"{s.mode} partial {pct}% PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac,
                  attrib=attrib, hold_min=hold_min),
             mode=s.mode, pubkey=s.pubkey)
     s.save_positions()
-    if s.pubkey == DEFAULT_PUBKEY:
+    if s.pubkey == DEFAULT_PUBKEY or p.get("live") or s.mode == "LIVE":
         save_risk_state()
     return dict(ok=True, symbol=p["symbol"], fraction=frac, closed=full)
 
@@ -2637,9 +2681,22 @@ def do_unmonitor(address: str, s: UserSession | None = None) -> dict:
     idx = next((i for i, p in enumerate(s.positions) if p["address"] == address), None)
     if idx is None:
         raise HTTPException(404, "Position not found")
-    sym = s.positions[idx]["symbol"]
-    log("UNMONITOR", sym, "Monitoring canceled (not sold)", mode=s.mode)
+    p = s.positions[idx]
+    sym = p["symbol"]
+    if p.get("live"):
+        # реальная позиция «бросается» — убыток по последней цене идёт в предохранители, иначе
+        # раг, снятый с мониторинга руками, не виден ни kill-switch'у, ни котлу (аудит 10.10)
+        pnl = float(p.get("pnl", 0.0) or 0.0)
+        if pnl < 0:
+            s.risk.consec_losses += 1
+            s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * p["size_sol"], 4)
+            WEEK_BUDGET.add(abs(pnl) * p["size_sol"])
+    log("UNMONITOR", sym, "Monitoring canceled (not sold)",
+        dict(address=p.get("address"), pnl=p.get("pnl"), size_sol=p.get("size_sol"), live=bool(p.get("live"))),
+        mode=s.mode, pubkey=s.pubkey)
     s.positions.pop(idx)
+    if p.get("live"):
+        save_risk_state()
     s.save_positions()
     return dict(ok=True, symbol=sym)
 
@@ -2653,6 +2710,7 @@ async def _lifespan(_app: FastAPI):
         threading.Thread(target=_public_broadcast_loop, daemon=True).start()
     # Автозапуск бота после рестарта контейнера: BOT_AUTOSTART=n2|n3 (default-сессия).
     # Вместе с ABC_DATA_DIR (Volume) даёт непрерывный бумажный прогон, переживающий перезапуски.
+    load_risk_state()                     # предохранители переживают деплой — ДО автозапуска бота
     _auto = os.getenv("BOT_AUTOSTART", "").strip().lower()
     if _auto in ("n1", "n2", "n3"):
         ST.bot.cfg["mode"] = _auto
@@ -2669,7 +2727,6 @@ async def _lifespan(_app: FastAPI):
     # Real-time монитор позиций (дефолт ON, ABC_WATCH=0 выключить): батч-цены DexScreener
     # ~2с + WS-пинок Helius (logsSubscribe по минтам) → свежий pnl и мгновенные стопы
     # для бот-сессий. Ручные/self-custody позиции не продаёт — только обновляет цену.
-    load_risk_state()                     # предохранители house-бота переживают деплой
     # прогрев выжимки журнала в фоне: первый посетитель календаря не ждёт минуты после деплоя
     threading.Thread(target=lambda: backtest.collect(LOG_PATH), daemon=True).start()
     threading.Thread(target=_health_loop, daemon=True).start()
@@ -2721,6 +2778,7 @@ class ModeIn(BaseModel):
 # SHADOW = сбор данных: kill-switch/дневной/недельный лимиты не останавливают бумажного бота
 # (они срезали выборку ровно в плохие периоды). В LIVE — всегда. ABC_SHADOW_FUSES=1 вернуть.
 SHADOW_FUSES = os.getenv("ABC_SHADOW_FUSES", "").strip().lower() in ("1", "true", "yes", "on")
+HOUSE_LIVE = os.getenv("ABC_HOUSE_LIVE", "").strip().lower() in ("1", "true", "yes", "on")
 
 def _fuses_on(s) -> bool:
     return s.mode == "LIVE" or SHADOW_FUSES
@@ -3210,6 +3268,8 @@ class BotConfigIn(BaseModel):
     trail_activate_pct: float | None = None
     require_abc_trigger: bool | None = None
     min_priority: int | None = None
+    min_buy_ratio: float | None = None       # фильтр перевеса (анализ 10.10), 0 = выкл
+    max_sm_confluence: int | None = None
 
 # ── Этап 6: N1 — бот не исполняет, а кладёт предложение в очередь; человек кликает.
 def _propose(sess: UserSession, side: str, chain: str, address: str,
@@ -3223,48 +3283,99 @@ def _propose(sess: UserSession, side: str, chain: str, address: str,
     log("BOT", address[:8], f"N1 предложение: {side} {size_sol or fraction}", mode=sess.mode)
 
 def _n3_execute(sess: UserSession, side: str, chain: str, address: str,
-                size_sol: float = 0.0, fraction: float = 1.0, reason: str | None = None) -> dict:
+                size_sol: float = 0.0, fraction: float = 1.0, reason: str | None = None,
+                lock=None) -> dict:
     """N3-автопилот: реальное исполнение session-кошельком (только sol). Заперто
-    ENABLE_LIVE_TRADING: пока замок закрыт — обычный бумажный учёт (обкатка без денег)."""
-    # Аудит 28.09: раньше реальная tx шла даже в SHADOW (проверялся только env-замок).
+    ENABLE_LIVE_TRADING + mode=LIVE: иначе обычный бумажный учёт (обкатка без денег).
+    lock — замок сессии, если вызывающий его НЕ держит: сеть/подтверждение идут без замка.
+
+    Аудит 10.10 (LIVE-блокеры B4/B5/B9): позиция пишется ТОЛЬКО после подтверждённой tx и по
+    ФАКТИЧЕСКОМУ исполнению (getTransaction: потрачено SOL / получено токенов); продажа — от
+    живого баланса, закрытие/частичное — только при подтверждённой tx, PnL — из реально
+    полученных SOL; вход блокируется при живой freeze/mint authority и опасном Token-2022."""
+    ctx = lock if lock is not None else contextlib.nullcontext()
     if LIVE_TRADING_DISABLED or chain != "sol" or sess.mode != "LIVE":
         if side == "buy":
-            return do_buy(chain, address, size_sol, sess)
-        return do_sell(address, fraction, reason, sess)
+            return do_buy(chain, address, size_sol, sess, lock=lock, auto=True)
+        with ctx:
+            return do_sell(address, fraction, reason, sess)
     kp = sessionwallet.keypair_for(sess.session_key_path())
     spk = str(kp.pubkey())
     if side == "buy":
         size_sol = min(size_sol, CFG["auto_max_per_trade_sol"])   # автопилот: самый строгий потолок
-        allow, rnote = sess.risk.gate(size_sol, len(sess.positions), sess.exposure())
+        with ctx:
+            allow, rnote = sess.risk.gate(size_sol, *sess.live_load())
         if not allow:                                # kill-switch/котёл/экспозиция — как у do_buy
             log("BUY_BLOCK", address[:8], rnote, mode=sess.mode, pubkey=sess.pubkey)
             raise HTTPException(409, rnote)
+        risk = execution.mint_risk(address)
+        if risk:
+            log("BUY_BLOCK", address[:8], f"live mint check: {risk}", mode=sess.mode, pubkey=sess.pubkey)
+            raise HTTPException(409, f"live mint check: {risk}")
         built = execution.build_buy(spk, address, size_sol)
         sig = sessionwallet.sign_and_send(built["tx"], kp)
+        fill = execution.confirm_fill(sig, spk, address)
+        if not fill.get("ok") or fill.get("token_delta_raw", 0) <= 0:
+            log("BUY_FAIL", address[:8], f"N3 tx {sig[:16]}… not filled: {fill.get('err')}",
+                mode=sess.mode, pubkey=sess.pubkey)
+            raise HTTPException(502, f"N3 buy not filled: {fill.get('err') or 'no tokens received'}")
+        spent = -float(fill["sol_delta"])            # вкл. комиссию сети, приоритет и ренту ATA
+        tokens = fill["token_delta_raw"] / (10 ** int(fill.get("decimals") or 6))
+        rate = pumpcurve.sol_usd()
+        entry_price = (spent / tokens) * rate if tokens > 0 and rate > 0 else 0.0
         g = MK.adapter_for("sol")
         try:
-            info = g.token_info(address); price = g.token_price(address)
-            symbol = sanitize(info.get("symbol", ""))
+            symbol = sanitize(g.token_info(address).get("symbol", "")) or address[:6]
         except Exception:
-            symbol, price = address[:6], 0.0
+            symbol = address[:6]
+        try:                                         # реальный security-снапшот (не «чистая» заглушка)
+            sec = g.token_security(address)
+        except Exception:
+            sec = {}
+        entry = dict(honeypot=sec.get("honeypot", False),
+                     renounced_mint=sec.get("renounced_mint", True),
+                     renounced_freeze=sec.get("renounced_freeze", True),
+                     burn_ratio=sec.get("burn_ratio", 0.0), top10=sec.get("top10", 0.0))
         attrib = _attrib_for(address)
-        _enrich_x_signal(attrib, address, sess, price)      # соц-сигнал X на входе (opt-in)
-        sess.positions.append(dict(
-            symbol=symbol, address=address, size_sol=round(size_sol, 4), pnl=0.0,
-            cycles=0, entry=dict(honeypot=False, renounced_mint=True,
-                                 renounced_freeze=True, burn_ratio=0.0, top10=0.0),
-            chain="sol", entry_price=price, cur_price=price,
-            token_amount=built.get("out_amount", 0), self_custody=True, session=True,
-            wallet_tx=sig, opened_ts=time.time(), entry_attrib=attrib))
-        sess.save_positions()
-        log("BUY", symbol, f"N3 session-кошелёк {size_sol} SOL · tx {sig[:16]}…",
-            dict(size_sol=size_sol, chain="sol", session=True), mode="LIVE")
-        return dict(ok=True, status=f"N3 отправлено · {sig[:16]}…", filled=True, symbol=symbol)
+        _enrich_x_signal(attrib, address, sess, entry_price)
+        with ctx:
+            sess.positions.append(dict(
+                symbol=symbol, address=address, size_sol=round(spent, 6), pnl=0.0,
+                cycles=0, entry=entry, chain="sol", entry_price=entry_price,
+                cur_price=entry_price, token_amount=int(fill["token_delta_raw"]),
+                self_custody=True, session=True, live=True, auto=True,
+                entry_src="fill", entry_src_fill=True,
+                wallet_tx=sig, opened_ts=time.time(), entry_attrib=attrib))
+            sess.save_positions()
+        log("BUY", symbol, f"N3 LIVE filled {spent:.6f} SOL → {tokens:g} · tx {sig[:16]}…",
+            dict(size_sol=round(spent, 6), chain="sol", session=True, live=True, tx=sig,
+                 attrib=attrib), mode="LIVE", pubkey=sess.pubkey)
+        return dict(ok=True, status=f"N3 filled · {sig[:16]}…", filled=True, symbol=symbol)
     p = next((x for x in sess.positions if x["address"] == address), None)
-    built = execution.build_sell(spk, address, fraction,
-                                 token_amount=int((p or {}).get("token_amount", 0)))
+    if p is None:
+        raise HTTPException(404, "Position not found")
+    if not p.get("live"):                            # бумажная позиция при LIVE-режиме — без сети
+        with ctx:
+            return do_sell(address, fraction, reason, sess)
+    built = execution.build_sell(spk, address, fraction, token_amount=int(p.get("token_amount", 0)))
     sig = sessionwallet.sign_and_send(built["tx"], kp)
-    return do_sell(address, fraction, f"N3 · tx {sig[:16]}… · {reason or ''}", sess)
+    fill = execution.confirm_fill(sig, spk, address)
+    if not fill.get("ok"):
+        log("SELL_FAIL", p.get("symbol", "?"), f"N3 tx {sig[:16]}… not filled: {fill.get('err')}",
+            mode=sess.mode, pubkey=sess.pubkey)
+        raise HTTPException(502, f"N3 sell not filled: {fill.get('err')}")   # позиция остаётся
+    sold_raw = -int(fill.get("token_delta_raw") or 0)
+    received = float(fill["sol_delta"])
+    held = int(p.get("token_amount", 0) or 0) or sold_raw
+    frac = 1.0 if sold_raw >= held * 0.999 else max(0.0, min(1.0, sold_raw / held)) if held else 1.0
+    cost = float(p["size_sol"]) * frac
+    real_pnl = round((received / cost - 1.0), 4) if cost > 0 else 0.0
+    with ctx:
+        if p not in sess.positions:
+            return dict(ok=True, closed=True, note="already closed")
+        p["token_amount"] = max(0, held - sold_raw)
+        return do_sell(address, frac, f"N3 LIVE · tx {sig[:16]}… · received {received:.6f} SOL · {reason or ''}",
+                       sess, pnl_override=real_pnl)
 
 # Авто-Verify перед входом БОТА (ABC_BOT_VERIFY=0 выключить): только бесплатные
 # RPC-детекторы — не жгут квоты GMGN/getxapi и не зависят от их банов. Ручных покупок
@@ -3398,9 +3509,8 @@ def _bot_buy_fn(sess: UserSession):
             with sess.lock:
                 _propose(sess, "buy", chain, address, size_sol=size_sol, reason="вход по стратегии")
             return dict(ok=True, proposed=True)
-        if mode == "n3":
-            with sess.lock:
-                return _n3_execute(sess, "buy", chain, address, size_sol=size_sol)
+        if mode == "n3":            # сеть/подтверждение — без замка (его ждут стопы watcher'а)
+            return _n3_execute(sess, "buy", chain, address, size_sol=size_sol, lock=sess.lock)
         return do_buy(chain, address, size_sol, sess, lock=sess.lock, auto=True)
     return fn
 
@@ -3555,62 +3665,94 @@ def api_tx_build(r: TxBuildIn, x_wallet: str | None = WalletHeader,
 @app.post("/api/tx/confirm")
 def api_tx_confirm(c: TxConfirmIn, x_wallet: str | None = WalletHeader,
                    x_auth: str | None = AuthHeader):
-    """Записать исполненную в Phantom сделку в позиции/риск/журнал (деньги уже ушли on-chain,
-    поэтому риск-гейт здесь не блокирует — он отработал на этапе build/UI)."""
+    """Записать исполненную в Phantom сделку в позиции/риск/журнал.
+    Аудит 10.10 (B4): клиентским числам НЕ доверяем — сервер сам ждёт подтверждения tx в сети,
+    проверяет, что её подписал владелец сессии и что она реально двинула этот mint, и берёт
+    ФАКТИЧЕСКИЕ SOL/токены из getTransaction. Без подтверждения — ничего не пишем."""
     _block_if_public()
     sess = get_session(x_wallet)
     if sess.pubkey == DEFAULT_PUBKEY:
         raise HTTPException(400, "подключи кошелёк")
     require_auth(sess, x_auth)
-    # клиентские числа не доверяем: размер зажат ручным потолком (tx/build его и так не пропустит)
-    c.size_sol = max(0.0, min(float(c.size_sol or 0.0), CFG["max_per_trade_sol"]))
-    c.fraction = max(0.0, min(float(c.fraction or 0.0), 1.0))
-    tag = f"tx {c.signature[:16]}…" if c.signature else "tx ?"
+    if sess.mode != "LIVE":
+        raise HTTPException(400, "tx/confirm records real trades only (switch to LIVE)")
+    if not c.signature:
+        raise HTTPException(400, "signature required")
+    fill = execution.confirm_fill(c.signature, sess.pubkey, c.address)   # сеть — без замка
+    if not fill.get("ok"):
+        raise HTTPException(409, f"transaction not confirmed: {fill.get('err')}")
+    if fill.get("signer") != sess.pubkey:
+        raise HTTPException(403, "transaction is not signed by this wallet")
+    delta = int(fill.get("token_delta_raw") or 0)
+    if (c.side == "buy" and delta <= 0) or (c.side != "buy" and delta >= 0):
+        raise HTTPException(409, "transaction did not move this token in the expected direction")
+    tag = f"tx {c.signature[:16]}…"
+    dec = int(fill.get("decimals") or 6)
     with sess.lock:
+        if any(x.get("wallet_tx") == c.signature or c.signature in str(x.get("txs", ""))
+               for x in sess.positions):
+            return dict(ok=True, duplicate=True)                  # повторный confirm той же tx
         if c.side == "buy":
+            spent = -float(fill["sol_delta"])
+            tokens = delta / (10 ** dec)
+            rate = pumpcurve.sol_usd()
+            price = (spent / tokens) * rate if tokens > 0 and rate > 0 else 0.0
             g = MK.adapter_for("sol")
             try:
-                info = g.token_info(c.address); sec = g.token_security(c.address)
-                symbol = sanitize(info.get("symbol", "")); price = g.token_price(c.address)
+                symbol = sanitize(g.token_info(c.address).get("symbol", "")) or c.address[:6]
             except Exception:
-                symbol, sec, price = sanitize(c.symbol or c.address[:6]), {}, 0.0
+                symbol = sanitize(c.symbol or c.address[:6])
+            try:
+                sec = g.token_security(c.address)
+            except Exception:
+                sec = {}
             entry = dict(honeypot=sec.get("honeypot", False),
                          renounced_mint=sec.get("renounced_mint", True),
                          renounced_freeze=sec.get("renounced_freeze", True),
                          burn_ratio=sec.get("burn_ratio", 0.0), top10=sec.get("top10", 0.0))
-            # докупка тем же кошельком → усреднение в одну self-custody позицию
             existing = next((x for x in sess.positions
                              if x["address"] == c.address and x.get("self_custody")), None)
-            if existing is not None:
+            if existing is not None:                              # докупка → средняя по факту
                 old_sz = float(existing.get("size_sol", 0.0) or 0.0)
-                new_sz = round(old_sz + c.size_sol, 4)
-                oep = float(existing.get("entry_price", 0.0) or 0.0)
-                if oep > 0 and price > 0 and new_sz > 0:
-                    existing["entry_price"] = round((oep * old_sz + price * c.size_sol) / new_sz, 12)
-                elif price > 0:
-                    existing["entry_price"] = price
-                existing["size_sol"] = new_sz
-                existing["token_amount"] = int(existing.get("token_amount", 0)) + int(c.token_amount)
+                old_tok = int(existing.get("token_amount", 0) or 0)
+                existing["size_sol"] = round(old_sz + spent, 6)
+                existing["token_amount"] = old_tok + delta
+                tot_tok = existing["token_amount"] / (10 ** dec)
+                if tot_tok > 0 and rate > 0:
+                    existing["entry_price"] = existing["size_sol"] / tot_tok * rate
                 existing["wallet_tx"] = c.signature
                 existing.pop("peak_pnl", None)
+                existing["tp_taken"] = []
                 sess.save_positions()
-                log("BUY", symbol, f"PHANTOM averaged +{c.size_sol} → {new_sz} · {tag}",
-                    dict(size_sol=c.size_sol, chain="sol", self_custody=True, averaged=True),
-                    mode="LIVE")
+                log("BUY", symbol, f"PHANTOM averaged +{spent:.6f} SOL · {tag}",
+                    dict(size_sol=round(spent, 6), chain="sol", self_custody=True, live=True,
+                         averaged=True, tx=c.signature), mode="LIVE", pubkey=sess.pubkey)
                 return dict(ok=True, symbol=symbol, averaged=True)
             attrib = _attrib_for(c.address)
-            _enrich_x_signal(attrib, c.address, sess, price)   # соц-сигнал X на входе (opt-in)
+            _enrich_x_signal(attrib, c.address, sess, price)
             sess.positions.append(dict(
-                symbol=symbol, address=c.address, size_sol=round(c.size_sol, 4),
+                symbol=symbol, address=c.address, size_sol=round(spent, 6),
                 pnl=0.0, cycles=0, entry=entry, chain="sol", entry_price=price,
-                cur_price=price, token_amount=int(c.token_amount), self_custody=True,
+                cur_price=price, token_amount=delta, self_custody=True, live=True,
+                entry_src="fill", entry_src_fill=True,
                 wallet_tx=c.signature, opened_ts=time.time(), entry_attrib=attrib))
             sess.save_positions()
-            log("BUY", symbol, f"PHANTOM исполнено {c.size_sol} SOL · {tag}",
-                dict(size_sol=c.size_sol, chain="sol", self_custody=True), mode="LIVE")
+            log("BUY", symbol, f"PHANTOM filled {spent:.6f} SOL · {tag}",
+                dict(size_sol=round(spent, 6), chain="sol", self_custody=True, live=True,
+                     tx=c.signature, attrib=attrib), mode="LIVE", pubkey=sess.pubkey)
             return dict(ok=True, symbol=symbol)
-        # sell: учёт как при бумажном do_sell, но с реальным хэшем в журнале
-        return do_sell(c.address, fraction=c.fraction, reason=f"PHANTOM {tag}", s=sess)
+        p = next((x for x in sess.positions if x["address"] == c.address), None)
+        if p is None:
+            raise HTTPException(404, "Position not found")
+        sold = -delta
+        held = int(p.get("token_amount", 0) or 0) or sold
+        frac = 1.0 if sold >= held * 0.999 else max(0.0, min(1.0, sold / held))
+        cost = float(p["size_sol"]) * frac
+        received = float(fill["sol_delta"])
+        real_pnl = round((received / cost - 1.0), 4) if cost > 0 else 0.0
+        p["token_amount"] = max(0, held - sold)
+        return do_sell(c.address, fraction=frac, reason=f"PHANTOM {tag} · received {received:.6f} SOL",
+                       s=sess, pnl_override=real_pnl)
 
 # ── Этап 7: session-кошелёк для N3 (ключ на сервере, риск = его баланс) ──
 @app.get("/api/session-wallet")
