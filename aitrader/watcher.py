@@ -239,6 +239,7 @@ class PositionWatcher:
 
         async def run():
             import websockets
+            backoff = 0.0
             while not self._stop.is_set():
                 mints = self._mints()[:_MAX_WS_SUBS]
                 if not mints:
@@ -254,6 +255,7 @@ class PositionWatcher:
                                 "jsonrpc": "2.0", "id": i + 1, "method": "logsSubscribe",
                                 "params": [{"mentions": [m]}, {"commitment": "confirmed"}]}))
                         self.stats["ws_state"] = f"subscribed:{len(mints)}"
+                        backoff = 0.0                     # соединение живое — бэкофф сначала
                         while not self._stop.is_set():
                             try:
                                 msg = await asyncio.wait_for(ws.recv(), timeout=10.0)
@@ -270,7 +272,10 @@ class PositionWatcher:
                     # причина в /api/status (ключ из URL вырезаем) — раньше глоталась молча
                     self.stats["ws_error"] = re.sub(r"(api[-_]?key=)[^&\s\"']+", r"\1***",
                                                     f"{type(e).__name__}: {e}")[:200]
-                    await asyncio.sleep(3.0)              # обрыв/бан — тихий реконнект
+                    # экспоненциальный бэкофф: фиксированные 3с давали 147k реконнектов и
+                    # 429 от Helius на весь ключ (прод 10.10); 3→6→…→300с, сброс после успеха
+                    backoff = min(300.0, backoff * 2) if backoff else 3.0
+                    await asyncio.sleep(backoff)
 
         try:
             asyncio.run(run())
