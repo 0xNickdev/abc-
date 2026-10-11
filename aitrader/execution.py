@@ -27,7 +27,7 @@ TIMEOUT = 15.0
 BUY_SLIPPAGE_BPS = int(os.getenv("ABC_BUY_SLIPPAGE_BPS", "500") or 500)      # 5% на вход
 SELL_SLIPPAGE_BPS = int(os.getenv("ABC_SELL_SLIPPAGE_BPS", "1500") or 1500)  # 15% на выход
 MAX_PRIORITY_LAMPORTS = int(os.getenv("ABC_MAX_PRIORITY_LAMPORTS", "200000") or 200000)  # ≤0.0002 SOL
-TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EHFQwjdHWDvcKFMGSJAuS"
+TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"   # аудит 11.10: была испорченная строка — проверка Token-2022 не срабатывала никогда
 # расширения Token-2022, при которых продать можно не всё/не всегда — вход блокируем
 BAD_T22_EXT = {"transferFeeConfig", "permanentDelegate", "transferHook", "nonTransferable",
                "defaultAccountState", "pausableConfig"}
@@ -177,3 +177,60 @@ def mint_risk(mint: str) -> str | None:
         if bad:
             return "token-2022 extension: " + ",".join(sorted(bad))
     return None
+
+
+# ── Возврат ренты (11.10): пустые токен-аккаунты держат ~0.00204 SOL каждый. Закрываем их
+#    ОТДЕЛЬНОЙ транзакцией после подтверждённой продажи — никогда внутри самой продажи: пылинка
+#    на счёте уронила бы всю tx вместе с выходом из позиции. Owner подписывает (Phantom / N3).
+TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+CLOSE_MAX_PER_TX = 20          # с запасом по размеру транзакции (1232 байта)
+
+
+def empty_token_accounts(owner: str, mints: list[str] | None = None) -> list[dict]:
+    """Пустые (0 токенов) аккаунты владельца в Token и Token-2022: [{pubkey, mint, program, lamports}]."""
+    want = set(mints or [])
+    out = []
+    for prog in (TOKEN_PROGRAM, TOKEN_2022):
+        res = _rpc("getTokenAccountsByOwner", [owner, {"programId": prog}, {"encoding": "jsonParsed"}]) or {}
+        for acc in res.get("value", []):
+            try:
+                info = acc["account"]["data"]["parsed"]["info"]
+                if int(info["tokenAmount"]["amount"]) != 0 or info.get("isNative"):
+                    continue
+                if info.get("state") == "frozen" or info.get("closeAuthority") not in (None, owner):
+                    continue                    # такой аккаунт владелец закрыть не может
+                if want and info.get("mint") not in want:
+                    continue
+                out.append(dict(pubkey=acc["pubkey"], mint=info.get("mint"), program=prog,
+                                lamports=int(acc["account"].get("lamports") or 0)))
+            except (KeyError, TypeError, ValueError):
+                continue
+    return out
+
+
+def build_close_empty(owner: str, mints: list[str] | None = None) -> dict:
+    """Неподписанная tx закрытия пустых токен-аккаунтов (рента → владельцу).
+    {tx(b64)|None, count, reclaim_sol, more}. more — сколько осталось на следующий заход."""
+    import base64
+    from solders.hash import Hash
+    from solders.instruction import AccountMeta, Instruction
+    from solders.message import MessageV0
+    from solders.pubkey import Pubkey
+    from solders.signature import Signature
+    from solders.transaction import VersionedTransaction
+
+    accs = empty_token_accounts(owner, mints)
+    batch, more = accs[:CLOSE_MAX_PER_TX], max(0, len(accs) - CLOSE_MAX_PER_TX)
+    if not batch:
+        return dict(tx=None, count=0, reclaim_sol=0.0, more=0)
+    o = Pubkey.from_string(owner)
+    ixs = [Instruction(Pubkey.from_string(a["program"]), bytes([9]),       # 9 = CloseAccount
+                       [AccountMeta(Pubkey.from_string(a["pubkey"]), False, True),
+                        AccountMeta(o, False, True),                         # куда вернуть ренту
+                        AccountMeta(o, True, False)])                        # владелец подписывает
+           for a in batch]
+    bh = (_rpc("getLatestBlockhash", [{"commitment": "finalized"}]) or {})["value"]["blockhash"]
+    msg = MessageV0.try_compile(o, ixs, [], Hash.from_string(bh))
+    tx = VersionedTransaction.populate(msg, [Signature.default()])
+    return dict(tx=base64.b64encode(bytes(tx)).decode(), count=len(batch),
+                reclaim_sol=round(sum(a["lamports"] for a in batch) / 1e9, 6), more=more)
