@@ -7,3 +7,4 @@ solders>=0.21
 websockets>=12
 grpcio>=1.84.0
 protobuf>=7.35.1
+pillow>=10.1

@@ -33,6 +33,9 @@ def bot(tmp_path, monkeypatch):
     a.bot_user = "argus_abc_bot"
     sent = []
     monkeypatch.setattr(a, "send", lambda chat, text, preview=False: sent.append((chat, text)) or True)
+    monkeypatch.setattr(a, "send_animation", lambda chat, anim, caption: sent.append((chat, caption)) or "FILEID")
+    import cards
+    monkeypatch.setattr(cards, "achievement_gif", lambda **k: b"GIF89a")
     monkeypatch.setenv("ARGUS_CHANNEL", "@argus_calls")
     a.sent_log = sent
     return a
@@ -169,3 +172,34 @@ def test_disabled_without_token(monkeypatch, tmp_path):
 def test_formatters():
     assert ag.usd(62_000) == "$62K" and ag.usd(500_000) == "$500K" and ag.usd(1_250_000) == "$1.2M"
     assert ag.dur(8040) == "2h 14m" and ag.xfmt(8.4) == "x8.4" and ag.xfmt(12) == "x12"
+
+
+def test_card_rendered_once_then_file_id(tmp_path, monkeypatch):
+    import cards
+    a = ag.Argus(calls.CallScanner(tmp_path), tmp_path)
+    monkeypatch.setenv("ARGUS_CHANNEL", "@ch")
+    a.st["subs"] = [1, 2]
+    renders, sent = [], []
+    monkeypatch.setattr(cards, "achievement_gif", lambda **k: renders.append(k) or b"GIF89a")
+    monkeypatch.setattr(a, "send_animation", lambda chat, anim, cap: sent.append((chat, anim)) or "FID")
+    monkeypatch.setattr(a, "send", lambda *x, **k: pytest.fail("text fallback not expected"))
+    a.broadcast(dict(text="hi", card=dict(level=5)))
+    assert len(renders) == 1 and sent == [("@ch", b"GIF89a"), (1, "FID"), (2, "FID")]
+
+
+def test_card_failure_falls_back_to_text(tmp_path, monkeypatch):
+    import cards
+    a = ag.Argus(calls.CallScanner(tmp_path), tmp_path)
+    monkeypatch.setenv("ARGUS_CHANNEL", "@ch")
+    texts = []
+    monkeypatch.setattr(cards, "achievement_gif", lambda **k: (_ for _ in ()).throw(OSError("no font")))
+    monkeypatch.setattr(a, "send", lambda chat, text, preview=False: texts.append(chat) or True)
+    a.broadcast(dict(text="hi", card=dict(level=5)))
+    assert texts == ["@ch"]
+
+
+def test_real_card_renders():
+    import cards
+    g = cards.achievement_gif(level=5, mult=8.1, symbol="DOG", caller="@x", mc0=62000, mc_peak=500000,
+                              took="2h 14m", seed="abc")
+    assert g[:6] == b"GIF89a" and 50_000 < len(g) < 2_000_000

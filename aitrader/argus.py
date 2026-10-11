@@ -182,10 +182,53 @@ class Argus:
         self.stats["sent"] += 1
         return True
 
-    def broadcast(self, text: str):
+    def send_animation(self, chat, anim, caption: str):
+        """anim: bytes GIF (первая отправка) или file_id (повтор). → file_id или None."""
+        gap = SEND_GAP_S - (time.time() - self._last_send)
+        if gap > 0:
+            time.sleep(gap)
+        self._last_send = time.time()
+        data = dict(chat_id=str(chat), caption=caption[:1024], parse_mode="HTML")
+        try:
+            url = f"https://api.telegram.org/bot{token()}/sendAnimation"
+            if isinstance(anim, bytes):
+                r = httpx.post(url, data=data, files=dict(animation=("argus.gif", anim, "image/gif")), timeout=60.0)
+            else:
+                r = httpx.post(url, data=dict(data, animation=anim), timeout=30.0)
+            j = r.json()
+        except Exception as e:
+            self.stats["send_errors"] += 1
+            self._err(e)
+            return None
+        if not j.get("ok"):
+            self.stats["send_errors"] += 1
+            self._err(RuntimeError(str(j.get("description"))[:160]))
+            return None
+        self.stats["sent"] += 1
+        res = j.get("result") or {}
+        return ((res.get("animation") or res.get("document") or {}).get("file_id")) or True
+
+    def broadcast(self, item):
+        """item: текст или {text, card?}. Карточка рендерится один раз, дальше — file_id."""
+        if isinstance(item, str):
+            item = dict(text=item)
         targets = list(dict.fromkeys(([channel()] if channel() else []) + list(self.st["subs"])))
+        anim = None
+        if item.get("card") and targets and len(item["text"]) <= 1024:
+            try:
+                import cards
+                anim = cards.achievement_gif(**item["card"])
+                self.stats["cards"] = self.stats.get("cards", 0) + 1
+            except Exception as e:
+                self._err(e)
         for t in targets:
-            self.send(t, text)
+            if anim is not None:
+                fid = self.send_animation(t, anim, item["text"])
+                if fid:
+                    if isinstance(fid, str):
+                        anim = fid
+                    continue
+            self.send(t, item["text"])                     # без карточки / карточка не ушла
 
     # ── живые цены и пики ──
     def _active(self) -> list[dict]:
@@ -258,7 +301,11 @@ class Argus:
             if not self.st["primed"]:
                 continue                                    # первый проход: старое не постим
             r = rating.get((c["source"], c["author"].lower())) or {}
-            msgs.append(self.fmt_achievement(c, t, lvl, mult, r))
+            mc0 = c.get("mcap0") or 0
+            card = dict(level=lvl, mult=mult, symbol=str(t.get("symbol") or c["ca"][:6]),
+                        caller=("@" if c["source"] == "x" else "") + c["author"], mc0=mc0,
+                        mc_peak=mc0 * mult, took=dur((t.get("peak_ts") or time.time()) - c["ts"]), seed=c["ca"])
+            msgs.append(dict(text=self.fmt_achievement(c, t, lvl, mult, r), card=card))
             self.stats["achievements"] += 1
         return msgs
 
@@ -312,7 +359,7 @@ class Argus:
                 self.st["signals"][ca] = time.time()
             if not self.st["primed"] or time.time() - good[-1][0]["ts"] > 1800:
                 continue                                    # старое совпадение — не сигнал
-            msgs.append(self.fmt_signal(ca, good))
+            msgs.append(dict(text=self.fmt_signal(ca, good)))
             self.stats["signals"] += 1
         return msgs
 
@@ -350,6 +397,8 @@ class Argus:
             return self.send(chat, self.top_text(arg))
         if cmd == "/hot":
             return self.send(chat, self.hot_text(arg))
+        if cmd == "/card":
+            return self.demo_card(chat)
         if cmd == "/caller":
             return self.send(chat, self.caller_report(arg.lstrip("@")))
         if cmd == "/alerts":
@@ -369,12 +418,39 @@ class Argus:
         if msg.get("chat", {}).get("type") == "private":
             self.send(chat, self.help_text())
 
+    def demo_card(self, chat):
+        """Карточка по самому сильному реальному коллу за 24ч — превью того, что уходит в канал."""
+        rows = [r for r in self.calls.feed("all", 24, 100) if (r.get("peak_x") or 0) >= 1.5]
+        if not rows:
+            return self.send(chat, "No call has reached x1.5 in the last 24h yet.")
+        r = max(rows, key=lambda r: r["peak_x"])
+        c0 = r["callers"][0]
+        c = dict(ca=r["ca"], source=c0["source"], author=c0["name"], ts=c0["ts"], url=c0.get("url"),
+                 price0=r["price0"], mcap0=r["mcap0"])
+        with self.calls.lock:
+            t = dict(self.calls.tokens.get(r["ca"]) or {})
+        rating = {(x["source"], x["name"].lower()): x for x in self.calls.callers()}
+        mult = r["peak_x"]
+        lvl = max([lv for lv in LEVELS if mult >= lv], default=1)
+        mc0 = r["mcap0"] or 0
+        card = dict(level=max(lvl, 2), mult=mult, symbol=str(r["symbol"]), caller=("@" if c["source"] == "x" else "") + c["author"],
+                    mc0=mc0, mc_peak=mc0 * mult, took=dur((t.get("peak_ts") or time.time()) - c["ts"]), seed=r["ca"])
+        text = self.fmt_achievement(c, t, lvl, mult, rating.get((c["source"], c["author"].lower())) or {})
+        try:
+            import cards
+            gif = cards.achievement_gif(**card)
+        except Exception as e:
+            self._err(e)
+            return self.send(chat, text)
+        return self.send_animation(chat, gif, text) or self.send(chat, text)
+
     def help_text(self) -> str:
         return ("<b>Argus</b> — sees every call and every trade.\n\n"
                 "Paste a token contract — on-chain flow, who called it, at what mcap, and how it went.\n\n"
                 "/top — best callers by real results (24h, 7d)\n"
                 "/hot — biggest calls of the last hours\n"
                 "/caller name — a caller's track record\n"
+                "/card — achievement card of the strongest call today\n"
                 "/alerts on|off — achievements and multi-caller signals in this chat")
 
     def top_text(self, arg: str = "") -> str:
@@ -523,6 +599,7 @@ class Argus:
                 dict(command="top", description="Best callers by real results"),
                 dict(command="hot", description="Biggest calls of the last hours"),
                 dict(command="caller", description="A caller's track record"),
+                dict(command="card", description="Achievement card of the strongest call today"),
                 dict(command="alerts", description="Achievements and signals here: on/off")])
         except Exception as e:
             self._err(e)
