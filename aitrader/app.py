@@ -4129,12 +4129,26 @@ def api_token_farm(address: str, max_wallets: int = 30):
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
-@app.get("/")
-def index():
-    f = STATIC_DIR / "index.html"
+def _page(name: str):
+    f = STATIC_DIR / name
     if f.exists():
         return FileResponse(str(f))
-    return JSONResponse(dict(msg="Save the dashboard as static/index.html and refresh"), status_code=200)
+    return JSONResponse(dict(msg=f"static/{name} is missing"), status_code=404)
+
+@app.get("/")
+def index():
+    """Публичная витрина (лендинг беты)."""
+    return _page("landing.html")
+
+@app.get("/app")
+def app_page():
+    """Бета-приложение: свой бот + Phantom (Bot · Signals · Results)."""
+    return _page("app.html")
+
+@app.get("/legacy")
+def legacy_page():
+    """Старый терминал — операторская панель/отладка."""
+    return _page("index.html")
 
 if __name__ == "__main__":
     import uvicorn
