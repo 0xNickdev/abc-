@@ -246,6 +246,8 @@ def _sees_internals(sess, x_auth: str | None) -> bool:
     Локальный запуск без настроенного админа (127.0.0.1) = оператор, как в _block_if_not_owner."""
     if _is_admin(sess, x_auth):
         return True
+    if sess.pubkey == DEFAULT_PUBKEY and x_auth and _house_admin(x_auth):   # вкладка Operator в /app
+        return True
     return sess.pubkey == DEFAULT_PUBKEY and not ADMIN_WALLETS and not PUBLIC_DEPLOY
 
 def _require_internals(sess, x_auth: str | None):
@@ -3599,6 +3601,8 @@ def _block_if_not_owner(sess: UserSession, x_auth: str | None = None):
     pubkey-режим (ABC_ADMIN=<pubkey>): на публичном деплое «сессия без кошелька» —
     это любой прохожий с URL, а не 127.0.0.1."""
     if _is_admin(sess, x_auth):
+        return
+    if sess.pubkey == DEFAULT_PUBKEY and x_auth and _house_admin(x_auth):   # Operator: house-бот, не личный
         return
     if sess.pubkey == DEFAULT_PUBKEY and not ADMIN_WALLETS and not PUBLIC_DEPLOY:
         return

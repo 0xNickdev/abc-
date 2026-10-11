@@ -242,6 +242,21 @@ main,footer,.alert{position:relative;z-index:1}
 .br .r{text-align:right}
 .callsgrid{display:grid;grid-template-columns:minmax(0,1fr);gap:34px}
 
+/* ── operator ── */
+.opgrid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:14px}
+.ophead{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;padding:24px}
+.funnel .fr{display:grid;grid-template-columns:minmax(140px,1fr) 3fr 54px;gap:12px;align-items:center;padding:8px 20px;font-size:14px}
+.funnel .fr i{display:block;height:8px;border-radius:4px;background:#d6d6d6}
+.funnel .fr.bad i{background:var(--down);opacity:.7}.funnel .fr.ok i{background:var(--up)}
+.cand{display:grid;grid-template-columns:minmax(120px,1fr) 70px 70px minmax(200px,3fr);gap:14px;padding:12px 20px;border-top:1px solid var(--line);font-size:13.5px;align-items:center}
+.cand.head{color:var(--strip);font-size:12.5px;border-top:0}
+.prop{padding:16px 20px;border-top:1px solid var(--line);display:flex;justify-content:space-between;gap:14px;align-items:center;flex-wrap:wrap}
+.prop:first-child{border-top:0}
+.prop code{font-size:12.5px;color:#d6d6d6;background:rgba(255,255,255,.06);padding:2px 8px;border-radius:6px}
+.prop p{margin:6px 0 0;color:var(--muted);font-size:13.5px}
+textarea.src{width:100%;min-height:120px;border-radius:12px;border:1px solid var(--line2);background:rgba(255,255,255,.03);color:#fff;font:13px ui-monospace,Menlo,monospace;padding:12px}
+@media (max-width:860px){.opgrid{grid-template-columns:1fr 1fr}.cand{grid-template-columns:1fr 60px}.cand .c-why,.cand .c-sc{display:none}}
+
 /* ── token name + CA ── */
 .tname{color:inherit;text-decoration:none;border-bottom:1px solid transparent;transition:border-color .15s}
 .tname:hover{border-bottom-color:rgba(255,255,255,.5)}
@@ -379,6 +394,7 @@ details.adv[open] summary svg{transform:rotate(90deg)}
     <button class="tab" role="tab" data-view="calls" aria-selected="false">Calls</button>
     <button class="tab" role="tab" data-view="strategy" aria-selected="false">Strategy</button>
     <button class="tab" role="tab" data-view="results" aria-selected="false">Results</button>
+    <button class="tab optab" role="tab" data-view="operator" aria-selected="false" hidden>Operator</button>
   </nav>
   <div class="right">
     <div class="seg" role="group" aria-label="Trading mode" title="Paper = simulated trades. Live = real SOL from your wallet.">
@@ -499,11 +515,6 @@ details.adv[open] summary svg{transform:rotate(90deg)}
     <div class="sec">
       <div class="sechead"><h2>3 · How it exits</h2><small>Applied to every position, checked every few seconds</small></div>
       <div class="panel rules" id="rules"></div>
-      <div class="panel lock" id="houseSec" hidden style="margin-top:14px">
-        <span>House bot stop loss (operator) · applies on the next price check</span>
-        <span style="display:flex;gap:8px;align-items:center"><span class="fld"><span class="in" style="width:120px"><input id="houseStop" type="number" min="5" max="80" step="1"><span class="u">%</span></span></span>
-        <button class="pill sm" id="houseSave">Save</button></span>
-      </div>
       <details class="adv" id="adv">
         <summary><svg class="i" viewBox="0 0 16 16"><path d="m6 3 5 5-5 5"/></svg>Advanced: set exact numbers</summary>
         <div class="panel form" id="riskForm"></div>
@@ -511,7 +522,47 @@ details.adv[open] summary svg{transform:rotate(90deg)}
     </div>
   </section>
 
-  <!-- house bot (operator only) is injected into Strategy below -->
+  <!-- ═════ OPERATOR (admin only) ═════ -->
+  <section class="view" id="v-operator" role="tabpanel">
+    <h1><span class="ln"><span class="ln-i">Operator</span></span></h1>
+    <p class="lead rv">The house bot behind the public results, what the screen is doing, and the nightly review. Visible only to the admin wallet.</p>
+
+    <div class="panel ophead rv" style="margin-top:28px">
+      <div>
+        <span class="eyebrow"><span class="chipw" id="hChip"><i></i>…</span><span id="hMode">House bot</span></span>
+        <div class="muted" id="hStats" style="font-size:13.5px">&nbsp;</div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <span class="fld"><span class="in" style="width:150px"><span class="u">Stop</span><input id="hStop" type="number" min="5" max="80" step="1"><span class="u">%</span></span></span>
+        <button class="ghostbtn sm" id="hStopSave">Save stop</button>
+        <button class="pill" id="hBtn">…</button>
+      </div>
+    </div>
+    <div class="opgrid">
+      <div class="kpi panel"><span>Open positions</span><b class="num" id="hOpen">—</b><small id="hExp">&nbsp;</small></div>
+      <div class="kpi panel"><span>Daily loss</span><b class="num" id="hDay">—</b><small id="hDayCap">&nbsp;</small></div>
+      <div class="kpi panel"><span>Loss streak</span><b class="num" id="hStreak">—</b><small id="hKill">&nbsp;</small></div>
+      <div class="kpi panel"><span>Size per trade</span><b class="num" id="hSize">0.1–0.3</b><small>SOL, by conviction and liquidity</small></div>
+    </div>
+
+    <div class="sec"><div class="sechead"><h2>House positions</h2><small id="hPosNote">&nbsp;</small></div>
+      <div class="panel list"><table class="trades"><thead><tr><th>Token</th><th>Size</th><th>Price source</th><th class="r">PnL</th><th class="r"></th></tr></thead><tbody id="hPos"></tbody></table></div></div>
+
+    <div class="sec"><div class="sechead"><h2>Screen right now</h2><small id="hScanNote">&nbsp;</small></div>
+      <div class="panel list funnel" id="hFunnel"></div>
+      <div class="panel list" id="hCands" style="margin-top:14px"></div></div>
+
+    <div class="sec"><div class="sechead"><h2>Nightly review</h2><small id="hRevNote">&nbsp;</small></div>
+      <div class="opgrid" id="hRevKpi" style="margin-top:0"></div>
+      <div class="panel list" id="hProps" style="margin-top:14px"></div></div>
+
+    <div class="sec"><div class="sechead"><h2>Call sources</h2><small id="hSrcNote">&nbsp;</small></div>
+      <div class="panel" style="padding:20px;display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div><label class="muted" style="font-size:12.5px">X accounts (one per line)</label><textarea class="src" id="srcX"></textarea></div>
+        <div><label class="muted" style="font-size:12.5px">Telegram channels (one per line)</label><textarea class="src" id="srcTg"></textarea></div>
+        <div style="grid-column:1/-1;display:flex;justify-content:flex-end"><button class="pill sm" id="srcSave">Save sources</button></div>
+      </div></div>
+  </section>
   <!-- ═════ RESULTS ═════ -->
   <section class="view" id="v-results" role="tabpanel">
     <div class="rhead">
@@ -652,8 +703,9 @@ async function api(path, opts) {
   opts = opts || {};
   const write = opts.method && opts.method !== 'GET';
   const hdr = Object.assign({}, write ? { 'Content-Type': 'application/json' } : {}, opts.headers || {});
-  if (S.wallet) { hdr['X-Wallet'] = S.wallet; if (S.auth) hdr['X-Auth'] = S.auth; }
-  const init = Object.assign({}, opts, { headers: hdr });
+  if (S.wallet && !opts.house) hdr['X-Wallet'] = S.wallet;
+  if (S.auth) hdr['X-Auth'] = S.auth;
+  const init = Object.assign({}, opts, { headers: hdr }); delete init.house;
   if (opts.json !== undefined) { init.body = JSON.stringify(opts.json); delete init.json; }
   let r = await fetch(API + path, init);
   if (r.status === 401 && write && S.wallet && !opts._retried) {
@@ -738,7 +790,7 @@ function setWallet(pk) {
 
 /* ── header / routing ── */
 function go(view) {
-  if (!['bot', 'signals', 'calls', 'strategy', 'results'].includes(view)) view = 'bot';
+  if (!['bot', 'signals', 'calls', 'strategy', 'results', 'operator'].includes(view) || (view === 'operator' && !S.admin)) view = 'bot';
   S.view = view;
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-selected', String(t.dataset.view === view)));
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('on', v.id === 'v-' + view));
@@ -747,6 +799,7 @@ function go(view) {
   if (view === 'results') loadResults();
   if (view === 'strategy') loadStrategy();
   if (view === 'calls') loadCalls();
+  if (view === 'operator') loadOperator();
   if (view === 'bot') { refreshBot(); refreshPositions(); }
   document.body.classList.toggle('onb', view === 'bot' && !(S.wallet && S.auth));
 }
@@ -762,6 +815,7 @@ function renderHeader() {
   $('mPaper').setAttribute('aria-pressed', String(!live));
   $('mLive').setAttribute('aria-pressed', String(live));
   document.body.classList.toggle('admin', !!S.admin);
+  document.querySelector('.optab').hidden = !S.admin;
 }
 $('walletBtn').onclick = () => S.wallet ? disconnect() : connect();
 
@@ -1044,6 +1098,105 @@ $('buyYes').onclick = async e => {
 document.querySelectorAll('.scrim').forEach(sc => sc.addEventListener('click', e => { if (e.target === sc) sc.classList.remove('on'); }));
 addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.scrim.on').forEach(s => s.classList.remove('on')); });
 
+/* ── OPERATOR (house bot) ── */
+const H = { house: true };
+async function loadOperator() {
+  if (!S.admin) return;
+  try { await signIn(); } catch (e) { toast('Sign in with the admin wallet', 'err'); return; }
+  const [b, pos, hr] = await Promise.all([api('/api/bot', H).catch(() => null), api('/api/positions?chain=sol', H).catch(() => null), api('/api/house/risk', H).catch(() => null)]);
+  if (b) {
+    const on = !!b.enabled, st = b.stats || {};
+    $('hChip').className = 'chipw' + (on ? ' run' : ''); $('hChip').innerHTML = '<i></i>' + (on ? 'Running' : 'Stopped');
+    $('hMode').textContent = 'House bot · ' + (b.mode === 'LIVE' ? 'Live' : 'Paper') + ' · ' + ((b.cfg || {}).mode || '').toUpperCase();
+    $('hStats').textContent = st.ticks + ' checks · ' + st.buys + ' buys · ' + st.sells + ' sells · ' + st.blocked + ' blocked · ' + st.errors + ' errors' + (st.last_error ? ' · last: ' + String(st.last_error).slice(0, 90) : '');
+    $('hBtn').textContent = on ? 'Stop house bot' : 'Start house bot'; $('hBtn').className = on ? 'ghostbtn' : 'pill'; $('hBtn').dataset.on = on ? '1' : '';
+  }
+  if (hr) $('hStop').value = Math.round(hr.stop_pct * 100);
+  if (pos) {
+    const pf = pos.portfolio || {}, ps = pos.positions || [];
+    $('hOpen').textContent = ps.length; $('hExp').textContent = (+pf.total_exposure || 0).toFixed(2) + ' SOL in play';
+    $('hDay').textContent = sol(-(+pf.realized_loss_today || 0)); $('hDayCap').textContent = 'cap −' + pf.daily_loss_cap + ' SOL';
+    $('hStreak').textContent = pf.consec_losses ?? '—'; $('hKill').textContent = 'pause at ' + pf.kill_switch_consec + (pf.kill_switch ? ' · paused' : '');
+    $('hPosNote').textContent = ps.length ? ps.length + ' open' : ' ';
+    $('hPos').innerHTML = ps.length ? ps.map((p, i) =>
+      '<tr><td><div class="tcell"><b style="font-weight:600">' + tokName(p.symbol, p.address) + '</b>' + caBtn(p.address) + '</div></td><td class="num">' + (+p.size_sol || 0).toFixed(3) + '</td>' +
+      '<td class="muted">' + esc(p.px_src || (p.signals && p.signals[0] ? 'scan' : '—')) + '</td><td class="r num ' + cls(p.pnl) + '">' + pct(p.pnl) + '</td>' +
+      '<td class="r"><button class="ghostbtn sm" data-hsell="' + esc(p.address) + '">Sell</button></td></tr>').join('')
+      : '<tr><td colspan="5" class="empty">No open positions.</td></tr>';
+  }
+  markNil();
+  loadOpScan(); loadOpReview(); loadOpSources();
+}
+async function loadOpScan() {
+  let d;
+  try { d = await api('/api/run', Object.assign({ method: 'POST', json: { chain: 'sol' } }, H)); } catch (e) { $('hScanNote').textContent = e.message; return; }
+  const ds = (d.decisions || []).map(x => x.decision || {});
+  const groups = {};
+  ds.forEach(x => { const k = x.action === 'ACTION' ? 'Passed every gate' : (String(x.reason || 'Other').split(':')[0].replace(/^REJECT\s*/, 'Rejected · ') || 'Other'); groups[k] = (groups[k] || 0) + 1; });
+  const max = Math.max(1, ...Object.values(groups));
+  $('hScanNote').textContent = ds.length + ' tokens scanned';
+  $('hFunnel').innerHTML = Object.entries(groups).sort((a, b) => b[1] - a[1]).map(([k, v]) =>
+    '<div class="fr ' + (k.startsWith('Passed') ? 'ok' : 'bad') + '"><span>' + esc(k) + '</span><span><i style="width:' + Math.round(v / max * 100) + '%"></i></span><span class="num r" style="text-align:right">' + v + '</span></div>').join('') || '<div class="empty">No scan data.</div>';
+  const acts = ds.filter(x => x.action === 'ACTION').sort((a, b) => (b.priority || 0) - (a.priority || 0));
+  $('hCands').innerHTML = '<div class="cand head"><span>Candidate</span><span>Priority</span><span class="c-sc">Score</span><span class="c-why">Why</span></div>' + (acts.length ? acts.map(x =>
+    '<div class="cand"><div class="tcell"><b>' + tokName(x.symbol, x.address) + '</b>' + caBtn(x.address) + '</div><span class="num">' + (x.priority ?? '—') + '</span>' +
+    '<span class="num c-sc">' + ((x.abc || {}).score ?? '—') + '</span><span class="muted c-why">' + esc(((x.abc || {}).reasons || []).join(' · ') || x.reason || '') + '</span></div>').join('') : '<div class="empty">No candidates right now.</div>');
+}
+async function loadOpReview() {
+  let r;
+  try { r = await api('/api/review', H); } catch (e) { $('hRevNote').textContent = e.message; return; }
+  const rep = r.report || {}, o = rep.overall || {}, c = rep.cashflow || {};
+  const kv = (k, v, sub) => '<div class="kpi panel"><span>' + k + '</span><b class="num">' + v + '</b><small>' + (sub || '&nbsp;') + '</small></div>';
+  const n = x => x == null ? '—' : x;
+  $('hRevKpi').innerHTML = kv('Closed positions', n(o.trades ?? o.n)) + kv('Win rate', o.win_rate != null ? Math.round(o.win_rate * 100) + '%' : (o.winrate != null ? Math.round(o.winrate * 100) + '%' : '—')) +
+    kv('Expectancy', o.expectancy_R != null ? (o.expectancy_R >= 0 ? '+' : '') + (+o.expectancy_R).toFixed(2) + 'R' : '—') + kv('Net cash flow', c.net_sol != null ? sol(c.net_sol) : (c.net != null ? sol(c.net) : '—'), 'all sells incl. partials');
+  const ps = rep.proposals || [];
+  $('hRevNote').textContent = ps.length ? ps.length + ' proposal' + (ps.length > 1 ? 's' : '') : 'no proposals';
+  $('hProps').innerHTML = ps.length ? ps.map((p, i) =>
+    '<div class="prop"><div><code>' + esc(p.target + ' · ' + p.param) + '</code> <span class="muted" style="font-size:12.5px">' + esc(p.confidence || '') + '</span>' +
+    '<p>' + esc(p.rationale || '') + ' <b style="color:#fff">' + esc(String(p.current)) + ' → ' + esc(String(p.suggested)) + '</b></p></div>' +
+    (p.applicable ? '<button class="pill sm" data-apply="' + i + '">Apply</button>' : '') + '</div>').join('') : '<div class="empty">Nothing to change yet — the review needs more closed trades.</div>';
+  $('hProps').onclick = async e => {
+    const b = e.target.closest('[data-apply]'); if (!b) return; const p = ps[+b.dataset.apply];
+    busy(b, true);
+    try { await api('/api/review/apply', Object.assign({ method: 'POST', json: { target: p.target, param: p.param, value: p.suggested } }, H)); toast('Applied ' + p.param + ' = ' + p.suggested); loadOpReview(); }
+    catch (err) { toast(err.message, 'err'); busy(b, false); }
+  };
+}
+async function loadOpSources() {
+  try {
+    const d = await api('/api/calls/sources', H);
+    $('srcX').value = (d.sources.x || []).join('\n'); $('srcTg').value = (d.sources.tg || []).join('\n');
+    const st = d.stats || {};
+    $('hSrcNote').textContent = (d.watched_x || []).length + ' X watched (incl. auto-found) · ' + (d.sources.tg || []).length + ' Telegram · ' + (st.errors || 0) + ' errors';
+  } catch (e) { $('hSrcNote').textContent = e.message; }
+}
+$('srcSave').onclick = async e => {
+  const b = e.currentTarget; busy(b, true);
+  const lines = id => $(id).value.split(/[\s,]+/).map(x => x.trim()).filter(Boolean);
+  try { await api('/api/calls/sources', Object.assign({ method: 'POST', json: { x: lines('srcX'), tg: lines('srcTg') } }, H)); toast('Sources saved'); loadOpSources(); }
+  catch (err) { toast(err.message, 'err'); }
+  busy(b, false);
+};
+$('hBtn').onclick = async e => {
+  const b = e.currentTarget, on = !!b.dataset.on; busy(b, true);
+  try { await api(on ? '/api/bot/stop' : '/api/bot/start', Object.assign({ method: 'POST', json: { chain: 'sol' } }, H)); toast(on ? 'House bot stopped' : 'House bot started'); }
+  catch (err) { toast(err.message, 'err'); }
+  busy(b, false); loadOperator();
+};
+$('hStopSave').onclick = async e => {
+  const b = e.currentTarget; busy(b, true);
+  try { const r = await api('/api/house/risk', Object.assign({ method: 'POST', json: { stop_pct: (+$('hStop').value || 0) / 100 } }, H)); $('hStop').value = Math.round(r.stop_pct * 100); toast('House stop −' + Math.round(r.stop_pct * 100) + '%'); }
+  catch (err) { toast(err.message, 'err'); }
+  busy(b, false);
+};
+$('v-operator').addEventListener('click', async e => {
+  const b = e.target.closest('[data-hsell]'); if (!b) return;
+  busy(b, true);
+  try { await api('/api/sell', Object.assign({ method: 'POST', json: { address: b.dataset.hsell } }, H)); toast('Closed'); } catch (err) { toast(err.message, 'err'); }
+  loadOperator();
+});
+
 /* ── CALLS ── */
 let _csrc = 'all', _calls = [];
 const ago = ts => { const m = Math.max(0, (Date.now() / 1000 - ts) / 60); return m < 60 ? Math.round(m) + 'm ago' : m < 1440 ? Math.round(m / 60) + 'h ago' : Math.round(m / 1440) + 'd ago'; };
@@ -1162,14 +1315,8 @@ document.addEventListener('click', e => {
 const P = v => Math.round((+v || 0) * 1000) / 10;              // 0.25 → 25
 const signedPct = v => '+' + P(v) + '%';
 let _risk = null, _strats = null;
-async function loadHouse() {
-  $('houseSec').hidden = !S.admin;
-  if (!S.admin) return;
-  try { const h = await api('/api/house/risk'); $('houseStop').value = Math.round(h.stop_pct * 100); } catch (e) { $('houseSec').hidden = true; }
-}
 async function loadStrategy() {
   $('stLock').hidden = !!S.wallet;
-  loadHouse();
   try {
     const [st, rk] = await Promise.all([api('/api/strategies?view=public'), api('/api/risk')]);
     _strats = st; _risk = rk;
@@ -1274,13 +1421,7 @@ $('v-strategy').addEventListener('click', async e => {
   }
 });
 $('stConnect').onclick = connect;
-$('houseSave').onclick = async e => {
-  const b = e.currentTarget; busy(b, true);
-  try { await signIn(); const r = await post('/api/house/risk', { stop_pct: (+$('houseStop').value || 0) / 100 });
-        $('houseStop').value = Math.round(r.stop_pct * 100); toast('House bot stop set to −' + Math.round(r.stop_pct * 100) + '%'); }
-  catch (err) { toast(err.message, 'err'); }
-  busy(b, false);
-};
+
 
 /* ── RESULTS ── */
 function monthLabel(m) { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 1, 1)).toLocaleDateString('en', { month: 'long', year: 'numeric', timeZone: 'UTC' }); }
