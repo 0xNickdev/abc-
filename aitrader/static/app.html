@@ -216,6 +216,32 @@ main,footer,.alert{position:relative;z-index:1}
 .linkbtn{color:#fff;text-decoration:underline;text-underline-offset:3px;text-decoration-color:rgba(255,255,255,.35)}
 .linkbtn:hover{text-decoration-color:#fff}
 
+/* ── calls ── */
+.cl{display:grid;grid-template-columns:minmax(110px,1fr) minmax(150px,1.7fr) 80px 150px 120px auto;align-items:center;gap:16px;
+  padding:15px 20px;border-top:1px solid var(--line)}
+.cl:first-child{border-top:0}
+.cl.head{padding:12px 20px;color:var(--strip);font-size:12.5px;letter-spacing:.03em}
+.who{display:flex;flex-wrap:wrap;gap:6px;align-items:center;min-width:0}
+.caller{display:inline-flex;align-items:center;gap:5px;padding:3px 9px 3px 6px;border-radius:999px;border:1px solid var(--line2);
+  font-size:12.5px;color:#d6d6d6;max-width:100%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.caller:hover{border-color:rgba(255,255,255,.3)}
+.caller svg{width:12px;height:12px;flex:none;color:var(--strip)}
+.caller em{font-style:normal;color:var(--strip);font-size:11.5px}
+.caller em.hot{color:var(--up)}
+.more{color:var(--strip);font-size:12.5px}
+.mcx b{font-weight:500}
+.mcx small{display:block;color:var(--strip);font-size:12px}
+.board{display:grid;grid-template-columns:1fr;gap:0}
+.br{display:grid;grid-template-columns:28px minmax(120px,1fr) 90px 90px 90px;gap:12px;align-items:center;padding:12px 20px;border-top:1px solid var(--line);font-size:14px}
+.br:first-child{border-top:0}
+.br.head{color:var(--strip);font-size:12.5px;padding:10px 20px}
+.br .rk{color:var(--strip)}
+.br .nm{display:flex;gap:6px;align-items:center;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.br .nm svg{width:13px;height:13px;flex:none;color:var(--strip)}
+.br .auto{font-size:11px;color:var(--strip);border:1px solid var(--line2);border-radius:999px;padding:0 6px}
+.br .r{text-align:right}
+.callsgrid{display:grid;grid-template-columns:minmax(0,1fr);gap:34px}
+
 /* ── token check ── */
 .chipbtn{cursor:pointer;background:none;font:inherit;transition:background .18s}
 .chipbtn:hover{background:rgba(255,255,255,.06)}
@@ -287,7 +313,7 @@ details.adv[open] summary svg{transform:rotate(90deg)}
 .lock{padding:14px 18px;margin-top:22px;color:var(--muted);font-size:14px;display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
 
 /* ── responsive ── */
-.sig .mob{display:none;grid-column:1/-1;gap:12px;flex-wrap:wrap;color:var(--strip);font-size:13px}
+.sig .mob,.cl .mob{display:none;grid-column:1/-1;gap:12px;flex-wrap:wrap;color:var(--strip);font-size:13px}
 
 @media (max-width:860px){
   .atmo video{right:-30vw;width:120vw;opacity:.18}
@@ -312,6 +338,14 @@ details.adv[open] summary svg{transform:rotate(90deg)}
   .sig .why{grid-column:1/-1}
   .sig .c-act{grid-column:2;grid-row:1}
   .sig .c-mc,.sig .c-liq,.sig .c-age,.sig .c-safe{display:none}
+  .cl.head{display:none}
+  .cl{grid-template-columns:1fr auto;gap:8px 12px;padding:16px}
+  .cl .c-when,.cl .c-mcx,.cl .c-safe{display:none}
+  .cl .who{grid-column:1/-1}
+  .cl .c-act{grid-column:2;grid-row:1}
+  .cl .mob{display:flex}
+  .br{grid-template-columns:22px minmax(0,1fr) 54px 60px;padding:11px 14px}
+  .br .c-calls{display:none}
   .sig .mob{display:flex}
   .trades th:nth-child(2),.trades td:nth-child(2){display:none}
   .trades th,.trades td{padding:11px 14px}
@@ -334,6 +368,7 @@ details.adv[open] summary svg{transform:rotate(90deg)}
   <nav class="tabs" role="tablist" aria-label="Sections">
     <button class="tab" role="tab" data-view="bot" aria-selected="true">Bot</button>
     <button class="tab" role="tab" data-view="signals" aria-selected="false">Signals<span class="badge" id="sigBadge" hidden></span></button>
+    <button class="tab" role="tab" data-view="calls" aria-selected="false">Calls</button>
     <button class="tab" role="tab" data-view="strategy" aria-selected="false">Strategy</button>
     <button class="tab" role="tab" data-view="results" aria-selected="false">Results</button>
   </nav>
@@ -414,6 +449,27 @@ details.adv[open] summary svg{transform:rotate(90deg)}
     <div class="sec">
       <div class="sechead"><h2 id="sigCount">Scanning…</h2><small id="sigTime">&nbsp;</small></div>
       <div class="panel list" id="sigs"></div>
+    </div>
+  </section>
+
+  <!-- ═════ CALLS ═════ -->
+  <section class="view" id="v-calls" role="tabpanel">
+    <h1><span class="ln"><span class="ln-i">Calls</span></span></h1>
+    <p class="lead rv">What callers on X and Telegram are posting right now, and how their calls actually played out. Check before you ape.</p>
+    <div class="sec">
+      <div class="sechead">
+        <div class="seg" role="group" aria-label="Source">
+          <button data-csrc="all" aria-pressed="true">All</button><button data-csrc="x" aria-pressed="false">X</button><button data-csrc="tg" aria-pressed="false">Telegram</button>
+        </div>
+        <small id="callsNote">&nbsp;</small>
+      </div>
+      <div class="callsgrid">
+        <div class="panel list" id="callsList"></div>
+        <div>
+          <div class="sechead" style="margin-bottom:10px"><h2 style="font-size:15px">Top callers</h2><small>hit = peak 2x+ after the call</small></div>
+          <div class="panel list board" id="callers"></div>
+        </div>
+      </div>
     </div>
   </section>
 
@@ -538,6 +594,8 @@ const cls = v => v > 0 ? 'up' : v < 0 ? 'down' : '';
 const age = m => { m = +m || 0; return m < 60 ? Math.round(m) + 'm' : m < 1440 ? Math.round(m / 60) + 'h' : Math.round(m / 1440) + 'd'; };
 const usd = v => { v = +v || 0; return v >= 1e6 ? '$' + (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? '$' + (v / 1e3).toFixed(1) + 'k' : '$' + v.toFixed(0); };
 const ICON = {
+  xlogo: '<svg class="i" viewBox="0 0 16 16" style="stroke:none;fill:currentColor"><path d="M12.2 1.5h2.2L9.6 7l5.6 7.5h-4.4L7.4 9.9 3.5 14.5H1.3l5.1-5.9L1 1.5h4.5l3.1 4.1zm-.8 11.7h1.2L4.7 2.7H3.4z"/></svg>',
+  tg: '<svg class="i" viewBox="0 0 16 16"><path d="M14.5 2.5 1.8 7.4c-.6.2-.6 1.1.1 1.3l3.1 1 1.2 3.7c.2.5.8.6 1.1.2l1.7-1.8 3.2 2.4c.4.3 1 .1 1.1-.4l2.2-10.5c.1-.6-.4-1-1-.8z"/><path d="m5 9.7 7-5-5.2 6"/></svg>',
   chev: '<svg class="i" viewBox="0 0 16 16" style="width:11px;height:11px;margin-left:2px"><path d="m6 4 4 4-4 4"/></svg>',
   st_ok: '<svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="m5.3 8.2 1.8 1.8 3.6-3.8"/></svg>',
   st_warn: '<svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.8v3.8M8 11.1v.1"/></svg>',
@@ -657,7 +715,7 @@ function setWallet(pk) {
 
 /* ── header / routing ── */
 function go(view) {
-  if (!['bot', 'signals', 'strategy', 'results'].includes(view)) view = 'bot';
+  if (!['bot', 'signals', 'calls', 'strategy', 'results'].includes(view)) view = 'bot';
   S.view = view;
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-selected', String(t.dataset.view === view)));
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('on', v.id === 'v-' + view));
@@ -665,6 +723,7 @@ function go(view) {
   if (view === 'signals') refreshSignals();
   if (view === 'results') loadResults();
   if (view === 'strategy') loadStrategy();
+  if (view === 'calls') loadCalls();
   if (view === 'bot') { refreshBot(); refreshPositions(); }
   document.body.classList.toggle('onb', view === 'bot' && !(S.wallet && S.auth));
 }
@@ -934,6 +993,66 @@ $('buyYes').onclick = async e => {
 document.querySelectorAll('.scrim').forEach(sc => sc.addEventListener('click', e => { if (e.target === sc) sc.classList.remove('on'); }));
 addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.scrim.on').forEach(s => s.classList.remove('on')); });
 
+/* ── CALLS ── */
+let _csrc = 'all', _calls = [];
+const ago = ts => { const m = Math.max(0, (Date.now() / 1000 - ts) / 60); return m < 60 ? Math.round(m) + 'm ago' : m < 1440 ? Math.round(m / 60) + 'h ago' : Math.round(m / 1440) + 'd ago'; };
+const xfmt = v => v == null ? '—' : (v >= 10 ? Math.round(v) : v.toFixed(v >= 2 ? 1 : 2)) + 'x';
+function callerChip(c) {
+  const ic = c.source === 'tg' ? ICON.tg : ICON.xlogo;
+  const stat = c.calls >= 3 ? '<em class="' + (c.hit_rate >= 0.4 ? 'hot' : '') + '">' + Math.round(c.hit_rate * 100) + '% hit</em>' : '<em>new</em>';
+  return '<a class="caller" href="' + esc(c.url || '#') + '" target="_blank" rel="noopener" title="' + esc((c.text || '').slice(0, 140)) + '">' + ic + esc(c.name) + ' ' + stat + '</a>';
+}
+async function loadCalls() {
+  document.querySelectorAll('[data-csrc]').forEach(b => b.setAttribute('aria-pressed', String(b.dataset.csrc === _csrc)));
+  try {
+    const [d, cr] = await Promise.all([api('/api/calls?hours=24&source=' + _csrc), api('/api/calls/callers?limit=15')]);
+    _calls = d.calls || [];
+    $('callsNote').textContent = _calls.length ? _calls.length + ' tokens called in the last 24h' + (d.updated ? ' · updated ' + ago(d.updated) : '') : ' ';
+    renderCalls(); renderCallers(cr.callers || []);
+  } catch (e) { $('callsNote').textContent = 'Calls feed is catching up — retrying'; }
+}
+function renderCalls() {
+  if (!_calls.length) {
+    $('callsList').innerHTML = '<div class="empty">Collecting calls. The first ones show up within a few minutes of callers posting.</div>'; return;
+  }
+  $('callsList').innerHTML = '<div class="cl head"><span>Token</span><span>Called by</span><span>First call</span><span>Market cap at call → now</span><span>Safety</span><span></span></div>' +
+    _calls.map((r, i) => {
+      const cs = r.callers || [], shown = cs.slice(0, 3);
+      const xn = r.x_now, sf = r.safety;
+      const chip = sf ? '<button class="chip chipbtn ' + (sf.level === 'ok' ? 'ok' : sf.level === 'warn' ? 'mid' : 'bad') + '" data-check="' + esc(r.ca) + '" data-sym="' + esc(r.symbol) + '">' + esc(sf.label) + ICON.chev + '</button>'
+        : '<button class="chip chipbtn" data-check="' + esc(r.ca) + '" data-sym="' + esc(r.symbol) + '">Check' + ICON.chev + '</button>';
+      return '<div class="cl">' +
+        '<div class="tok"><b>' + esc(r.symbol) + '</b><button data-copy="' + esc(r.ca) + '" title="Copy contract address">' + short(r.ca) + ' ' + ICON.copy + '</button></div>' +
+        '<div class="who">' + shown.map(callerChip).join('') + (cs.length > 3 ? '<span class="more">+' + (cs.length - 3) + '</span>' : '') + '</div>' +
+        '<div class="c-when muted">' + ago(r.first_ts) + '</div>' +
+        '<div class="c-mcx mcx num"><b>' + usd(r.mcap0) + ' → ' + (r.mcap_now ? usd(r.mcap_now) : '—') + '</b><small class="' + cls((xn || 1) - 1) + '">' + xfmt(xn) + ' now · peak ' + xfmt(r.peak_x) + '</small></div>' +
+        '<div class="c-safe">' + chip + '</div>' +
+        '<div class="mob"><span>' + ago(r.first_ts) + '</span><span class="num ' + cls((xn || 1) - 1) + '">' + xfmt(xn) + ' since call</span>' + chip + '</div>' +
+        '<div class="c-act"><button class="pill sm" data-cbuy="' + i + '">Buy</button></div>' +
+        '</div>';
+    }).join('');
+}
+function renderCallers(list) {
+  if (!list.length) { $('callers').innerHTML = '<div class="empty">The ranking fills up as calls play out.</div>'; return; }
+  $('callers').innerHTML = '<div class="br head"><span>#</span><span>Caller</span><span class="r c-calls">Calls</span><span class="r">Hit</span><span class="r">Median</span></div>' +
+    list.map((c, i) => '<div class="br"><span class="rk">' + (i + 1) + '</span><span class="nm">' + (c.source === 'tg' ? ICON.tg : ICON.xlogo) + esc(c.name) +
+      (c.discovered ? ' <span class="auto" title="Found by our scanner from tokens that passed the screen">found</span>' : '') + '</span>' +
+      '<span class="r num c-calls">' + c.calls + '</span><span class="r num ' + (c.hit_rate >= 0.4 ? 'up' : '') + '">' + Math.round(c.hit_rate * 100) + '%</span>' +
+      '<span class="r num">' + xfmt(c.median_x) + '</span></div>').join('');
+}
+$('v-calls').addEventListener('click', e => {
+  const sb = e.target.closest('[data-csrc]');
+  if (sb) { _csrc = sb.dataset.csrc; loadCalls(); return; }
+  const c = e.target.closest('[data-copy]');
+  if (c) { try { navigator.clipboard.writeText(c.dataset.copy); toast('Contract address copied'); } catch (err) {} return; }
+  const b = e.target.closest('[data-cbuy]');
+  if (b) {
+    const r = _calls[+b.dataset.cbuy]; if (!r) return;
+    if (!S.wallet) { toast('Connect Phantom to buy', 'err'); connect(); return; }
+    openBuy({ symbol: r.symbol, address: r.ca, size_sol: (S.risk && S.risk.effective && S.risk.effective.size_sol) || 0.05 });
+  }
+});
+
 /* ── TOKEN CHECK ── */
 const CK_GROUPS = ['Contract', 'Holders', 'Dev', 'X account'];
 let _ckAddr = null;
@@ -1186,6 +1305,7 @@ setInterval(refreshStatus, 60000);
 setInterval(() => { if (document.hidden) return; if (S.view === 'bot') refreshPositions(); }, 6000);
 setInterval(() => { if (document.hidden) return; if (S.view === 'bot') refreshBot(); }, 15000);
 setInterval(() => { if (document.hidden) return; if (S.view === 'signals') refreshSignals(); }, 10000);
+setInterval(() => { if (document.hidden) return; if (S.view === 'calls') loadCalls(); }, 30000);
 </script>
 </body>
 </html>
