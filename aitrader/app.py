@@ -51,6 +51,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import argus  # Telegram-бот аналитики коллов (ачивки, сигналы, отчёт по контракту)
 import backtest  # 纸面/SHADOW 回测复盘（已实现 PnL/胜率/R）
 import bot  # 自主执行回路（量化机器人，纸面优先）
 import db  # снапшот-хранилище качества токенов (SQLite), opt-in ABC_SNAPSHOT_DB=1
@@ -3107,6 +3108,7 @@ async def _lifespan(_app: FastAPI):
     threading.Thread(target=_health_loop, daemon=True).start()
     if CALLS_ON:
         CALLS.start()                     # сканер коллов (X-список, Telegram, автопоиск)
+        ARGUS.start()                     # Telegram-бот Argus (только при ARGUS_BOT_TOKEN)
     notify.send(f"started: bot {'ON ' + ST.bot.cfg.get('mode', '') if ST.bot.enabled else 'OFF'}, "
                 f"{len(ST.positions)} open positions, mode {ST.mode}", key="boot", cooldown_s=300)
     if os.getenv("ABC_WATCH", "1").strip().lower() in ("1", "true", "yes", "on"):
@@ -3270,6 +3272,7 @@ def api_status(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHea
                           bot=CFG["bot_max_per_trade_sol"],
                           auto=CFG["auto_max_per_trade_sol"]),
                 watch=watcher.stats(),
+                argus=ARGUS.snapshot(),
                 health=health_snapshot(),
                 trending_cmd=MK.get_trending_cmd(MK.chain))
 
@@ -4428,6 +4431,7 @@ def api_token_quality(address: str):
 
 CALLS = calls.CallScanner(OUT_DIR)
 CALLS_ON = os.getenv("ABC_CALLS", "1").strip().lower() in ("1", "true", "yes", "on")
+ARGUS = argus.Argus(CALLS, OUT_DIR, flow=pumpflow.FLOW, sol_usd=pumpcurve.sol_usd, log_fn=log)
 
 def _discover_calls(addrs: list[str]):
     """Автопоиск коллеров по прошедшим скрин токенам — в фоне, без замков (сеть)."""
