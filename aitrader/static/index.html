@@ -1514,7 +1514,7 @@ async function loadPnl(){
   let data;
   try{
     if(source!=='backend'){box.innerHTML='<div class="hint" style="grid-column:1/8;padding:20px;text-align:center">Connect to backend to see real PnL</div>';document.getElementById('pnlTot').textContent='';return;}
-    const r=await fetch(API+'/api/pnl/calendar?month='+ym);if(!r.ok)throw 0;data=await r.json();
+    const r=await fetch(API+'/api/pnl/calendar?full=1&month='+ym);if(!r.ok)throw 0;data=await r.json();
   }catch(e){box.innerHTML='<div class="hint" style="grid-column:1/8;padding:20px;text-align:center">backend offline</div>';return;}
   const [Y,Mo]=ym.split('-').map(Number);
   const first=new Date(Date.UTC(Y,Mo-1,1));let lead=(first.getUTCDay()+6)%7;   // пн=0
@@ -2495,7 +2495,7 @@ setInterval(livePrices,2000);
 async function refreshPnlBadge(){
   if(source!=='backend')return;
   try{
-    const r=await fetch(API+'/api/pnl/calendar?month='+_ym(new Date()));if(!r.ok)return;
+    const r=await fetch(API+'/api/pnl/calendar?full=1&month='+_ym(new Date()));if(!r.ok)return;
     const t=(await r.json()).total;const b=document.getElementById('pnlBtnVal');
     if(b){b.innerHTML=_fmtSol(t.pnl);b.style.color=t.pnl>0?'var(--lime)':t.pnl<0?'var(--clay)':'';}
   }catch(e){}

@@ -1909,7 +1909,7 @@ def _health_loop():
             pass
         time.sleep(60)
 
-def pnl_calendar(pubkey: str, month: str) -> dict:
+def pnl_calendar(pubkey: str, month: str, since: str = "") -> dict:
     """Дневной реализованный PnL (SOL) за месяц YYYY-MM.
     pubkey="*" → все сделки (house/бот, что сейчас и нужно — торгует один бот);
     конкретный pubkey → только его сделки. Источник — SELL-записи журнала:
@@ -1920,11 +1920,15 @@ def pnl_calendar(pubkey: str, month: str) -> dict:
     pcts: list[float] = []            # доли PnL по каждой сделке (для сводной статистики)
     # SELL-выжимка (hot + архивы, кэш по size/mtime) вместо read_text() всего
     # журнала: память не зависит от возраста бота, история видна вся.
+    months: set[str] = set()          # месяцы со сделками этого scope (UI прыгает на последний непустой)
     for r in backtest.sell_records(LOG_PATH):
-        if not r.get("ts", "").startswith(month):
-            continue
         # pk="*" — не фильтруем (house/бот); иначе только записи этого pubkey
         if pk != "*" and r.get("pubkey", DEFAULT_PUBKEY) != pk:
+            continue
+        if since and r.get("ts", "") < since:     # витрина беты: история до старта журнала скрыта
+            continue
+        months.add(r.get("ts", "")[:7])
+        if not r.get("ts", "").startswith(month):
             continue
         d = r["ts"][:10]
         pct = float(r.get("pnl", 0.0) or 0.0); size = float(r.get("size_sol", 0.0) or 0.0)
@@ -1955,7 +1959,7 @@ def pnl_calendar(pubkey: str, month: str) -> dict:
         best_pct=round(max(pcts), 4) if pcts else 0.0,
         worst_pct=round(min(pcts), 4) if pcts else 0.0,
         total_sol=tot["pnl"], net_total_sol=tot["net"], fee_pct=FEE_ROUNDTRIP_PCT)
-    return dict(month=month, days=days, total=tot, stats=stats,
+    return dict(month=month, days=days, total=tot, stats=stats, months=sorted(m for m in months if m), since=since,
                 winrate=round(tot["wins"] / tot["trades"], 3) if tot["trades"] else 0.0)
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -3291,8 +3295,13 @@ def api_backtest(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthH
     return backtest.summary(path=LOG_PATH, trig=strategy.get(sess.strategy_id)["trigger"],
                             hard_stop_pct=CFG["hard_stop_pct"])   # тот же стоп, что у бота (env)
 
+# Публичный журнал (бета) начинается с этой даты (UTC, ISO-префикс): прошлые месяцы не показываем
+# тестерам. Данные не удаляются — оператор видит всё через full=1 (legacy-терминал).
+RESULTS_SINCE = os.getenv("ABC_RESULTS_SINCE", "2026-10-10").strip()
+
 @app.get("/api/pnl/calendar")
-def api_pnl_calendar(month: str = "", scope: str = "house", x_wallet: str | None = WalletHeader):
+def api_pnl_calendar(month: str = "", scope: str = "house", full: int = 0,
+                     x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """Календарь дневного реализованного PnL за месяц (per-user). month=YYYY-MM (пусто=текущий)."""
     sess = get_session(x_wallet)
     m = month.strip() or datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
@@ -3306,7 +3315,8 @@ def api_pnl_calendar(month: str = "", scope: str = "house", x_wallet: str | None
     # записи через tx/confirm) → календарь врал. По умолчанию — ТОЛЬКО house-бот (это его
     # календарь, юзер 10.10 с подключённым кошельком не видел сделок бота вовсе);
     # scope=me — только сделки своего кошелька.
-    return pnl_calendar(sess.pubkey if scope == "me" else DEFAULT_PUBKEY, m)
+    since = "" if (full and _is_admin(sess, x_auth)) else RESULTS_SINCE
+    return pnl_calendar(sess.pubkey if scope == "me" else DEFAULT_PUBKEY, m, since)
 
 # ── Ночной review-loop: отчёт (read-only) + форс-прогон + применение одного предложения ──
 def _block_if_not_owner(sess: UserSession, x_auth: str | None = None):
