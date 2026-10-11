@@ -37,6 +37,10 @@ DISCOVER_EVERY_S = 30.0    # не чаще одного автопоиска в 
 X_CHUNK = 10               # аккаунтов в одном поисковом запросе
 TRACK_H = 48               # сколько часов следим за ценой после колла
 KEEP_CALLS = 3000
+# Колл засчитываем, только если увидели его быстро: результат меряется от цены в момент
+# обнаружения, и для поста часовой давности «капа на колле» была бы фальшивой (первый проход
+# по каналу видит последние ~20 постов — их не берём).
+MAX_CALL_AGE_S = 900.0
 WIN_X = 2.0                # «попадание» = пик ≥ 2x от цены колла
 AUTO_MIN_CALLS, AUTO_MIN_HIT, AUTO_MAX = 5, 0.4, 30
 
@@ -136,7 +140,8 @@ class CallScanner:
     def _load(self):
         try:
             d = json.loads(self.path.read_text())
-            self.calls = d.get("calls", [])[-KEEP_CALLS:]
+            self.calls = [c for c in d.get("calls", [])[-KEEP_CALLS:]
+                          if c.get("discovered") or c.get("seen", 0) - c.get("ts", 0) <= MAX_CALL_AGE_S]
             self.tokens = d.get("tokens", {})
             self.discovered_cas = set(d.get("discovered", []))
         except Exception:
@@ -200,7 +205,10 @@ class CallScanner:
         with self.lock:
             known = {(c["source"], c["author"].lower(), c["ca"]) for c in self.calls}
         fresh = []
+        now = _now()
         for p in posts:
+            if not discovered and now - float(p.get("ts") or now) > MAX_CALL_AGE_S:
+                continue                           # старый пост: честной цены колла уже нет
             for ca in p.get("cas") or [p.get("ca")]:
                 if ca and (source, (p.get("author") or author).lower(), ca) not in known:
                     fresh.append((ca, p))

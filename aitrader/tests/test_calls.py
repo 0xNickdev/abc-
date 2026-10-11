@@ -5,6 +5,8 @@ import calls as cm
 
 CA1 = "7GCihgDB8fe6KNjn2MYtkzZcRjQy3t9GHdC8uHYmW2hr"
 CA2 = "HZL2ga4kXjZp8377B5TcWBuqvBTtxqK2KZb6mjcnpump"
+import time as _time
+NOW = _time.time()
 TG_PAGE = f"""
 <div class="tgme_widget_message_wrap js-widget_message_wrap"><div class="tgme_widget_message" data-post="alphacalls/101">
 <div class="tgme_widget_message_text js-message_text" dir="auto">New gem &#036;CAT <b>CA:</b> {CA1} aping</div>
@@ -42,12 +44,12 @@ def test_extract_cas_ignores_short_and_signatures():
 
 def test_only_known_solana_tokens_are_recorded(sc):
     junk = "1111111111111111111111111111111111111111"
-    n = sc._add("tg", "alphacalls", [dict(cas=[CA1, junk], ts=1.0, url="u", text="t")])
+    n = sc._add("tg", "alphacalls", [dict(cas=[CA1, junk], ts=cm._now(), url="u", text="t")])
     assert n == 1 and sc.calls[0]["ca"] == CA1 and sc.calls[0]["mcap0"] == 10000
 
 
 def test_duplicate_calls_are_not_counted_twice(sc):
-    p = [dict(cas=[CA1], ts=1.0)]
+    p = [dict(cas=[CA1], ts=NOW)]
     assert sc._add("tg", "alphacalls", p) == 1
     assert sc._add("tg", "alphacalls", p) == 0
     assert sc._add("tg", "othercalls", p) == 1       # другой канал — отдельный колл
@@ -55,7 +57,7 @@ def test_duplicate_calls_are_not_counted_twice(sc):
 
 def test_callers_rating_uses_peak_vs_call_price(sc):
     for ch in ("good", "bad"):
-        sc._add("tg", ch, [dict(cas=[CA1], ts=1.0)])
+        sc._add("tg", ch, [dict(cas=[CA1], ts=NOW)])
     sc._prices[CA1]["price"] = 3.0                     # пик 3x от цены колла
     sc.update_prices()
     r = {x["name"]: x for x in sc.callers()}
@@ -63,8 +65,8 @@ def test_callers_rating_uses_peak_vs_call_price(sc):
 
 
 def test_feed_groups_callers_by_token_and_reports_x(sc):
-    sc._add("tg", "a", [dict(cas=[CA1], ts=100.0, url="u1")])
-    sc._add("x", "", [dict(author="kol1", cas=[CA1], ts=200.0, url="u2")])
+    sc._add("tg", "a", [dict(cas=[CA1], ts=NOW-200, url="u1")])
+    sc._add("x", "", [dict(author="kol1", cas=[CA1], ts=NOW-100, url="u2")])
     sc._prices[CA1]["price"] = 1.5
     sc.update_prices()
     rows = sc.feed(hours=24)
@@ -84,7 +86,7 @@ def test_clean_lists_accept_links_and_at_names(sc):
 
 def test_top_discovered_callers_join_watched_list(sc, monkeypatch):
     monkeypatch.setattr(cm, "AUTO_MIN_CALLS", 1)
-    sc._add("x", "", [dict(author="sharp", cas=[CA1], ts=1.0)], discovered=True)
+    sc._add("x", "", [dict(author="sharp", cas=[CA1], ts=NOW)], discovered=True)
     sc._prices[CA1]["price"] = 5.0
     sc.update_prices()
     sc.set_sources(x=["manual"])
@@ -102,7 +104,7 @@ def test_discover_is_once_per_token_and_rate_limited(sc, monkeypatch):
 
 
 def test_state_persists_across_restart(sc):
-    sc._add("tg", "alphacalls", [dict(cas=[CA1], ts=1.0)])
+    sc._add("tg", "alphacalls", [dict(cas=[CA1], ts=NOW)])
     sc._save()
     again = cm.CallScanner(sc.path.parent)
     assert len(again.calls) == 1 and again.tokens[CA1]["symbol"] == "CAT"
@@ -126,3 +128,8 @@ def test_tg_polls_channels_round_robin(sc, monkeypatch):
     sc.set_sources(tg=["aaaa", "bbbb", "cccc"])
     sc.poll_tg(); sc.poll_tg()
     assert seen == ["aaaa", "bbbb", "cccc", "aaaa"]
+
+
+def test_old_posts_are_not_counted_as_calls(sc):
+    assert sc._add("tg", "alphacalls", [dict(cas=[CA1], ts=cm._now() - 3600)]) == 0
+    assert sc._add("tg", "alphacalls", [dict(cas=[CA1], ts=cm._now() - 60)]) == 1
