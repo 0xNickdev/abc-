@@ -1383,7 +1383,8 @@ class TestPerModeTradeCaps:
 
     def test_defaults(self):
         assert appmod.CFG["max_per_trade_sol"] == 0.5
-        assert appmod.CFG["bot_max_per_trade_sol"] == 0.1
+        assert appmod.CFG["bot_max_per_trade_sol"] == 0.3
+        assert appmod.CFG["bot_min_per_trade_sol"] == 0.1
         assert appmod.CFG["auto_max_per_trade_sol"] == 0.05
 
     def test_manual_buy_capped_but_size_is_users_choice(self, client):
@@ -1409,6 +1410,17 @@ class TestPerModeTradeCaps:
         sess.set_risk(overrides={"size_sol": 5})
         appmod._bot_buy_fn(sess)("sol", "ADDRN1", 0.4)
         assert sess.proposals[0]["size_sol"] == appmod.CFG["bot_max_per_trade_sol"]
+
+    def test_house_bot_size_between_min_and_max(self, client, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(appmod, "do_buy",
+                            lambda ch, a, sz, s=None, lock=None, auto=False: seen.update(size=sz) or dict(ok=True))
+        appmod._bot_buy_fn(appmod.ST)("sol", "ADDRH1", 0.03)
+        assert seen["size"] == appmod.CFG["bot_min_per_trade_sol"]        # 0.03 → поднят до 0.1
+        appmod._bot_buy_fn(appmod.ST)("sol", "ADDRH2", 0.9)
+        assert seen["size"] == appmod.CFG["bot_max_per_trade_sol"]        # 0.9 → зажат до 0.3
+        appmod._bot_buy_fn(appmod.ST)("sol", "ADDRH3", 0.17)
+        assert seen["size"] == 0.17                                        # внутри диапазона — как есть
 
     def test_bot_enters_with_users_preset_size(self, client, monkeypatch):
         sess = appmod.get_session("CapWalletSzxxxx")

@@ -102,7 +102,10 @@ CFG = {
     # (бот N1-предложения / N2) — 0.1; автопилот N3 — 0.05 «для начала, потом подкрутим».
     # Подкрутка без кода: env ABC_MAX_TRADE_SOL / ABC_BOT_MAX_TRADE_SOL / ABC_AUTO_MAX_TRADE_SOL.
     "max_per_trade_sol": float(os.getenv("ABC_MAX_TRADE_SOL", "0.5") or 0.5),
-    "bot_max_per_trade_sol": float(os.getenv("ABC_BOT_MAX_TRADE_SOL", "0.1") or 0.1),
+    # Бот (n1/n2): 0.1–0.3 SOL на сделку (решение юзера 11.10). На 0.1 фикс-издержки tx
+    # (priority, рента ATA) съедали ~2.5% позиции; на 0.2–0.3 их доля в 2–3 раза меньше.
+    "bot_min_per_trade_sol": float(os.getenv("ABC_BOT_MIN_TRADE_SOL", "0.1") or 0.1),
+    "bot_max_per_trade_sol": float(os.getenv("ABC_BOT_MAX_TRADE_SOL", "0.3") or 0.3),
     "auto_max_per_trade_sol": float(os.getenv("ABC_AUTO_MAX_TRADE_SOL", "0.05") or 0.05),
     # Недельный банкролл-эксперимент (решение юзера 2026-07-08): выделяем 10 бумажных SOL
     # до конца недели — сгорели раньше → торги стоят до понедельника (UTC ISO-неделя).
@@ -659,16 +662,17 @@ def save_user_strategy(pubkey: str, sid: str):
 # House-сессия всегда на CFG/env. Все значения зажаты: размер ≤ серверного потолка бота,
 # дневной лимит ≤ CFG, стоп/трейлинг 5–60%.
 RISK_PRESETS = {
-    "careful":  dict(label="Careful",  size_sol=0.03, max_positions=2, daily_loss_cap_sol=0.10, pause_after_losses=2),
-    "standard": dict(label="Standard", size_sol=0.05, max_positions=3, daily_loss_cap_sol=0.25, pause_after_losses=3),
-    "bold":     dict(label="Bold",     size_sol=0.10, max_positions=5, daily_loss_cap_sol=0.50, pause_after_losses=5),
+    "careful":  dict(label="Careful",  size_sol=0.10, max_positions=2, daily_loss_cap_sol=0.30, pause_after_losses=2),
+    "standard": dict(label="Standard", size_sol=0.20, max_positions=3, daily_loss_cap_sol=0.60, pause_after_losses=3),
+    "bold":     dict(label="Bold",     size_sol=0.30, max_positions=5, daily_loss_cap_sol=1.00, pause_after_losses=5),
 }
 DEFAULT_RISK_PRESET = "standard"
 _RISK_PRESET_KEYS = ("size_sol", "max_positions", "daily_loss_cap_sol", "pause_after_losses")
 
 def risk_bounds() -> dict:
     """Допустимые диапазоны ручных правок (UI рисует по ним поля)."""
-    return dict(size_sol=(0.001, float(CFG["bot_max_per_trade_sol"])),
+    return dict(size_sol=(min(float(CFG["bot_min_per_trade_sol"]), float(CFG["bot_max_per_trade_sol"])),
+                          float(CFG["bot_max_per_trade_sol"])),
                 max_positions=(1, 10),
                 daily_loss_cap_sol=(0.01, float(CFG["daily_loss_cap_sol"])),
                 pause_after_losses=(0, 10),          # 0 = не ставить на паузу
@@ -2049,50 +2053,82 @@ def _health_loop():
             pass
         time.sleep(60)
 
+# Сделки, исключённые из публичной статистики как сбои данных (не торговые результаты).
+# Файл OUT_DIR/pnl_exclude.json: [{"address": "...", "ts": "2026-10-11T06:03", "reason": "..."}]
+# ts — префикс времени SELL-записей (минута); совпадают адрес и префикс → запись не считается.
+def _pnl_exclusions() -> list[dict]:
+    try:
+        return [x for x in json.loads((OUT_DIR / "pnl_exclude.json").read_text())
+                if isinstance(x, dict) and x.get("address") and x.get("ts")]
+    except Exception:
+        return []
+
+def _excluded(r: dict, excl: list[dict]) -> bool:
+    a, ts = r.get("address") or "", r.get("ts") or ""
+    return any(a == x["address"] and ts.startswith(x["ts"]) for x in excl)
+
+def _sell_sol(r: dict) -> tuple[float, float, float, float]:
+    """(pct_net, size, sol_gross, sol_net) одной SELL-записи."""
+    pct = float(r.get("pnl", 0.0) or 0.0); size = float(r.get("size_sol", 0.0) or 0.0)
+    if r.get("costed"):                               # издержки уже внутри pnl (модель/факт LIVE)
+        pg = r.get("pnl_gross")
+        return pct, size, (float(pg) if pg is not None else pct) * size, pct * size
+    sol = pct * size                                  # старые записи — оценочный процент
+    return pct, size, sol, sol - FEE_ROUNDTRIP_PCT * size
+
 def pnl_calendar(pubkey: str, month: str, since: str = "") -> dict:
-    """Дневной реализованный PnL (SOL) за месяц YYYY-MM.
-    pubkey="*" → все сделки (house/бот, что сейчас и нужно — торгует один бот);
-    конкретный pubkey → только его сделки. Источник — SELL-записи журнала:
-    реализованный SOL ≈ pnl(доля) × size_sol(этой продажи)."""
+    """Реализованный PnL за месяц YYYY-MM ПО ПОЗИЦИЯМ (решение юзера 11.10).
+    Частичные продажи (TP-лестница) и финальное закрытие = одна строка: раньше удачная позиция
+    занимала 2–3 строки, а убыточная — одну, и таблица выглядела зеленее, чем есть.
+    Позиция относится к дню своей последней продажи; проданная частично и ещё открытая —
+    строка с open=True. SOL-итоги = сумма всех продаж (реальные деньги)."""
     pk = (pubkey or "").strip() or DEFAULT_PUBKEY
-    days: dict[str, dict] = {}
-    tot = dict(pnl=0.0, net=0.0, trades=0, wins=0)   # net = вал минус оценочный round-trip cost
-    pcts: list[float] = []            # доли PnL по каждой сделке (для сводной статистики)
-    # SELL-выжимка (hot + архивы, кэш по size/mtime) вместо read_text() всего
-    # журнала: память не зависит от возраста бота, история видна вся.
+    excl = _pnl_exclusions()
     months: set[str] = set()          # месяцы со сделками этого scope (UI прыгает на последний непустой)
-    by_strat: dict[str, dict] = {}    # Results по стратегиям (сделки до 11.10 — «untracked»)
+    acc: dict[tuple, dict] = {}       # (pubkey, address) → копящаяся позиция
+    closed: list[dict] = []
     for r in backtest.sell_records(LOG_PATH):
-        # pk="*" — не фильтруем (house/бот); иначе только записи этого pubkey
         if pk != "*" and r.get("pubkey", DEFAULT_PUBKEY) != pk:
             continue
         if since and r.get("ts", "") < since:     # витрина беты: история до старта журнала скрыта
             continue
-        months.add(r.get("ts", "")[:7])
-        if not r.get("ts", "").startswith(month):
+        if _excluded(r, excl):
             continue
-        d = r["ts"][:10]
-        pct = float(r.get("pnl", 0.0) or 0.0); size = float(r.get("size_sol", 0.0) or 0.0)
-        if r.get("costed"):                           # издержки уже внутри pnl (модель/факт LIVE)
-            pg = r.get("pnl_gross")
-            pct_g = float(pg) if pg is not None else pct
-            sol, net = pct_g * size, pct * size
-        else:                                         # старые записи — оценочный процент как раньше
-            sol = pct * size
-            net = sol - FEE_ROUNDTRIP_PCT * size
-        cell = days.setdefault(d, dict(pnl=0.0, net=0.0, trades=0, wins=0, list=[]))
-        cell["pnl"] = round(cell["pnl"] + sol, 6); cell["net"] = round(cell["net"] + net, 6); cell["trades"] += 1
-        # детализация сделки: токен, PnL% и в SOL (вал/чистый), время (для клика по дню)
-        cell["list"].append(dict(sym=r.get("symbol", "?"), pct=round(pct, 4),
-                                 sol=round(sol, 6), net=round(net, 6), ts=r.get("ts", "")[11:16],
-                                 address=r.get("address", ""), strategy=r.get("strategy")))
-        bs = by_strat.setdefault(r.get("strategy") or "untracked",
-                                 dict(trades=0, wins=0, pnl=0.0, net=0.0))
-        bs["trades"] += 1; bs["wins"] += sol > 0
-        bs["pnl"] = round(bs["pnl"] + sol, 6); bs["net"] = round(bs["net"] + net, 6)
-        tot["pnl"] = round(tot["pnl"] + sol, 6); tot["net"] = round(tot["net"] + net, 6); tot["trades"] += 1
+        pct, size, sol, net = _sell_sol(r)
+        key = (r.get("pubkey") or DEFAULT_PUBKEY, r.get("address") or r.get("symbol") or "?")
+        a = acc.setdefault(key, dict(sym=r.get("symbol", "?"), address=r.get("address", ""),
+                                     size=0.0, sol=0.0, net=0.0, legs=0, strategy=None))
+        a["size"] += size; a["sol"] += sol; a["net"] += net; a["legs"] += 1
+        a["strategy"] = r.get("strategy") or a["strategy"]
+        a["last_ts"] = r.get("ts", "")
+        if backtest._is_full(r):
+            closed.append(dict(acc.pop(key), open=False))
+    rows = closed + [dict(a, open=True) for a in acc.values()]
+
+    days: dict[str, dict] = {}
+    tot = dict(pnl=0.0, net=0.0, trades=0, wins=0)
+    pcts: list[float] = []
+    by_strat: dict[str, dict] = {}    # Results по стратегиям (сделки до 11.10 — «untracked»)
+    for a in rows:
+        ts = a.get("last_ts", "")
+        months.add(ts[:7])
+        if not ts.startswith(month):
+            continue
+        pct = (a["net"] / a["size"]) if a["size"] > 0 else 0.0     # итог позиции после издержек
+        cell = days.setdefault(ts[:10], dict(pnl=0.0, net=0.0, trades=0, wins=0, list=[]))
+        cell["pnl"] = round(cell["pnl"] + a["sol"], 6); cell["net"] = round(cell["net"] + a["net"], 6)
+        cell["trades"] += 1
+        cell["list"].append(dict(sym=a["sym"], pct=round(pct, 4), sol=round(a["sol"], 6),
+                                 net=round(a["net"], 6), ts=ts[11:16], address=a["address"],
+                                 strategy=a["strategy"], legs=a["legs"], open=a["open"],
+                                 size_sol=round(a["size"], 4)))
+        bs = by_strat.setdefault(a["strategy"] or "untracked", dict(trades=0, wins=0, pnl=0.0, net=0.0))
+        bs["trades"] += 1; bs["wins"] += a["net"] > 0
+        bs["pnl"] = round(bs["pnl"] + a["sol"], 6); bs["net"] = round(bs["net"] + a["net"], 6)
+        tot["pnl"] = round(tot["pnl"] + a["sol"], 6); tot["net"] = round(tot["net"] + a["net"], 6)
+        tot["trades"] += 1
         pcts.append(pct)
-        if sol > 0:
+        if a["net"] > 0:
             cell["wins"] += 1; tot["wins"] += 1
     wins = [p for p in pcts if p > 0]; losses = [p for p in pcts if p <= 0]
     stats = dict(
@@ -2103,11 +2139,13 @@ def pnl_calendar(pubkey: str, month: str, since: str = "") -> dict:
         avg_pnl_pct=round(sum(pcts) / len(pcts), 4) if pcts else 0.0,
         best_pct=round(max(pcts), 4) if pcts else 0.0,
         worst_pct=round(min(pcts), 4) if pcts else 0.0,
-        total_sol=tot["pnl"], net_total_sol=tot["net"], fee_pct=FEE_ROUNDTRIP_PCT)
+        total_sol=tot["pnl"], net_total_sol=tot["net"], fee_pct=FEE_ROUNDTRIP_PCT,
+        costs_sol=round(tot["pnl"] - tot["net"], 6), by="position")
     return dict(month=month, days=days, total=tot, stats=stats, months=sorted(m for m in months if m), since=since,
                 by_strategy={k: dict(v, win_rate=round(v["wins"] / v["trades"], 3) if v["trades"] else 0.0)
                              for k, v in by_strat.items()},
                 strategy_names={k: v["name"] for k, v in strategy.PUBLIC.items()},
+                excluded=len(excl),
                 winrate=round(tot["wins"] / tot["trades"], 3) if tot["trades"] else 0.0)
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -3837,7 +3875,10 @@ def _bot_buy_fn(sess: UserSession):
     def fn(chain, address, size_sol):
         mode = sess.bot.cfg.get("mode")
         cap = CFG["auto_max_per_trade_sol"] if mode == "n3" else CFG["bot_max_per_trade_sol"]
-        size_sol = round(min(sess.risk_cfg().get("user_size_sol") or size_sol, cap), 4)   # тестер: свой размер
+        size_sol = min(sess.risk_cfg().get("user_size_sol") or size_sol, cap)   # тестер: свой размер
+        if mode != "n3":                           # n1/n2: не меньше минимума (фикс-издержки)
+            size_sol = max(size_sol, min(CFG["bot_min_per_trade_sol"], cap))
+        size_sol = round(size_sol, 4)
         # протухшие рыночные данные (GMGN в бане/кулдауне) → не входим по старой цене/метрикам
         age = MK.trending_age(chain)
         if age is not None and age > BOT_MAX_DATA_AGE_S:
