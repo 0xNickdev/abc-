@@ -201,6 +201,40 @@ STRATEGIES = {
              max_age_min=_DEGEN_TRIGGER["max_age_min"], require_renounced_freeze=True)),
 }
 
+# Публичные описания для беты: ЧТО делает стратегия и как выходит — без порогов входа
+# (умные кошельки / перевес покупок / ликвидность / окно возраста = наш эдж, наружу не отдаём).
+# Выходы (стоп/тейки/трейлинг) не секрет — юзер их и так настраивает.
+PUBLIC = {
+    "abc_alpha_v1": dict(
+        name="Balanced", tagline="The default. Early entries with confirmation.",
+        description=("Buys young tokens shortly after launch, but only when several independent "
+                     "signals agree. Takes profit in steps and protects gains with a trailing stop."),
+        activity="Moderate", risk="Medium"),
+    "abc_sniper_v1": dict(
+        name="Sniper", tagline="Few trades, high bar.",
+        description=("Waits for the strongest setups only and skips everything else. Smaller "
+                     "positions, earlier profit-taking and a tighter trailing stop. Pauses after two losses in a row."),
+        activity="Low", risk="Low"),
+    "abc_degen_v1": dict(
+        name="Degen", tagline="More entries, bigger targets. Paper only.",
+        description=("Casts a wide net with a looser bar, gives trades more room and aims for "
+                     "larger moves. Expect many small losses and rare big wins."),
+        activity="High", risk="High"),
+}
+
+def _public_exits(preset: dict) -> dict:
+    return dict(stop_pct=preset.get("hard_stop_pct"), trailing_pct=preset.get("trailing_pct"),
+                take_profit=[dict(at_pct=a, sell_pct=b) for a, b in preset.get("tp_ladder", [])],
+                max_positions=preset.get("max_concurrent_positions"))
+
+def describe_public(active: str = DEFAULT_STRATEGY) -> dict:
+    """Витрина стратегий для тестеров: имя, описание, профиль риска и правила выхода."""
+    out = []
+    for sid, st in STRATEGIES.items():
+        pub = PUBLIC.get(sid) or dict(name=st["name"], tagline="", description="", activity="", risk="")
+        out.append(dict(id=sid, version=st["version"], exits=_public_exits(st["preset"]), **pub))
+    return dict(active=get(active)["id"], strategies=out)
+
 def get(sid: str) -> dict:
     """取具名策略（未知 id → 默认 ABC Alpha v1，绝不 KeyError）。"""
     return STRATEGIES.get(sid) or STRATEGIES[DEFAULT_STRATEGY]

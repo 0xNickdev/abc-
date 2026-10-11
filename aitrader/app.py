@@ -228,6 +228,59 @@ ADMIN_MODE = _admin_env.lower() in ("1", "true", "yes", "on") and not PUBLIC_DEP
 # и только после входа подписью (X-Auth). Для публичного URL с реальными деньгами — един-
 # ственно правильный вариант. Отличаем от legacy по длине (base58 pubkey ≥ 32 символов).
 ADMIN_WALLETS = frozenset(w.strip() for w in _admin_env.split(",") if len(w.strip()) >= 32)
+# Аудит 11.10: после переезда Railway → VPS переменной RAILWAY_ENVIRONMENT нет, и ABC_PUBLIC
+# не задан → PUBLIC_DEPLOY=False → любой посетитель без кошелька был «локальным оператором»
+# (house-бот, вывод session-кошелька куда угодно). Pubkey-админ настраивают только на публичном
+# сервере → его наличие само включает публичный режим (локальный запуск без ABC_ADMIN не меняется).
+if ADMIN_WALLETS:
+    PUBLIC_DEPLOY = True
+
+def _sees_internals(sess, x_auth: str | None) -> bool:
+    """Пороги стратегий, эдж, журнал решений, отслеживаемые кошельки — только оператору.
+    Локальный запуск без настроенного админа (127.0.0.1) = оператор, как в _block_if_not_owner."""
+    if _is_admin(sess, x_auth):
+        return True
+    return sess.pubkey == DEFAULT_PUBKEY and not ADMIN_WALLETS and not PUBLIC_DEPLOY
+
+def _require_internals(sess, x_auth: str | None):
+    if not _sees_internals(sess, x_auth):
+        raise HTTPException(403, "operator only")
+
+# Публичная форма решения скрина: факты о токене (рынок + безопасность) и «подходит ли под
+# стратегию», без порогов/скоров/причин гейтов (это и есть наш эдж — buy_ratio, smart money…).
+_PUB_SAFETY = ("honeypot", "renounced", "renounced_mint", "renounced_freeze", "top10", "dev_hold",
+               "bundler", "sniper_count", "sell_tax", "buy_tax", "rug_ratio",
+               "fresh_wallets", "fresh_ratio", "fresh_checked")
+_PUB_MARKET = ("mcap", "liquidity", "age_min", "holder_count")
+
+def _public_decision(item: dict) -> dict | None:
+    d = (item or {}).get("decision") or {}
+    if d.get("action") != "ACTION":
+        return None                                   # отказы раскрывают гейты — тестерам не нужны
+    f = d.get("features") or {}
+    abc = d.get("abc") or {}
+    sid = next((k for k, v in strategy.STRATEGIES.items() if v["name"] == abc.get("strategy")), None)
+    pub_name = (strategy.PUBLIC.get(sid) or {}).get("name") if sid else None
+    hit = bool(abc.get("triggered"))
+    return dict(decision=dict(
+        symbol=d.get("symbol"), address=d.get("address"), action="ACTION",
+        size_sol=d.get("size_sol"), risk_warn=d.get("risk_warn"),
+        strategy_match=hit, strategy=pub_name,
+        reason=(f"Matches your {pub_name} strategy" if hit and pub_name else
+                "Passed every safety check"),
+        features={k: f[k] for k in (*_PUB_SAFETY, *_PUB_MARKET) if k in f}))
+
+def _public_screen(out: dict) -> dict:
+    decs = [x for x in (_public_decision(i) for i in (out or {}).get("decisions", [])) if x]
+    return dict(out, decisions=decs)
+
+_PUB_BOT_CFG = ("mode", "max_new_per_tick", "poll_s")
+
+def _bot_status(sess, x_auth: str | None) -> dict:
+    st = sess.bot.status()
+    if not _sees_internals(sess, x_auth):
+        st["cfg"] = {k: v for k, v in st["cfg"].items() if k in _PUB_BOT_CFG}
+    return st
 
 def _is_admin(sess, x_auth: str | None) -> bool:
     """Оператор: legacy-флаг (все) ИЛИ кошелёк из ABC_ADMIN, вошедший подписью."""
@@ -3023,7 +3076,9 @@ def api_chain(c: ChainIn):
     return dict(ok=True, chain=ch, trending_cmd=MK.get_trending_cmd(ch))
 
 @app.get("/api/settings")
-def api_settings_get(chain: str = "sol"):
+def api_settings_get(chain: str = "sol", x_wallet: str | None = WalletHeader,
+                     x_auth: str | None = AuthHeader):
+    _require_internals(get_session(x_wallet), x_auth)
     ch = valid_chain(chain)
     return dict(trending_cmd=MK.get_trending_cmd(ch),
                 default_trending_cmd=default_trending_cmd(ch),
@@ -3069,8 +3124,9 @@ def api_prices():
         return dict(ts=time.time(), quotes=dict(_LIVE_QUOTES))
 
 @app.get("/api/wallets")
-def api_wallets():
+def api_wallets(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """私有 smart-money 跟踪钱包统计（总数/分组/样本）。地址在响应里做脱敏。"""
+    _require_internals(get_session(x_wallet), x_auth)
     return wallets.summary()
 
 @app.get("/api/filters")
@@ -3102,16 +3158,17 @@ def api_filters_reset(x_wallet: str | None = WalletHeader, x_auth: str | None = 
     return dict(ok=True, filters=flt)
 
 @app.post("/api/run")
-def api_run(r: RunIn, x_wallet: str | None = WalletHeader):
+def api_run(r: RunIn, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     # 公开演示：不让访客触发 CLI，只回后台线程定时刷新的真实筛选缓存（配额与人数解耦）。
     if PUBLIC_DEMO:
         data = _PUBLIC_CACHE["data"]
         if data is None:
             # 后台首轮还没跑完：返回空列表占位（前端继续轮询即可），不报错。
             return JSONResponse(dict(decisions=[], portfolio=None, positions=[]))
-        return JSONResponse(data)
+        return JSONResponse(_public_screen(data))
     ch = valid_chain(r.chain)
     sess = get_session(x_wallet)
+    view = (lambda o: o) if _sees_internals(sess, x_auth) else _public_screen
     # Rate-limit per-user: /api/run дёргает CLI/квоту оператора — не даём молотить чаще
     # RUN_MIN_INTERVAL_S (сек). UI опрашивает раз в ~5.6s, честным юзерам не мешает.
     now = time.monotonic()
@@ -3119,13 +3176,13 @@ def api_run(r: RunIn, x_wallet: str | None = WalletHeader):
         # несколько вкладок одной сессии делят лимит: отдаём последний скан (не пустой 429),
         # чтобы «неудачливая» вкладка не оставалась с вечным "No candidates"
         if sess.last_screen is not None:
-            return JSONResponse(dict(sess.last_screen, throttled=True))
+            return JSONResponse(dict(view(sess.last_screen), throttled=True))
         raise HTTPException(429, "too fast — wait a couple of seconds")
     sess.last_run = now
     try:                                   # screen_once сам берёт замок на короткие участки
         out = screen_once(ch, sess)
         sess.last_screen = out
-        return JSONResponse(out)
+        return JSONResponse(view(out))
     except Exception as e:
         import traceback
         traceback.print_exc()                            # реальная причина (gmgn-cli/timeout) → в логи Railway
@@ -3174,15 +3231,20 @@ def api_positions(chain: str = "sol", x_wallet: str | None = WalletHeader):
         return dict(positions=monitor_positions(ch, s=sess, pre=pre), portfolio=_portfolio(sess))
 
 @app.get("/api/strategy")
-def api_strategy(x_wallet: str | None = WalletHeader):
-    """当前用户选定策略的说明（触发阈值 + 预设 + 论点）。"""
+def api_strategy(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
+    """当前用户选定策略的说明（触发阈值 + 预设 + 论点）。Тестерам — публичное описание."""
     sess = get_session(x_wallet)
+    if not _sees_internals(sess, x_auth):
+        pub = strategy.describe_public(sess.strategy_id)
+        return next(x for x in pub["strategies"] if x["id"] == pub["active"])
     return strategy.get(sess.strategy_id)
 
 @app.get("/api/strategies")
-def api_strategies(x_wallet: str | None = WalletHeader):
-    """全部具名策略 + 当前用户激活的（前端策略选择卡片直接渲染）。"""
+def api_strategies(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
+    """全部具名策略 + 当前用户激活的（前端策略选择卡片直接渲染）。Тестерам — без порогов входа."""
     sess = get_session(x_wallet)
+    if not _sees_internals(sess, x_auth):
+        return strategy.describe_public(sess.strategy_id)
     return strategy.describe_all(sess.strategy_id)
 
 class StrategyIn(BaseModel):
@@ -3198,6 +3260,8 @@ def api_strategy_select(sel: StrategyIn, x_wallet: str | None = WalletHeader, x_
         sid = sess.set_strategy(sel.id)
     st = strategy.get(sid)
     log("STRATEGY", st["name"], f"выбрана стратегия {st['name']} v{st['version']}", mode=sess.mode)
+    if not _sees_internals(sess, x_auth):
+        return dict(ok=True, active=sid)
     return dict(ok=True, active=sid, strategy=st)
 
 @app.post("/api/strategy/apply")
@@ -3218,9 +3282,10 @@ def api_strategy_apply(x_wallet: str | None = WalletHeader, x_auth: str | None =
                 cfg_preset=st["preset"], filters=sess.filters)
 
 @app.get("/api/backtest")
-def api_backtest(x_wallet: str | None = WalletHeader):
+def api_backtest(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """从 trade_decisions.jsonl 复盘：漏斗 + 已实现 PnL/胜率/R + 纸面预期 R（按选定策略阈值）。"""
     sess = get_session(x_wallet)
+    _require_internals(sess, x_auth)              # вся история + пороги стратегии
     # передаём актуальный путь журнала (backtest.py по умолчанию смотрит в HERE/outputs,
     # а с ABC_DATA_DIR журнал лежит на подключённом диске — иначе бэктест «видит» 0)
     return backtest.summary(path=LOG_PATH, trig=strategy.get(sess.strategy_id)["trigger"],
@@ -3280,10 +3345,10 @@ def _apply_review_param(target: str, param: str, value, sess: UserSession):
     raise HTTPException(400, "target: CFG | filters | bot")
 
 @app.get("/api/review")
-def api_review(x_wallet: str | None = WalletHeader):
+def api_review(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """Отчёт review-loop: эдж кошельков/KOL + предложения по конфигу. Отдаёт сегодняшний
     сохранённый отчёт (если ночной цикл уже считал) или считает на лету (read-only)."""
-    get_session(x_wallet)
+    _require_internals(get_session(x_wallet), x_auth)
     rep = None
     try:
         p = REVIEWS_DIR / (datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d") + ".json")
@@ -3605,10 +3670,14 @@ def _bot_sell_fn(sess: UserSession):
     return fn
 
 @app.get("/api/bot")
-def api_bot(x_wallet: str | None = WalletHeader):
+def api_bot(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """机器人状态（开关/链/间隔/参数/统计）+ 说明（前端可直接渲染）。每用户一个机器人。"""
     sess = get_session(x_wallet)
-    return dict(**sess.bot.status(), describe=bot.describe(),
+    st = sess.bot.status()
+    if not _sees_internals(sess, x_auth):          # пороги фильтров бота (перевес, smart money) скрыты
+        st["cfg"] = {k: v for k, v in st["cfg"].items() if k in _PUB_BOT_CFG}
+        return dict(**st, mode=sess.mode, trading_locked=LIVE_TRADING_DISABLED)
+    return dict(**st, describe=bot.describe(),
                 mode=sess.mode, trading_locked=LIVE_TRADING_DISABLED)
 
 @app.post("/api/bot/start")
@@ -3628,7 +3697,7 @@ def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader, x_auth: str | N
         halted_fn=lambda: sess.risk.halted_now(CFG["daily_loss_cap_sol"], _fuses_on(sess)),
         max_positions_fn=lambda: _max_positions(sess))
     log("BOT", "ABC", "Autonomous loop started" if started else "Already running (duplicate start ignored)", mode=sess.mode)
-    return dict(ok=True, started=started, **sess.bot.status())
+    return dict(ok=True, started=started, **_bot_status(sess, x_auth))
 
 @app.post("/api/bot/stop")
 def api_bot_stop(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
@@ -3638,7 +3707,7 @@ def api_bot_stop(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthH
     _guard_write(sess, x_auth)
     sess.bot.stop()
     log("BOT", "ABC", "Autonomous loop stopped", mode=sess.mode)
-    return dict(ok=True, **sess.bot.status())
+    return dict(ok=True, **_bot_status(sess, x_auth))
 
 @app.post("/api/bot/config")
 def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
@@ -3655,7 +3724,10 @@ def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader, x_auth: 
         patch["max_new_per_tick"] = max(0, min(5, int(patch["max_new_per_tick"])))
     with sess.lock:
         sess.bot.cfg.update(patch)
-    return dict(ok=True, cfg=dict(sess.bot.cfg))
+    cfg = dict(sess.bot.cfg)
+    if not _sees_internals(sess, x_auth):
+        cfg = {k: v for k, v in cfg.items() if k in _PUB_BOT_CFG}
+    return dict(ok=True, cfg=cfg)
 
 @app.get("/api/bot/proposals")
 def api_bot_proposals(x_wallet: str | None = WalletHeader):
@@ -3945,9 +4017,11 @@ def api_kol_rating():
     return dict(rating=kol.rating())
 
 @app.get("/api/snapshots")
-def api_snapshots(address: str | None = None, limit: int = 100):
+def api_snapshots(address: str | None = None, limit: int = 100,
+                  x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """История снапшотов качества токенов из SQLite (opt-in ABC_SNAPSHOT_DB=1) — для UI/анализа."""
     _block_if_public()
+    _require_internals(get_session(x_wallet), x_auth)
     return dict(enabled=db.enabled(),
                 snapshots=db.recent(min(int(limit), 1000), address))
 
