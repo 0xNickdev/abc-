@@ -81,3 +81,12 @@ def test_endpoint_per_session_rate_limit(client, monkeypatch):
 
 def test_endpoint_rejects_bad_address(client):
     assert client.get("/api/token/check", params={"address": "nope"}).status_code == 400
+
+
+def test_calls_endpoints_public_and_sources_operator_only(client, monkeypatch):
+    assert client.get("/api/calls").status_code == 200
+    assert client.get("/api/calls/callers").status_code == 200
+    assert client.get("/api/calls", params={"source": "bad"}).status_code == 400
+    h = {"X-Wallet": "UserDxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
+    assert client.get("/api/calls/sources", headers=h).status_code == 403
+    assert client.post("/api/calls/sources", headers=h, json={"tg": ["x"]}).status_code == 403

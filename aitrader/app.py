@@ -58,6 +58,7 @@ import dexadapter  # реальные данные без ключей (GeckoTer
 import execution  # non-custodial：服务器只构建 tx，签名在浏览器（Phantom）
 import farm  # детектор ферм по кластеризации истории кошельков (gmgn portfolio activity)
 import gmgnguard  # общий ban-гейт + лимитер для всех вызовов gmgn-cli
+import calls  # сканер коллов: X (getxapi) + публичные Telegram-каналы + автопоиск коллеров
 import kol  # Twitter/X KOL 信号（per-user opt-in）
 import notify  # Telegram-алерты оператору (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)
 import pumpcurve  # цена pump.fun из bonding curve по RPC (fallback для свежих токенов)
@@ -75,6 +76,8 @@ STATIC_DIR = HERE / "static"
 # OUT_DIR можно вынести на постоянный диск (Railway Volume): ABC_DATA_DIR=/data →
 # журнал/позиции/фильтры переживут перезапуск контейнера (эфемерная ФС иначе стирает).
 OUT_DIR = pathlib.Path(os.getenv("ABC_DATA_DIR").strip()) if os.getenv("ABC_DATA_DIR", "").strip() else HERE / "outputs"
+# Рейтинг KOL — в каталоге данных (раньше лежал в папке кода → терялся при пересоздании контейнера)
+kol.CALLS_PATH = OUT_DIR / "kol_calls.json"
 LOG_PATH = OUT_DIR / "trade_decisions.jsonl"
 POSITIONS_PATH = OUT_DIR / "positions.json"   # 持仓落盘：reload/重启不丢，与筛选榜完全独立
 TRENDING_CMDS_PATH = OUT_DIR / "trending_cmds.json"   # 按链热榜命令落盘：用户改过即持久，重启/刷新不回默认
@@ -2410,6 +2413,9 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
         except Exception:
             pass              # снапшот НИКОГДА не роняет скан
 
+    if CALLS_ON and s is ST:              # автопоиск коллеров: кто в X постил наши кандидаты
+        _discover_calls([d["decision"]["address"] for d in decisions
+                         if d["decision"].get("action") == "ACTION"][:3])
     # 回传后端真实 mode：前端据此同步 LIVE/SHADOW 开关，避免重启后端后开关停留在 LIVE 误导
     return dict(decisions=decisions, portfolio=portfolio, positions=positions_out, mode=s.mode)
 
@@ -3000,6 +3006,8 @@ async def _lifespan(_app: FastAPI):
     # прогрев выжимки журнала в фоне: первый посетитель календаря не ждёт минуты после деплоя
     threading.Thread(target=lambda: backtest.collect(LOG_PATH), daemon=True).start()
     threading.Thread(target=_health_loop, daemon=True).start()
+    if CALLS_ON:
+        CALLS.start()                     # сканер коллов (X-список, Telegram, автопоиск)
     notify.send(f"started: bot {'ON ' + ST.bot.cfg.get('mode', '') if ST.bot.enabled else 'OFF'}, "
                 f"{len(ST.positions)} open positions, mode {ST.mode}", key="boot", cooldown_s=300)
     if os.getenv("ABC_WATCH", "1").strip().lower() in ("1", "true", "yes", "on"):
@@ -4253,6 +4261,19 @@ def api_token_quality(address: str):
     out["red_flag"] = red
     return out
 
+CALLS = calls.CallScanner(OUT_DIR)
+CALLS_ON = os.getenv("ABC_CALLS", "1").strip().lower() in ("1", "true", "yes", "on")
+
+def _discover_calls(addrs: list[str]):
+    """Автопоиск коллеров по прошедшим скрин токенам — в фоне, без замков (сеть)."""
+    def run():
+        for a in addrs:
+            try:
+                CALLS.discover(a)
+            except Exception:
+                pass
+    threading.Thread(target=run, name="calls-discover", daemon=True).start()
+
 # ── Карточка проверки токена для тестеров (Signals → Safety). Факты о безопасности, не эдж.
 # Мгновенная часть — из скрина (features). Глубокая — rugcheck + RPC свежие коши + X (getxapi)
 # кэшируется по токену на всех: 10 тестеров на одном токене = 1 платный запрос.
@@ -4428,6 +4449,44 @@ def api_token_check(address: str, deep: int = 1, x_wallet: str | None = WalletHe
     items = check_items(f, d)
     return dict(address=address, symbol=f.get("symbol"), items=items, verdict=check_verdict(items),
                 deep=bool(deep), cached=cached, checked_at=time.time())
+
+# ── Сканер коллов: лента, рейтинг коллеров, источники (оператор) ──
+@app.get("/api/calls")
+def api_calls(source: str = "all", hours: float = 24.0, limit: int = 60,
+              x_wallet: str | None = WalletHeader):
+    """Лента коллов по токенам: кто коллил, когда, капа на колле → сейчас, пик, безопасность."""
+    if source not in ("all", "x", "tg"):
+        raise HTTPException(400, "source: all | x | tg")
+    sess = get_session(x_wallet)
+    rows = CALLS.feed(source, max(1.0, min(float(hours), 72.0)), max(1, min(int(limit), 100)))
+    for r in rows:
+        f = _features_for(r["ca"], sess)
+        r["safety"] = check_verdict(check_items(f, None)) if f else None
+    return dict(calls=rows, sources=dict(x=len(CALLS.watched_x()), tg=len(CALLS.sources["tg"])),
+                updated=CALLS.stats.get("last_x") or CALLS.stats.get("last_tg"))
+
+@app.get("/api/calls/callers")
+def api_calls_callers(limit: int = 30):
+    """Рейтинг коллеров по факту: сколько коллов, доля ≥2x от цены колла, медианный икс."""
+    return dict(callers=CALLS.callers()[: max(1, min(int(limit), 100))], win_x=calls.WIN_X)
+
+class CallSourcesIn(BaseModel):
+    x: list[str] | None = None
+    tg: list[str] | None = None
+
+@app.get("/api/calls/sources")
+def api_calls_sources(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
+    _require_internals(get_session(x_wallet), x_auth)
+    return dict(sources=CALLS.sources, watched_x=CALLS.watched_x(), stats=CALLS.stats,
+                x_key=bool(xapi.key()))
+
+@app.post("/api/calls/sources")
+def api_calls_sources_set(c: CallSourcesIn, x_wallet: str | None = WalletHeader,
+                          x_auth: str | None = AuthHeader):
+    _require_internals(get_session(x_wallet), x_auth)
+    src = CALLS.set_sources(x=c.x, tg=c.tg)
+    log("CALLS", "ABC", f"sources: {len(src['x'])} X, {len(src['tg'])} Telegram")
+    return dict(sources=src, watched_x=CALLS.watched_x())
 
 def _farm_fns(g):
     """Адаптер gmgn → колбэки для farm.detect. Терпимо к адаптерам без методов (→ пусто)."""
