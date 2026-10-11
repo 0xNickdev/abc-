@@ -517,7 +517,7 @@ details.adv[open] summary svg{transform:rotate(90deg)}
     </div>
     <div class="big">
       <div class="kpi panel rv" style="--i:1"><span>Net result, after fees</span><b class="num" id="rNet">—</b><small id="rGross">&nbsp;</small></div>
-      <div class="kpi panel rv" style="--i:2"><span>Trades</span><b class="num" id="rTrades">—</b><small>&nbsp;</small></div>
+      <div class="kpi panel rv" style="--i:2"><span>Positions</span><b class="num" id="rTrades">—</b><small id="rTradesN">&nbsp;</small></div>
       <div class="kpi panel rv" style="--i:3"><span>Win rate</span><b class="num" id="rWin">—</b><small id="rAvg">&nbsp;</small></div>
       <div class="kpi panel rv" style="--i:4"><span>Best / worst</span><b class="num" id="rBest">—</b><small id="rWorst">&nbsp;</small></div>
     </div>
@@ -532,7 +532,7 @@ details.adv[open] summary svg{transform:rotate(90deg)}
       <div class="axis"><span id="ax0">&nbsp;</span><span id="ax1">&nbsp;</span></div>
     </div>
     <div class="sec">
-      <div class="sechead"><h2>Recent trades</h2><small id="trNote">&nbsp;</small></div>
+      <div class="sechead"><h2>Recent positions</h2><small id="trNote">&nbsp;</small></div>
       <div class="panel list"><table class="trades"><thead><tr><th>Token</th><th>Date</th><th>Strategy</th><th class="r">Result</th><th class="r">Net SOL</th></tr></thead><tbody id="trades"></tbody></table></div>
       <p class="note">Net = after the estimated round-trip cost: swap fees, slippage, priority fee and account rent.</p>
     </div>
@@ -1238,7 +1238,8 @@ async function loadResults() {
 function renderResults() {
   const c = S.cal || { days: {}, stats: {}, total: {} }, st = c.stats || {}, tot = c.total || {};
   $('rNet').textContent = st.trades ? sol(st.net_total_sol) : '—'; $('rNet').className = 'num ' + cls(st.net_total_sol);
-  $('rGross').textContent = st.trades ? 'before fees ' + sol(st.total_sol) : 'no closed trades this month';
+  $('rGross').textContent = st.trades ? 'before fees ' + sol(st.total_sol) + ' · fees and slippage ' + sol(-(st.costs_sol || 0)) : 'no closed trades this month';
+  $('rTradesN').textContent = st.trades ? 'partial sells count as one' : ' ';
   $('rTrades').textContent = st.trades || 0;
   $('rWin').textContent = st.trades ? Math.round(st.win_rate * 100) + '%' : '—';
   $('rAvg').textContent = st.trades ? 'avg win ' + pct(st.avg_win_pct, 0) + ' · avg loss ' + pct(st.avg_loss_pct, 0) : ' ';
@@ -1284,12 +1285,13 @@ function renderResults() {
   const rows = [];
   days.forEach(d => (c.days[d].list || []).forEach(t => rows.push(Object.assign({ d }, t))));
   rows.sort((a, b) => (b.d + b.ts).localeCompare(a.d + a.ts));
-  $('trNote').textContent = rows.length > 30 ? 'last 30 of ' + rows.length : rows.length ? rows.length + ' trades' : ' ';
+  $('trNote').textContent = rows.length > 30 ? 'last 30 of ' + rows.length : rows.length ? rows.length + ' positions' : ' ';
   $('trades').innerHTML = rows.length ? rows.slice(0, 30).map(t =>
-    '<tr><td><b style="font-weight:600">' + esc(t.sym) + '</b></td><td class="muted num">' + dm(t.d) + ', ' + esc(t.ts) + '</td>' +
+    '<tr><td><b style="font-weight:600">' + esc(t.sym) + '</b>' + (t.open ? ' <span class="chip mid" style="font-size:11px;padding:1px 7px">open</span>' : '') +
+      (t.legs > 1 ? '<span class="muted" style="font-size:12px"> · ' + t.legs + ' parts</span>' : '') + '</td><td class="muted num">' + dm(t.d) + ', ' + esc(t.ts) + '</td>' +
     '<td class="muted">' + esc((c.strategy_names || {})[t.strategy] || '—') + '</td>' +
     '<td class="r num ' + cls(t.pct) + '">' + pct(t.pct, 1) + '</td><td class="r num ' + cls(t.net) + '">' + sol(t.net, 4).replace(' SOL', '') + '</td></tr>').join('')
-    : '<tr><td colspan="5" class="empty">' + (S.scope === 'me' ? 'No closed trades of yours this month yet.' : 'No closed trades this month.') + '</td></tr>';
+    : '<tr><td colspan="5" class="empty">' + (S.scope === 'me' ? 'No closed positions of yours this month yet.' : 'No closed positions this month.') + '</td></tr>';
 }
 
 $('chartEmpty').addEventListener('click', e => { const b = e.target.closest('[data-month]'); if (b) { S.month = b.dataset.month; S.monthTouched = true; loadResults(); } });
