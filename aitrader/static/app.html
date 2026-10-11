@@ -242,6 +242,14 @@ main,footer,.alert{position:relative;z-index:1}
 .br .r{text-align:right}
 .callsgrid{display:grid;grid-template-columns:minmax(0,1fr);gap:34px}
 
+/* ── token name + CA ── */
+.tname{color:inherit;text-decoration:none;border-bottom:1px solid transparent;transition:border-color .15s}
+.tname:hover{border-bottom-color:rgba(255,255,255,.5)}
+.ca{display:inline-flex;align-items:center;gap:4px;color:var(--strip);font-size:12px;font-family:ui-monospace,Menlo,monospace;text-align:left;padding:0}
+.ca:hover{color:#fff}
+.ca svg{width:11px;height:11px}
+.tcell{display:flex;flex-direction:column;gap:2px;min-width:0}
+
 /* ── token check ── */
 .chipbtn{cursor:pointer;background:none;font:inherit;transition:background .18s}
 .chipbtn:hover{background:rgba(255,255,255,.06)}
@@ -542,7 +550,7 @@ details.adv[open] summary svg{transform:rotate(90deg)}
     <div class="sec">
       <div class="sechead"><h2>Recent positions</h2><small id="trNote">&nbsp;</small></div>
       <div class="panel list"><table class="trades"><thead><tr><th>Token</th><th>Date</th><th>Strategy</th><th class="r">Result</th><th class="r">Net SOL</th></tr></thead><tbody id="trades"></tbody></table></div>
-      <p class="note">Net = after the estimated round-trip cost: swap fees, slippage, priority fee and account rent.</p>
+      <p class="note">Net = after the estimated round-trip cost: swap fees, slippage and priority fee. Token account rent is returned when a position fully closes. Click a token to open it on GMGN, click the address to copy it.</p>
     </div>
   </section>
 </main>
@@ -604,6 +612,9 @@ const pct = (v, d = 1) => v == null || isNaN(v) ? '—' : sgn(v) + Math.abs(v * 
 const sol = (v, d = 3) => v == null || isNaN(v) ? '—' : sgn(v) + Math.abs(v).toFixed(d) + ' SOL';
 const cls = v => v > 0 ? 'up' : v < 0 ? 'down' : '';
 const age = m => { m = +m || 0; return m < 60 ? Math.round(m) + 'm' : m < 1440 ? Math.round(m / 60) + 'h' : Math.round(m / 1440) + 'd'; };
+const gmgn = a => 'https://gmgn.ai/sol/token/' + encodeURIComponent(a || '');
+const tokName = (sym, a) => a ? '<a class="tname" href="' + gmgn(a) + '" target="_blank" rel="noopener" title="Open on GMGN">' + esc(sym) + '</a>' : esc(sym);
+const caBtn = a => a ? '<button class="ca" data-copy="' + esc(a) + '" title="Copy contract address">' + short(a) + ' ' + ICON.copy + '</button>' : '';
 const usd = v => { v = +v || 0; return v >= 1e6 ? '$' + (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? '$' + (v / 1e3).toFixed(1) + 'k' : '$' + v.toFixed(0); };
 const ICON = {
   xlogo: '<svg class="i" viewBox="0 0 16 16" style="stroke:none;fill:currentColor"><path d="M12.2 1.5h2.2L9.6 7l5.6 7.5h-4.4L7.4 9.9 3.5 14.5H1.3l5.1-5.9L1 1.5h4.5l3.1 4.1zm-.8 11.7h1.2L4.7 2.7H3.4z"/></svg>',
@@ -882,7 +893,7 @@ function renderPositions() {
   box.innerHTML = S.positions.map((p, i) => {
     const hot = (p.signals || []).filter(s => s.hot).map(s => s.t)[0];
     return '<div class="card panel">' +
-      '<div class="row1"><span class="sym">' + esc(p.symbol) + '</span><span class="pct num ' + cls(p.pnl) + '">' + pct(p.pnl) + '</span></div>' +
+      '<div class="row1"><span class="tcell"><span class="sym">' + tokName(p.symbol, p.address) + '</span>' + caBtn(p.address) + '</span><span class="pct num ' + cls(p.pnl) + '">' + pct(p.pnl) + '</span></div>' +
       '<div class="meta"><span>Size <b class="num">' + (+p.size_sol || 0).toFixed(3) + '</b></span>' +
       (p.mcap ? '<span>MC <b class="num">' + usd(p.mcap) + '</b></span>' : '') +
       (p.self_custody ? '<span><b>Live</b> · your wallet</span>' : '<span><b>Paper</b></span>') + '</div>' +
@@ -988,7 +999,7 @@ function renderSignals() {
     S.signals.map((s, i) => {
       const f = s.features || {}, [sc, st] = s.safety ? [s.safety.level === 'ok' ? 'ok' : s.safety.level === 'warn' ? 'mid' : 'bad', s.safety.label] : safety(f);
       return '<div class="sig">' +
-        '<div class="tok"><b>' + esc(s.symbol) + '</b><button data-copy="' + esc(s.address) + '" title="Copy contract address">' + short(s.address) + ' ' + ICON.copy + '</button>' +
+        '<div class="tok"><b>' + tokName(s.symbol, s.address) + '</b><button data-copy="' + esc(s.address) + '" title="Copy contract address">' + short(s.address) + ' ' + ICON.copy + '</button>' +
         (s.strategy_match ? '<span class="star">' + ICON.bolt + 'Fits your strategy</span>' : '') + '</div>' +
         '<div class="c-mc num">' + usd(f.mcap) + '</div>' +
         '<div class="c-liq num">' + usd(f.liquidity) + '</div>' +
@@ -1001,8 +1012,6 @@ function renderSignals() {
     }).join('');
 }
 $('sigs').addEventListener('click', e => {
-  const c = e.target.closest('[data-copy]');
-  if (c) { try { navigator.clipboard.writeText(c.dataset.copy); toast('Contract address copied'); } catch (err) {} return; }
   const b = e.target.closest('[data-buy]'); if (!b) return;
   const s = S.signals[+b.dataset.buy]; if (!s) return;
   if (!S.wallet) { toast('Connect Phantom to buy', 'err'); connect(); return; }
@@ -1063,7 +1072,7 @@ function renderCalls() {
       const chip = sf ? '<button class="chip chipbtn ' + (sf.level === 'ok' ? 'ok' : sf.level === 'warn' ? 'mid' : 'bad') + '" data-check="' + esc(r.ca) + '" data-sym="' + esc(r.symbol) + '">' + esc(sf.label) + ICON.chev + '</button>'
         : '<button class="chip chipbtn" data-check="' + esc(r.ca) + '" data-sym="' + esc(r.symbol) + '">Check' + ICON.chev + '</button>';
       return '<div class="cl">' +
-        '<div class="tok"><b>' + esc(r.symbol) + '</b><button data-copy="' + esc(r.ca) + '" title="Copy contract address">' + short(r.ca) + ' ' + ICON.copy + '</button></div>' +
+        '<div class="tok"><b>' + tokName(r.symbol, r.ca) + '</b><button data-copy="' + esc(r.ca) + '" title="Copy contract address">' + short(r.ca) + ' ' + ICON.copy + '</button></div>' +
         '<div class="who">' + shown.map(callerChip).join('') + (cs.length > 3 ? '<span class="more">+' + (cs.length - 3) + '</span>' : '') + '</div>' +
         '<div class="c-when muted">' + ago(r.first_ts) + '</div>' +
         '<div class="c-mcx mcx num"><b>' + usd(r.mcap0) + ' → ' + (r.mcap_now ? usd(r.mcap_now) : '—') + '</b><small class="' + cls((xn || 1) - 1) + '">' + xfmt(xn) + ' now · peak ' + xfmt(r.peak_x) + '</small></div>' +
@@ -1084,8 +1093,6 @@ function renderCallers(list) {
 $('v-calls').addEventListener('click', e => {
   const sb = e.target.closest('[data-csrc]');
   if (sb) { _csrc = sb.dataset.csrc; loadCalls(); return; }
-  const c = e.target.closest('[data-copy]');
-  if (c) { try { navigator.clipboard.writeText(c.dataset.copy); toast('Contract address copied'); } catch (err) {} return; }
   const b = e.target.closest('[data-cbuy]');
   if (b) {
     const r = _calls[+b.dataset.cbuy]; if (!r) return;
@@ -1093,6 +1100,19 @@ $('v-calls').addEventListener('click', e => {
     openBuy({ symbol: r.symbol, address: r.ca, size_sol: (S.risk && S.risk.effective && S.risk.effective.size_sol) || 0.05 });
   }
 });
+
+/* copy contract address anywhere: click on a [data-copy] element */
+document.addEventListener('click', e => {
+  const c = e.target.closest('[data-copy]'); if (!c) return;
+  e.preventDefault(); e.stopPropagation();
+  const done = () => toast('Contract address copied');
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(c.dataset.copy).then(done, () => fallbackCopy(c.dataset.copy, done));
+  else fallbackCopy(c.dataset.copy, done);
+}, true);
+function fallbackCopy(text, done) {
+  const t = document.createElement('textarea'); t.value = text; t.style.position = 'fixed'; t.style.opacity = '0';
+  document.body.appendChild(t); t.select(); try { document.execCommand('copy'); done(); } catch (e) {} t.remove();
+}
 
 /* ── TOKEN CHECK ── */
 const CK_GROUPS = ['Contract', 'Holders', 'Dev', 'X account'];
@@ -1337,8 +1357,8 @@ function renderResults() {
   rows.sort((a, b) => (b.d + b.ts).localeCompare(a.d + a.ts));
   $('trNote').textContent = rows.length > 30 ? 'last 30 of ' + rows.length : rows.length ? rows.length + ' positions' : ' ';
   $('trades').innerHTML = rows.length ? rows.slice(0, 30).map(t =>
-    '<tr><td><b style="font-weight:600">' + esc(t.sym) + '</b>' + (t.open ? ' <span class="chip mid" style="font-size:11px;padding:1px 7px">open</span>' : '') +
-      (t.legs > 1 ? '<span class="muted" style="font-size:12px"> · ' + t.legs + ' parts</span>' : '') + '</td><td class="muted num">' + dm(t.d) + ', ' + esc(t.ts) + '</td>' +
+    '<tr><td><div class="tcell"><span><b style="font-weight:600">' + tokName(t.sym, t.address) + '</b>' + (t.open ? ' <span class="chip mid" style="font-size:11px;padding:1px 7px">open</span>' : '') +
+      (t.legs > 1 ? '<span class="muted" style="font-size:12px"> · ' + t.legs + ' parts</span>' : '') + '</span>' + caBtn(t.address) + '</div></td><td class="muted num">' + dm(t.d) + ', ' + esc(t.ts) + '</td>' +
     '<td class="muted">' + esc((c.strategy_names || {})[t.strategy] || '—') + '</td>' +
     '<td class="r num ' + cls(t.pct) + '">' + pct(t.pct, 1) + '</td><td class="r num ' + cls(t.net) + '">' + sol(t.net, 4).replace(' SOL', '') + '</td></tr>').join('')
     : '<tr><td colspan="5" class="empty">' + (S.scope === 'me' ? 'No closed positions of yours this month yet.' : 'No closed positions this month.') + '</td></tr>';
