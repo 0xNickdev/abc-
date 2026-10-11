@@ -216,6 +216,31 @@ main,footer,.alert{position:relative;z-index:1}
 .linkbtn{color:#fff;text-decoration:underline;text-underline-offset:3px;text-decoration-color:rgba(255,255,255,.35)}
 .linkbtn:hover{text-decoration-color:#fff}
 
+/* ── token check ── */
+.chipbtn{cursor:pointer;background:none;font:inherit;transition:background .18s}
+.chipbtn:hover{background:rgba(255,255,255,.06)}
+.sheet.wide{max-width:560px;max-height:88vh;overflow:auto}
+.ckhead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:6px}
+.ckhead h3{margin:0}
+.ckhead .ca{color:var(--strip);font-size:12px;font-family:ui-monospace,Menlo,monospace;word-break:break-all}
+.verdict{display:flex;align-items:center;gap:12px;margin:16px 0 6px;padding:14px 16px;border-radius:14px;border:1px solid var(--line2)}
+.verdict b{font-size:18px;font-weight:600}
+.verdict span{color:var(--muted);font-size:13.5px}
+.verdict.ok{border-color:rgba(126,226,168,.35);background:rgba(126,226,168,.06)}.verdict.ok b{color:var(--up)}
+.verdict.warn{border-color:rgba(242,196,109,.35);background:rgba(242,196,109,.06)}.verdict.warn b{color:var(--warn)}
+.verdict.bad{border-color:rgba(255,143,143,.35);background:rgba(255,143,143,.06)}.verdict.bad b{color:var(--down)}
+.ckgroup{margin-top:18px}
+.ckgroup h4{margin:0 0 6px;font-weight:500;font-size:12.5px;color:var(--strip);letter-spacing:.04em;text-transform:uppercase}
+.ckrow{display:grid;grid-template-columns:18px 1fr auto;gap:10px;align-items:start;padding:9px 0;border-top:1px solid var(--line)}
+.ckrow:first-of-type{border-top:0}
+.ckrow svg{margin-top:2px}
+.ckrow.ok svg{color:var(--up)}.ckrow.warn svg{color:var(--warn)}.ckrow.bad svg{color:var(--down)}.ckrow.na svg{color:var(--dim)}
+.ckrow .l{font-size:14px}
+.ckrow .n{display:block;color:var(--strip);font-size:12.5px;margin-top:2px}
+.ckrow .v{font-size:14px;color:#d6d6d6;text-align:right;white-space:nowrap}
+.ckwait{display:flex;gap:10px;align-items:center;color:var(--muted);font-size:13.5px;margin-top:18px}
+.ckfoot{margin-top:18px;color:var(--dim);font-size:12.5px}
+
 /* ── strategy & risk ── */
 .setup{margin:12px 0 0;color:var(--strip);font-size:13.5px}
 .setup b{color:#d6d6d6;font-weight:500}
@@ -472,6 +497,15 @@ details.adv[open] summary svg{transform:rotate(90deg)}
   </div>
 </div>
 
+<div class="scrim" id="ckScrim" role="dialog" aria-modal="true" aria-labelledby="ckH">
+  <div class="sheet wide">
+    <div class="ckhead"><div><h3 id="ckH">Token check</h3><div class="ca" id="ckCa"></div></div>
+      <button class="iconbtn" id="ckClose" aria-label="Close"><svg class="i" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8"/></svg></button></div>
+    <div id="ckBody"></div>
+    <p class="ckfoot">These checks lower the odds of a rug. They can't rule one out. Never trade money you can't lose.</p>
+  </div>
+</div>
+
 <div class="scrim" id="buyScrim" role="dialog" aria-modal="true" aria-labelledby="buyH">
   <div class="sheet">
     <h3 id="buyH">Buy</h3>
@@ -504,6 +538,11 @@ const cls = v => v > 0 ? 'up' : v < 0 ? 'down' : '';
 const age = m => { m = +m || 0; return m < 60 ? Math.round(m) + 'm' : m < 1440 ? Math.round(m / 60) + 'h' : Math.round(m / 1440) + 'd'; };
 const usd = v => { v = +v || 0; return v >= 1e6 ? '$' + (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? '$' + (v / 1e3).toFixed(1) + 'k' : '$' + v.toFixed(0); };
 const ICON = {
+  chev: '<svg class="i" viewBox="0 0 16 16" style="width:11px;height:11px;margin-left:2px"><path d="m6 4 4 4-4 4"/></svg>',
+  st_ok: '<svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="m5.3 8.2 1.8 1.8 3.6-3.8"/></svg>',
+  st_warn: '<svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="M8 4.8v3.8M8 11.1v.1"/></svg>',
+  st_bad: '<svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="m5.7 5.7 4.6 4.6M10.3 5.7l-4.6 4.6"/></svg>',
+  st_na: '<svg class="i" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.5"/><path d="M5.5 8h5"/></svg>',
   wallet: '<svg class="i" viewBox="0 0 16 16"><path d="M13 5V3.5A1.5 1.5 0 0 0 11.5 2h-8A1.5 1.5 0 0 0 2 3.5v9A1.5 1.5 0 0 0 3.5 14h9a1.5 1.5 0 0 0 1.5-1.5v-6A1.5 1.5 0 0 0 12.5 5H3.5"/><circle cx="11" cy="9.5" r=".8"/></svg>',
   copy: '<svg class="i" viewBox="0 0 16 16" style="width:12px;height:12px"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5"/><path d="M10.5 5V3.5A1.5 1.5 0 0 0 9 2H3.5A1.5 1.5 0 0 0 2 3.5V9a1.5 1.5 0 0 0 1.5 1.5H5"/></svg>',
   warn: '<svg class="i" viewBox="0 0 16 16" style="width:14px;height:14px"><path d="M8 2 1.5 13.5h13z"/><path d="M8 6.5v3M8 11.6v.1"/></svg>',
@@ -777,6 +816,7 @@ function renderPositions() {
       (p.self_custody ? '<span><b>Live</b> · your wallet</span>' : '<span><b>Paper</b></span>') + '</div>' +
       (hot ? '<div class="warnline">' + ICON.warn + '<span>' + esc(hot) + '</span></div>' : '') +
       '<div class="acts"><button class="ghostbtn sm" data-sell="' + i + '">Sell all</button>' +
+      '<button class="ghostbtn sm" data-check="' + esc(p.address) + '" data-sym="' + esc(p.symbol) + '">Check</button>' +
       '<a class="ghostbtn sm" href="https://dexscreener.com/solana/' + encodeURIComponent(p.address) + '" target="_blank" rel="noopener">Chart ' + ICON.ext + '</a></div>' +
       '</div>';
   }).join('');
@@ -846,15 +886,15 @@ function renderSignals() {
   if (!n) { $('sigs').innerHTML = '<div class="empty">Most launches fail our checks — that is the point. New tokens appear here the moment they pass.</div>'; return; }
   $('sigs').innerHTML = '<div class="sig head"><span>Token</span><span>Market cap</span><span>Liquidity</span><span>Age</span><span>Safety</span><span>Note</span><span></span></div>' +
     S.signals.map((s, i) => {
-      const f = s.features || {}, [sc, st] = safety(f);
+      const f = s.features || {}, [sc, st] = s.safety ? [s.safety.level === 'ok' ? 'ok' : s.safety.level === 'warn' ? 'mid' : 'bad', s.safety.label] : safety(f);
       return '<div class="sig">' +
         '<div class="tok"><b>' + esc(s.symbol) + '</b><button data-copy="' + esc(s.address) + '" title="Copy contract address">' + short(s.address) + ' ' + ICON.copy + '</button>' +
         (s.strategy_match ? '<span class="star">' + ICON.bolt + 'Fits your strategy</span>' : '') + '</div>' +
         '<div class="c-mc num">' + usd(f.mcap) + '</div>' +
         '<div class="c-liq num">' + usd(f.liquidity) + '</div>' +
         '<div class="c-age num">' + age(f.age_min) + '</div>' +
-        '<div class="c-safe"><span class="chip ' + sc + '">' + st + '</span></div>' +
-        '<div class="mob"><span>MC <b class="num">' + usd(f.mcap) + '</b></span><span>Liq <b class="num">' + usd(f.liquidity) + '</b></span><span>Age <b class="num">' + age(f.age_min) + '</b></span><span class="chip ' + sc + '">' + st + '</span></div>' +
+        '<div class="c-safe"><button class="chip chipbtn ' + sc + '" data-check="' + esc(s.address) + '" data-sym="' + esc(s.symbol) + '" title="Open token check">' + st + ICON.chev + '</button></div>' +
+        '<div class="mob"><span>MC <b class="num">' + usd(f.mcap) + '</b></span><span>Liq <b class="num">' + usd(f.liquidity) + '</b></span><span>Age <b class="num">' + age(f.age_min) + '</b></span><button class="chip chipbtn ' + sc + '" data-check="' + esc(s.address) + '" data-sym="' + esc(s.symbol) + '">' + st + ICON.chev + '</button></div>' +
         '<div class="why">' + esc(s.reason || '') + (s.risk_warn ? ' — <span style="color:var(--warn)">over your risk limit</span>' : '') + '</div>' +
         '<div class="c-act"><button class="pill sm" data-buy="' + i + '">Buy</button></div>' +
         '</div>';
@@ -893,6 +933,49 @@ $('buyYes').onclick = async e => {
 };
 document.querySelectorAll('.scrim').forEach(sc => sc.addEventListener('click', e => { if (e.target === sc) sc.classList.remove('on'); }));
 addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelectorAll('.scrim.on').forEach(s => s.classList.remove('on')); });
+
+/* ── TOKEN CHECK ── */
+const CK_GROUPS = ['Contract', 'Holders', 'Dev', 'X account'];
+let _ckAddr = null;
+function renderCheck(d, loadingDeep) {
+  const v = d.verdict, items = d.items || [];
+  let h = '<div class="verdict ' + v.level + '"><b>' + esc(v.label) + '</b><span>' + esc(v.summary) + '</span></div>';
+  CK_GROUPS.forEach(g => {
+    const rows = items.filter(i => i.group === g);
+    if (!rows.length) return;
+    h += '<div class="ckgroup"><h4>' + g + '</h4>' + rows.map(i =>
+      '<div class="ckrow ' + i.status + '">' + (ICON['st_' + i.status] || ICON.st_na) +
+      '<div><span class="l">' + esc(i.label) + '</span>' + (i.note ? '<span class="n">' + esc(i.note) + '</span>' : '') + '</div>' +
+      '<span class="v num">' + esc(i.value) + '</span></div>').join('') + '</div>';
+  });
+  if (loadingDeep) h += '<div class="ckwait"><span class="spin"></span>Checking insiders, fresh wallets and the X account…</div>';
+  $('ckBody').innerHTML = h;
+}
+async function openCheck(address, symbol) {
+  _ckAddr = address;
+  $('ckH').textContent = (symbol || 'Token') + ' · check';
+  $('ckCa').textContent = address;
+  $('ckBody').innerHTML = '<div class="ckwait"><span class="spin"></span>Loading…</div>';
+  $('ckScrim').classList.add('on');
+  try {
+    const quick = await api('/api/token/check?deep=0&address=' + encodeURIComponent(address));
+    if (_ckAddr !== address) return;
+    renderCheck(quick, true);
+    const full = await api('/api/token/check?deep=1&address=' + encodeURIComponent(address));
+    if (_ckAddr !== address) return;
+    renderCheck(full, false);
+  } catch (e) {
+    if (_ckAddr !== address) return;
+    const w = $('ckBody').querySelector('.ckwait');
+    if (w) w.innerHTML = esc(e.message);
+    else $('ckBody').innerHTML = '<div class="ckwait">' + esc(e.message) + '</div>';
+  }
+}
+$('ckClose').onclick = () => { $('ckScrim').classList.remove('on'); _ckAddr = null; };
+document.addEventListener('click', e => {
+  const b = e.target.closest('[data-check]');
+  if (b) { e.stopPropagation(); openCheck(b.dataset.check, b.dataset.sym); }
+}, true);
 
 /* ── STRATEGY & RISK ── */
 const P = v => Math.round((+v || 0) * 1000) / 10;              // 0.25 → 25
