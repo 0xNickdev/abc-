@@ -136,3 +136,19 @@ def test_trades_are_tagged_and_results_split_by_strategy(client, monkeypatch):
     assert cal["strategy_names"]["abc_sniper_v1"] == "Sniper"
     day = next(iter(cal["days"].values()))
     assert day["list"][0]["strategy"] == "abc_sniper_v1"
+
+
+def test_house_stop_is_operator_setting_and_persists(client, monkeypatch):
+    old = appmod.CFG["hard_stop_pct"]
+    try:
+        assert client.post("/api/house/risk", headers={"X-Wallet": W1}, json={"stop_pct": 0.5}).status_code == 403
+        r = client.post("/api/house/risk", json={"stop_pct": 0.5}).json()       # локально без ABC_ADMIN = оператор
+        assert r["stop_pct"] == 0.5 and appmod.CFG["hard_stop_pct"] == 0.5
+        assert client.post("/api/house/risk", json={"stop_pct": 3}).json()["stop_pct"] == 0.8   # зажато
+        appmod.CFG["hard_stop_pct"] = 0.25
+        appmod.load_house_risk()
+        assert appmod.CFG["hard_stop_pct"] == 0.8                                  # пережил «рестарт»
+        pos = dict(pnl=-0.4, peak_pnl=0.0, tp_taken=[])
+        assert botmod.decide_exit(pos, None, appmod.CFG, appmod.ST.bot.cfg).action == "HOLD"   # −40% < стопа
+    finally:
+        appmod.CFG["hard_stop_pct"] = old

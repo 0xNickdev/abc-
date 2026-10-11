@@ -2896,6 +2896,30 @@ def save_risk_state():
     except Exception:
         pass
 
+# ── Риск house-бота, настраиваемый оператором на лету (11.10): стоп сейчас 50%.
+# Файл OUT_DIR/house_risk.json переживает деплои и важнее env ABC_HARD_STOP_PCT.
+HOUSE_STOP_BOUNDS = (0.05, 0.80)
+
+def _house_risk_path() -> pathlib.Path:
+    return OUT_DIR / "house_risk.json"
+
+def load_house_risk():
+    try:
+        d = json.loads(_house_risk_path().read_text())
+        v = float(d.get("hard_stop_pct"))
+        CFG["hard_stop_pct"] = round(min(HOUSE_STOP_BOUNDS[1], max(HOUSE_STOP_BOUNDS[0], v)), 4)
+    except Exception:
+        pass
+
+def set_house_stop(v: float) -> float:
+    CFG["hard_stop_pct"] = round(min(HOUSE_STOP_BOUNDS[1], max(HOUSE_STOP_BOUNDS[0], float(v))), 4)
+    try:
+        _house_risk_path().parent.mkdir(parents=True, exist_ok=True)
+        _house_risk_path().write_text(json.dumps(dict(hard_stop_pct=CFG["hard_stop_pct"])))
+    except Exception:
+        pass
+    return CFG["hard_stop_pct"]
+
 def load_risk_state():
     try:
         d = json.loads((OUT_DIR / "risk_state.json").read_text())
@@ -3053,6 +3077,7 @@ async def _lifespan(_app: FastAPI):
     # Автозапуск бота после рестарта контейнера: BOT_AUTOSTART=n2|n3 (default-сессия).
     # Вместе с ABC_DATA_DIR (Volume) даёт непрерывный бумажный прогон, переживающий перезапуски.
     load_risk_state()                     # предохранители переживают деплой — ДО автозапуска бота
+    load_house_risk()                     # стоп house-бота, заданный оператором (house_risk.json)
     _auto = os.getenv("BOT_AUTOSTART", "").strip().lower()
     if _auto in ("n1", "n2", "n3"):
         ST.bot.cfg["mode"] = _auto
@@ -4568,6 +4593,24 @@ def api_token_check(address: str, deep: int = 1, x_wallet: str | None = WalletHe
                 deep=bool(deep), cached=cached, checked_at=time.time())
 
 # ── Сканер коллов: лента, рейтинг коллеров, источники (оператор) ──
+class HouseRiskIn(BaseModel):
+    stop_pct: float
+
+@app.get("/api/house/risk")
+def api_house_risk(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
+    """Стоп house-бота (только оператор)."""
+    _require_internals(get_session(x_wallet), x_auth)
+    return dict(stop_pct=CFG["hard_stop_pct"], bounds=HOUSE_STOP_BOUNDS)
+
+@app.post("/api/house/risk")
+def api_house_risk_set(r: HouseRiskIn, x_wallet: str | None = WalletHeader,
+                       x_auth: str | None = AuthHeader):
+    """Поменять стоп house-бота на лету: бот и watcher читают CFG на каждой проверке."""
+    _require_internals(get_session(x_wallet), x_auth)
+    v = set_house_stop(r.stop_pct)
+    log("RISK", "HOUSE", f"house hard stop set to -{v:.0%}")
+    return dict(ok=True, stop_pct=v, bounds=HOUSE_STOP_BOUNDS)
+
 @app.get("/api/calls")
 def api_calls(source: str = "all", hours: float = 24.0, limit: int = 60,
               x_wallet: str | None = WalletHeader):

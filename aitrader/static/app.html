@@ -491,6 +491,11 @@ details.adv[open] summary svg{transform:rotate(90deg)}
     <div class="sec">
       <div class="sechead"><h2>3 · How it exits</h2><small>Applied to every position, checked every few seconds</small></div>
       <div class="panel rules" id="rules"></div>
+      <div class="panel lock" id="houseSec" hidden style="margin-top:14px">
+        <span>House bot stop loss (operator) · applies on the next price check</span>
+        <span style="display:flex;gap:8px;align-items:center"><span class="fld"><span class="in" style="width:120px"><input id="houseStop" type="number" min="5" max="80" step="1"><span class="u">%</span></span></span>
+        <button class="pill sm" id="houseSave">Save</button></span>
+      </div>
       <details class="adv" id="adv">
         <summary><svg class="i" viewBox="0 0 16 16"><path d="m6 3 5 5-5 5"/></svg>Advanced: set exact numbers</summary>
         <div class="panel form" id="riskForm"></div>
@@ -498,6 +503,7 @@ details.adv[open] summary svg{transform:rotate(90deg)}
     </div>
   </section>
 
+  <!-- house bot (operator only) is injected into Strategy below -->
   <!-- ═════ RESULTS ═════ -->
   <section class="view" id="v-results" role="tabpanel">
     <div class="rhead">
@@ -1135,8 +1141,14 @@ document.addEventListener('click', e => {
 const P = v => Math.round((+v || 0) * 1000) / 10;              // 0.25 → 25
 const signedPct = v => '+' + P(v) + '%';
 let _risk = null, _strats = null;
+async function loadHouse() {
+  $('houseSec').hidden = !S.admin;
+  if (!S.admin) return;
+  try { const h = await api('/api/house/risk'); $('houseStop').value = Math.round(h.stop_pct * 100); } catch (e) { $('houseSec').hidden = true; }
+}
 async function loadStrategy() {
   $('stLock').hidden = !!S.wallet;
+  loadHouse();
   try {
     const [st, rk] = await Promise.all([api('/api/strategies'), api('/api/risk')]);
     _strats = st; _risk = rk;
@@ -1241,6 +1253,13 @@ $('v-strategy').addEventListener('click', async e => {
   }
 });
 $('stConnect').onclick = connect;
+$('houseSave').onclick = async e => {
+  const b = e.currentTarget; busy(b, true);
+  try { await signIn(); const r = await post('/api/house/risk', { stop_pct: (+$('houseStop').value || 0) / 100 });
+        $('houseStop').value = Math.round(r.stop_pct * 100); toast('House bot stop set to −' + Math.round(r.stop_pct * 100) + '%'); }
+  catch (err) { toast(err.message, 'err'); }
+  busy(b, false);
+};
 
 /* ── RESULTS ── */
 function monthLabel(m) { const [y, mo] = m.split('-').map(Number); return new Date(Date.UTC(y, mo - 1, 1)).toLocaleDateString('en', { month: 'long', year: 'numeric', timeZone: 'UTC' }); }
