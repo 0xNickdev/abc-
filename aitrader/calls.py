@@ -125,6 +125,7 @@ class CallScanner:
         self.stats = dict(x_runs=0, tg_runs=0, price_runs=0, discover_runs=0, errors=0,
                           last_error=None, last_x=None, last_tg=None)
         self._t = dict(x=0.0, tg=0.0, price=0.0, discover=0.0)
+        self._src_mtime = 0.0
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._load()
@@ -138,9 +139,17 @@ class CallScanner:
             self.discovered_cas = set(d.get("discovered", []))
         except Exception:
             pass
+        self._load_sources()
+
+    def _load_sources(self):
+        """Списки источников из calls_sources.json; правка файла на сервере подхватывается на лету."""
         try:
+            mt = self.src_path.stat().st_mtime
+            if mt == getattr(self, "_src_mtime", None):
+                return
             s = json.loads(self.src_path.read_text())
             self.sources = dict(x=self.clean_list(s.get("x"), _X_NAME), tg=self.clean_list(s.get("tg"), _TG_NAME))
+            self._src_mtime = mt
         except Exception:
             pass
 
@@ -174,6 +183,7 @@ class CallScanner:
         try:
             self.src_path.parent.mkdir(parents=True, exist_ok=True)
             self.src_path.write_text(json.dumps(self.sources))
+            self._src_mtime = self.src_path.stat().st_mtime
         except Exception as e:
             self._err(e)
         return dict(self.sources)
@@ -361,6 +371,7 @@ class CallScanner:
 
     # ── цикл ──
     def tick(self):
+        self._load_sources()
         now = _now()
         changed = 0
         if now - self._t["x"] >= X_EVERY_S:

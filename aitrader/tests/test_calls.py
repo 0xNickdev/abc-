@@ -106,3 +106,11 @@ def test_state_persists_across_restart(sc):
     sc._save()
     again = cm.CallScanner(sc.path.parent)
     assert len(again.calls) == 1 and again.tokens[CA1]["symbol"] == "CAT"
+
+
+def test_sources_file_edit_is_picked_up_live(sc):
+    import json, os, time as _t
+    sc.src_path.write_text(json.dumps(dict(x=["kolA"], tg=["chanA"])))
+    os.utime(sc.src_path, (_t.time() + 5, _t.time() + 5))
+    sc._load_sources()
+    assert sc.sources == dict(x=["kolA"], tg=["chanA"])
