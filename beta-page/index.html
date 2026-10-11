@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>abc — бета</title>
+<meta name="description" content="Что уже работает в abc: свой бот для мемкоинов на Solana, проверка токенов, коллы из X и Telegram, стратегии и честная статистика.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#050505;--ink:#fafafa;--muted:#a7a6a6;--strip:#8b8a8a;--dim:#5f5e5e;--line:rgba(255,255,255,.09);--line2:rgba(255,255,255,.16);
+  --glass:rgba(16,16,16,.6);--up:#7ee2a8;--warn:#f2c46d}
+*,*::before,*::after{box-sizing:border-box}
+html{background:radial-gradient(1100px 560px at 80% -10%,rgba(255,255,255,.06),transparent 60%),var(--bg)}
+body{margin:0;color:var(--ink);font-family:'Manrope',system-ui,-apple-system,'Segoe UI',sans-serif;font-size:16px;line-height:1.55;
+  -webkit-font-smoothing:antialiased;text-rendering:geometricPrecision}
+a{color:inherit}
+.wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+header{display:flex;justify-content:space-between;align-items:center;padding:24px 0}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none}
+.brand svg{width:20px;height:31px}.brand b{font-weight:600;font-size:18px;letter-spacing:.02em}
+.pill{display:inline-flex;align-items:center;gap:8px;background:#fff;color:#050505;border-radius:999px;font-weight:500;text-decoration:none;
+  height:44px;padding:0 22px;font-size:15px;transition:background .18s}
+.pill:hover{background:#e6e6e7}
+.pill.lg{height:52px;padding:0 30px;font-size:16px}
+.ghost{display:inline-flex;align-items:center;gap:8px;color:#fff;text-decoration:none;font-weight:500}
+.hero{padding:72px 0 40px}
+.eyebrow{display:inline-flex;align-items:center;gap:8px;height:28px;padding:0 12px 0 4px;border-radius:999px;background:rgba(255,255,255,.08);
+  border:1px solid rgba(255,255,255,.14);color:rgba(255,255,255,.86);font-size:13px;margin-bottom:22px}
+.eyebrow b{display:inline-flex;align-items:center;height:20px;padding:0 9px;border-radius:999px;background:#fff;color:#050505;font-size:11.5px;font-weight:600}
+h1{margin:0;font-weight:400;font-size:clamp(36px,6vw,64px);line-height:1.08;letter-spacing:.2px}
+.lead{margin:20px 0 0;color:var(--muted);font-size:clamp(16px,2vw,19px);max-width:640px}
+.actions{display:flex;gap:26px;align-items:center;margin-top:34px;flex-wrap:wrap}
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:56px}
+.step{border:1px solid var(--line);border-radius:18px;background:var(--glass);padding:20px 22px}
+.step i{font-style:normal;display:inline-grid;place-items:center;width:28px;height:28px;border-radius:50%;border:1px solid var(--line2);color:var(--muted);font-size:13px}
+.step b{display:block;margin-top:12px;font-weight:600}
+.step span{color:var(--muted);font-size:14px}
+h2{margin:88px 0 8px;font-weight:400;font-size:clamp(26px,3.5vw,36px)}
+.sub{color:var(--muted);margin:0 0 26px;max-width:640px}
+.grid{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.card{border:1px solid var(--line);border-radius:20px;background:var(--glass);padding:24px 26px}
+.card .ic{width:38px;height:38px;border-radius:12px;border:1px solid var(--line2);display:grid;place-items:center;color:#d6d6d6;margin-bottom:16px}
+.card .ic svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.card h3{margin:0 0 4px;font-weight:600;font-size:19px}
+.card .tag{color:var(--strip);font-size:13.5px;margin-bottom:14px}
+.card ul{margin:0;padding:0;list-style:none}
+.card li{position:relative;padding:7px 0 7px 22px;border-top:1px solid var(--line);color:#d9d9d9;font-size:15px}
+.card li:first-child{border-top:0}
+.card li::before{content:'';position:absolute;left:2px;top:15px;width:7px;height:7px;border-radius:50%;background:var(--up);opacity:.85}
+.card.wide{grid-column:1/-1}
+.cols{display:grid;grid-template-columns:repeat(2,1fr);gap:0 28px}
+.modes{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
+.mode{border:1px solid var(--line);border-radius:20px;background:var(--glass);padding:24px 26px}
+.mode b{font-size:20px;font-weight:600}
+.mode .chip{display:inline-block;margin-left:8px;font-size:12px;padding:2px 10px;border-radius:999px;border:1px solid rgba(126,226,168,.35);color:var(--up);vertical-align:3px}
+.mode .chip.w{border-color:rgba(242,196,109,.35);color:var(--warn)}
+.mode p{margin:10px 0 0;color:var(--muted)}
+.note{margin-top:88px;border:1px solid rgba(242,196,109,.3);background:rgba(242,196,109,.06);border-radius:18px;padding:20px 24px;color:#f1dfb8}
+.note b{color:#fff}
+.final{text-align:center;padding:90px 0 40px}
+.final h2{margin:0 0 22px}
+footer{border-top:1px solid var(--line);margin-top:60px;padding:26px 0 40px;color:var(--dim);font-size:13px;display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+@media (max-width:820px){.grid,.modes,.steps,.cols{grid-template-columns:1fr}.hero{padding-top:40px}h2{margin-top:64px}}
+@media (prefers-reduced-motion:no-preference){.hero>*{animation:rise .8s cubic-bezier(.22,1,.36,1) both}.hero>*:nth-child(2){animation-delay:.06s}
+  .hero>*:nth-child(3){animation-delay:.12s}.hero>*:nth-child(4){animation-delay:.18s}.hero>*:nth-child(5){animation-delay:.24s}}
+@keyframes rise{from{opacity:0;transform:translateY(12px)}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <a class="brand" href="https://51-68-215-55.sslip.io/" aria-label="abc">
+      <svg viewBox="0 0 31.5 48.5" aria-hidden="true"><defs><linearGradient id="g" x1="8" y1="0" x2="34.1" y2="28.9" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#9e9e9e"/><stop offset=".34" stop-color="#a3a3a3"/><stop offset=".40" stop-color="#3a3a3a"/><stop offset=".55" stop-color="#414141"/>
+        <stop offset=".68" stop-color="#8e8e8e"/><stop offset="1" stop-color="#cccccc"/></linearGradient></defs>
+        <path d="M21.5 0 L21.5 19.5 L31.5 19.5 L31.5 29 L10 48.5 L10 28.5 L0.5 28.5 L0.5 18.5 Z" fill="url(#g)"/>
+        <rect x="0.5" y="18.5" width="9" height="10" fill="#fdfdfd"/><rect x="22" y="19.5" width="9.5" height="9.5" fill="#fdfdfd"/></svg>
+      <b>abc</b>
+    </a>
+    <a class="pill" href="https://51-68-215-55.sslip.io/app">Открыть приложение</a>
+  </header>
+
+  <section class="hero">
+    <span class="eyebrow"><b>Beta</b>Solana · мемкоины</span>
+    <h1>Свой торговый бот<br>и всё, чтобы не словить раг</h1>
+    <p class="lead">Бот сканирует новые токены, отсеивает опасные и торгует по правилам, которые ты выбираешь сам. Начни на бумаге: реальный рынок, реальные издержки, без риска для денег.</p>
+    <div class="actions">
+      <a class="pill lg" href="https://51-68-215-55.sslip.io/app">Начать в Paper</a>
+      <a class="ghost" href="#features">Что уже работает →</a>
+    </div>
+    <div class="steps">
+      <div class="step"><i>1</i><b>Подключи Phantom</b><span>Кошелёк — это аккаунт. Ключи никуда не передаются.</span></div>
+      <div class="step"><i>2</i><b>Подпиши сообщение</b><span>Без транзакции и без комиссии.</span></div>
+      <div class="step"><i>3</i><b>Выбери стратегию и запусти</b><span>Вкладка Strategy → Start bot в режиме Paper.</span></div>
+    </div>
+  </section>
+
+  <h2>Два режима</h2>
+  <div class="modes">
+    <div class="mode"><b>Paper</b><span class="chip">рекомендуем начать здесь</span>
+      <p>Симуляция на реальном рынке. Учитываются комиссия pump.fun, проскальзывание и priority fee. Деньги не тратятся.</p></div>
+    <div class="mode"><b>Live</b><span class="chip w">свои SOL</span>
+      <p>Каждую сделку подтверждаешь в Phantom. Бот находит вход и предлагает, решение за тобой.</p></div>
+  </div>
+
+  <h2 id="features">Что уже есть</h2>
+  <p class="sub">Пять вкладок. Каждая отвечает на один вопрос.</p>
+  <div class="grid">
+    <div class="card">
+      <div class="ic"><svg viewBox="0 0 24 24"><rect x="4" y="7" width="16" height="12" rx="3"/><path d="M12 3v4M9 12v2M15 12v2"/></svg></div>
+      <h3>Bot</h3><div class="tag">Что делает мой бот</div>
+      <ul><li>Запуск и остановка своего бота</li><li>Итог дня после комиссий, открытые позиции, винрейт за месяц</li>
+        <li>Позиции карточками: результат, капа, продажа в один клик, проверка токена</li>
+        <li>Reclaim: возврат SOL из пустых токен-аккаунтов кошелька одной подписью</li></ul>
+    </div>
+    <div class="card">
+      <div class="ic"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></div>
+      <h3>Signals</h3><div class="tag">Что можно брать прямо сейчас</div>
+      <ul><li>Токены, которые прошли все проверки безопасности, обновление каждые 10 секунд</li>
+        <li>Капа, ликвидность, возраст и вердикт безопасности</li><li>Пометка «подходит под твою стратегию»</li><li>Покупка вручную в Paper или Live</li></ul>
+    </div>
+    <div class="card">
+      <div class="ic"><svg viewBox="0 0 24 24"><path d="M4 18 18 4M14 4h4v4"/><circle cx="6" cy="6" r="2"/><circle cx="18" cy="18" r="2"/></svg></div>
+      <h3>Calls</h3><div class="tag">Кто что коллит и как это сыграло</div>
+      <ul><li>Коллы из X и примерно 65 Telegram-каналов в одной ленте</li><li>Первый колл, капа на колле и сейчас, икс и пик</li>
+        <li>Рейтинг коллеров по всем коллам, включая провалы: доля 2x+ и медианный икс</li><li>Фильтр X / Telegram, проверка и покупка из ленты</li></ul>
+    </div>
+    <div class="card">
+      <div class="ic"><svg viewBox="0 0 24 24"><path d="M4 6h10M4 12h6M4 18h12"/><circle cx="17" cy="6" r="2"/><circle cx="13" cy="12" r="2"/><circle cx="19" cy="18" r="2"/></svg></div>
+      <h3>Strategy</h3><div class="tag">Как бот входит, сколько рискует и как выходит</div>
+      <ul><li>3 стратегии: Balanced, Sniper, Degen — описание и уровень риска</li>
+        <li>Риск: Careful 0.1, Standard 0.2, Bold 0.3 SOL на сделку, лимит позиций и дневной лимит убытка</li>
+        <li>Стоп-лосс, лестница тейков до 4 ступеней, трейлинг-стоп</li><li>Advanced: точные значения; лимиты работают и на бумаге</li></ul>
+    </div>
+    <div class="card wide">
+      <div class="ic"><svg viewBox="0 0 24 24"><path d="M12 3 4.5 6v5.5c0 4.6 3.2 8.4 7.5 9.5 4.3-1.1 7.5-4.9 7.5-9.5V6z"/><path d="m8.8 12 2.2 2.2 4.4-4.4"/></svg></div>
+      <h3>Проверка токена</h3><div class="tag">Один клик по вердикту безопасности — и видно, где подвох</div>
+      <div class="cols">
+        <ul><li><b>Контракт:</b> mint и freeze отозваны, налог, можно ли продать</li>
+          <li><b>Холдеры:</b> доля топ-10, бандлы на запуске, снайперы</li>
+          <li><b>Холдеры:</b> свежие кошельки среди крупных, связанные инсайдеры</li></ul>
+        <ul><li><b>Дев:</b> сколько ещё держит, доля его зарагавших токенов</li>
+          <li><b>X-аккаунт:</b> возраст, другие продвигаемые токены, переименования, кто первым запостил контракт</li>
+          <li><b>Итог:</b> Looks clean / Caution / Risky с пояснением по каждому пункту</li></ul>
+      </div>
+    </div>
+    <div class="card wide">
+      <div class="ic"><svg viewBox="0 0 24 24"><path d="M4 19V5M4 19h16"/><path d="m7 15 4-4 3 3 5-6"/></svg></div>
+      <h3>Results</h3><div class="tag">Честная статистика, без украшений</div>
+      <div class="cols">
+        <ul><li>Свои сделки и сделки бота сервера</li><li>Итог до и после издержек, отдельно сумма издержек</li>
+          <li>Позиция, проданная частями, считается одной сделкой</li></ul>
+        <ul><li>Винрейт, лучшая и худшая сделка, график накопленного результата</li><li>Разбивка по стратегиям</li>
+          <li>Клик по токену открывает GMGN, клик по адресу копирует CA</li></ul>
+      </div>
+    </div>
+  </div>
+
+  <h2>Защита</h2>
+  <div class="grid">
+    <div class="card"><ul><li>Стопы и тейки срабатывают автоматически: цена проверяется каждые несколько секунд и сверяется по двум источникам</li>
+      <li>Токены с опасными настройками контракта блокируются до входа</li></ul></div>
+    <div class="card"><ul><li>Live включается только после подтверждения, лимит на сделку стоит на сервере</li>
+      <li>Ключи кошелька остаются в Phantom, каждую реальную сделку подписываешь сам</li></ul></div>
+  </div>
+
+  <div class="note"><b>Это бета.</b> Начинайте с Paper. Мемкоины крайне рискованны — не торгуйте деньгами, которые не готовы потерять. Нашли баг или есть идея — пишите нам.</div>
+
+  <section class="final">
+    <h2>Попробовать сейчас</h2>
+    <a class="pill lg" href="https://51-68-215-55.sslip.io/app">Открыть приложение</a>
+  </section>
+
+  <footer><span>abc · private beta · Solana</span><span>Работает с компьютера и с телефона</span></footer>
+</div>
+</body>
+</html>
