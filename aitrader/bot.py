@@ -184,6 +184,8 @@ class BotRunner:
 
     def _act(self, screened: dict, f: dict):
         risk_cfg = f["risk_cfg"]
+        if callable(risk_cfg):              # per-user риск: читаем на каждом тике (правки на лету)
+            risk_cfg = risk_cfg()
         decisions = screened.get("decisions", [])
         pos_views = {pv.get("address"): pv for pv in screened.get("positions", [])}
 

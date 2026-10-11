@@ -274,7 +274,7 @@ def _public_screen(out: dict) -> dict:
     decs = [x for x in (_public_decision(i) for i in (out or {}).get("decisions", [])) if x]
     return dict(out, decisions=decs)
 
-_PUB_BOT_CFG = ("mode", "max_new_per_tick", "poll_s")
+_PUB_BOT_CFG = ("mode", "max_new_per_tick", "poll_s", "trail_activate_pct")
 
 def _bot_status(sess, x_auth: str | None) -> dict:
     st = sess.bot.status()
@@ -647,6 +647,80 @@ def save_user_strategy(pubkey: str, sid: str):
     try:
         p = _strategy_path(pubkey); p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps(dict(id=sid)))
+    except Exception:
+        pass
+
+# ── Per-user риск (бета, 11.10): у каждого тестера свой размер/лимиты/выходы.
+# Слои: CFG (house) → выходы и лимиты выбранной стратегии → риск-пресет → ручные правки.
+# House-сессия всегда на CFG/env. Все значения зажаты: размер ≤ серверного потолка бота,
+# дневной лимит ≤ CFG, стоп/трейлинг 5–60%.
+RISK_PRESETS = {
+    "careful":  dict(label="Careful",  size_sol=0.03, max_positions=2, daily_loss_cap_sol=0.10, pause_after_losses=2),
+    "standard": dict(label="Standard", size_sol=0.05, max_positions=3, daily_loss_cap_sol=0.25, pause_after_losses=3),
+    "bold":     dict(label="Bold",     size_sol=0.10, max_positions=5, daily_loss_cap_sol=0.50, pause_after_losses=5),
+}
+DEFAULT_RISK_PRESET = "standard"
+_RISK_PRESET_KEYS = ("size_sol", "max_positions", "daily_loss_cap_sol", "pause_after_losses")
+
+def risk_bounds() -> dict:
+    """Допустимые диапазоны ручных правок (UI рисует по ним поля)."""
+    return dict(size_sol=(0.001, float(CFG["bot_max_per_trade_sol"])),
+                max_positions=(1, 10),
+                daily_loss_cap_sol=(0.01, float(CFG["daily_loss_cap_sol"])),
+                pause_after_losses=(0, 10),          # 0 = не ставить на паузу
+                stop_pct=(0.05, 0.60), trailing_pct=(0.05, 0.60), trail_activate_pct=(0.0, 5.0),
+                tp_at_pct=(0.05, 50.0), tp_sell_pct=(0.05, 1.0), tp_steps=4)
+
+def sanitize_risk(patch: dict) -> dict:
+    """Чистит ручные правки риска: неизвестные ключи выкидываются, числа зажимаются,
+    take_profit — до 4 ступеней по возрастанию, суммарно продаём не больше 100%.
+    None у ключа = «вернуть к умолчанию» (ключ удаляется из правок)."""
+    b = risk_bounds()
+    out: dict = {}
+    for k, v in (patch or {}).items():
+        if v is None:
+            out[k] = None
+            continue
+        try:
+            if k in ("max_positions", "pause_after_losses"):
+                lo, hi = b[k]; out[k] = int(min(hi, max(lo, int(float(v)))))
+            elif k in ("size_sol", "daily_loss_cap_sol", "stop_pct", "trailing_pct", "trail_activate_pct"):
+                lo, hi = b[k]; out[k] = round(float(min(hi, max(lo, float(v)))), 4)
+            elif k == "take_profit":
+                steps = []
+                for t in list(v)[: b["tp_steps"]]:
+                    at = float(t.get("at_pct") if isinstance(t, dict) else t[0])
+                    sell = float(t.get("sell_pct") if isinstance(t, dict) else t[1])
+                    steps.append([round(min(b["tp_at_pct"][1], max(b["tp_at_pct"][0], at)), 4),
+                                  round(min(b["tp_sell_pct"][1], max(b["tp_sell_pct"][0], sell)), 4)])
+                steps.sort(key=lambda x: x[0])
+                left, clean = 1.0, []
+                for at, sell in steps:
+                    sell = round(min(sell, left), 4)
+                    if sell <= 0:
+                        break
+                    clean.append(dict(at_pct=at, sell_pct=sell)); left -= sell
+                out[k] = clean
+        except (TypeError, ValueError, AttributeError, IndexError):
+            continue
+    return out
+
+def _risk_path(pubkey: str) -> pathlib.Path:
+    return _user_dir(pubkey) / "risk.json"
+
+def load_user_risk(pubkey: str) -> dict:
+    try:
+        d = json.loads(_risk_path(pubkey).read_text())
+        preset = d.get("preset") if d.get("preset") in RISK_PRESETS else DEFAULT_RISK_PRESET
+        ov = {k: v for k, v in sanitize_risk(d.get("overrides") or {}).items() if v is not None}
+        return dict(preset=preset, overrides=ov)
+    except Exception:
+        return dict(preset=DEFAULT_RISK_PRESET, overrides={})
+
+def save_user_risk(pubkey: str, prefs: dict):
+    try:
+        p = _risk_path(pubkey); p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps(prefs))
     except Exception:
         pass
 
@@ -1467,6 +1541,7 @@ class RiskManager:
         self.consec_losses = 0
         self.halted = False
         self._day = _utc_day()
+        self.cfg_fn = lambda: CFG      # сессия тестера подменяет на свой risk_cfg()
 
     def roll_day(self):
         """Новый UTC-день → дневные предохранители обнуляются (стандарт индустрии):
@@ -1484,11 +1559,12 @@ class RiskManager:
         """Предохранители «по результату»: kill-switch (серия), дневной лимит, недельный котёл.
         None — не сработали. Отдельно от лимитов размера/экспозиции (те работают всегда)."""
         self.roll_day()
-        if self.consec_losses >= CFG["kill_switch_consec_losses"]:
+        c = self.cfg_fn()
+        if self.consec_losses >= c["kill_switch_consec_losses"]:
             self.halted = True          # раньше взводился только в gate() — N3 его не звал
         if self.halted:
             return "BLOCK kill-switch (consecutive losses)"
-        if self.realized_loss_today >= CFG["daily_loss_cap_sol"]:
+        if self.realized_loss_today >= c["daily_loss_cap_sol"]:
             return "BLOCK daily loss cap"
         if WEEK_BUDGET.exhausted():
             return f"BLOCK week budget exhausted ({CFG['week_budget_sol']} SOL)"
@@ -1507,11 +1583,12 @@ class RiskManager:
         r = self.fuse_reason()
         if fuses and r:
             return False, r
-        if size_sol > CFG["max_per_trade_sol"]:
-            return False, f"BLOCK size above per-trade cap ({CFG['max_per_trade_sol']} SOL)"
-        if fuses and n_positions >= CFG["max_concurrent_positions"]:
-            return False, f"BLOCK max concurrent positions reached ({CFG['max_concurrent_positions']})"
-        if fuses and exposure + size_sol > CFG["max_total_exposure_sol"]:
+        c = self.cfg_fn()
+        if size_sol > c["max_per_trade_sol"]:
+            return False, f"BLOCK size above per-trade cap ({c['max_per_trade_sol']} SOL)"
+        if fuses and n_positions >= c["max_concurrent_positions"]:
+            return False, f"BLOCK max concurrent positions reached ({c['max_concurrent_positions']})"
+        if fuses and exposure + size_sol > c["max_total_exposure_sol"]:
             return False, "BLOCK total exposure cap exceeded"
         return True, "ok"
 
@@ -1637,6 +1714,9 @@ class UserSession:
         self.positions = _merge_dup_positions(
             load_positions() if self._default else load_user_positions(pubkey))
         self.strategy_id = load_user_strategy(pubkey)   # 选定策略（落盘，重启不丢）
+        self.risk_prefs = None if self._default else load_user_risk(pubkey)   # свой риск тестера
+        self.risk.cfg_fn = self.risk_cfg
+        self._sync_bot_risk()
         self.twitter = load_user_twitter(pubkey)        # per-user Twitter KOL（opt-in）
         self.auth_token = None                          # sign-in-with-wallet 会话令牌（内存态）
         self.proposals: list[dict] = []                 # N1: предложения бота, ждут клика (в памяти)
@@ -1685,6 +1765,62 @@ class UserSession:
             save_filters(self.filters)
         else:
             save_user_filters(self.pubkey, self.filters)
+
+    def risk_view(self) -> dict:
+        """Действующие настройки риска в «человеческих» ключах (для UI и risk_cfg)."""
+        st = strategy.get(self.strategy_id)["preset"]
+        prefs = self.risk_prefs or dict(preset=DEFAULT_RISK_PRESET, overrides={})
+        pr = RISK_PRESETS.get(prefs["preset"], RISK_PRESETS[DEFAULT_RISK_PRESET])
+        v = dict(stop_pct=float(st.get("hard_stop_pct", CFG["hard_stop_pct"])),
+                 trailing_pct=float(st.get("trailing_pct", CFG["trailing_pct"])),
+                 trail_activate_pct=float(bot.CFG["trail_activate_pct"]),
+                 take_profit=[dict(at_pct=float(a), sell_pct=float(b))
+                              for a, b in st.get("tp_ladder", CFG["tp_ladder"])],
+                 **{k: pr[k] for k in _RISK_PRESET_KEYS})
+        v.update(prefs["overrides"])
+        lo, hi = risk_bounds()["size_sol"]
+        v["size_sol"] = round(min(hi, max(lo, float(v["size_sol"]))), 4)   # серверный потолок мог упасть
+        return v
+
+    def risk_cfg(self) -> dict:
+        """Параметры риска для бота/watcher/RiskManager. House — глобальный CFG (env)."""
+        if self._default or self.risk_prefs is None:
+            return CFG
+        v = self.risk_view()
+        r = dict(CFG)
+        r.update(hard_stop_pct=v["stop_pct"], trailing_pct=v["trailing_pct"],
+                 tp_ladder=[(t["at_pct"], t["sell_pct"]) for t in v["take_profit"]],
+                 max_concurrent_positions=v["max_positions"],
+                 daily_loss_cap_sol=v["daily_loss_cap_sol"],
+                 kill_switch_consec_losses=v["pause_after_losses"] or 10 ** 6,
+                 user_size_sol=v["size_sol"],
+                 max_total_exposure_sol=min(float(CFG["max_total_exposure_sol"]),
+                                            float(CFG["max_per_trade_sol"]) * v["max_positions"]))
+        return r
+
+    def _sync_bot_risk(self):
+        """trail_activate_pct живёт в cfg бота (decide_exit читает его оттуда)."""
+        if self.risk_prefs is not None:
+            self.bot.cfg["trail_activate_pct"] = self.risk_view()["trail_activate_pct"]
+
+    def set_risk(self, preset: str | None = None, overrides: dict | None = None,
+                 reset: bool = False) -> dict:
+        prefs = dict(self.risk_prefs or dict(preset=DEFAULT_RISK_PRESET, overrides={}))
+        ov = {} if reset else dict(prefs["overrides"])
+        if preset in RISK_PRESETS:
+            prefs["preset"] = preset
+            for k in _RISK_PRESET_KEYS:          # выбрал пресет → его значения, не старые правки
+                ov.pop(k, None)
+        for k, v in sanitize_risk(overrides or {}).items():
+            if v is None:
+                ov.pop(k, None)
+            else:
+                ov[k] = v
+        prefs["overrides"] = ov
+        self.risk_prefs = prefs
+        save_user_risk(self.pubkey, prefs)
+        self._sync_bot_risk()
+        return self.risk_view()
 
     def set_strategy(self, sid: str) -> str:
         self.strategy_id = strategy.get(sid)["id"]
@@ -2318,11 +2454,12 @@ def _feat(f):
 def _portfolio(s: UserSession | None = None):
     s = s or ST
     s.risk.roll_day()   # UI не должен показывать вчерашний kill-switch/дневной убыток
-    return dict(open_positions=len(s.positions), max_concurrent=CFG["max_concurrent_positions"],
-                total_exposure=s.exposure(), max_total_exposure=CFG["max_total_exposure_sol"],
-                realized_loss_today=s.risk.realized_loss_today, daily_loss_cap=CFG["daily_loss_cap_sol"],
+    c = s.risk_cfg()
+    return dict(open_positions=len(s.positions), max_concurrent=c["max_concurrent_positions"],
+                total_exposure=s.exposure(), max_total_exposure=c["max_total_exposure_sol"],
+                realized_loss_today=s.risk.realized_loss_today, daily_loss_cap=c["daily_loss_cap_sol"],
                 realized_loss_week=WEEK_BUDGET.current(), week_budget=CFG["week_budget_sol"],
-                consec_losses=s.risk.consec_losses, kill_switch_consec=CFG["kill_switch_consec_losses"],
+                consec_losses=s.risk.consec_losses, kill_switch_consec=c["kill_switch_consec_losses"],
                 kill_switch=s.risk.halted)
 
 def _sec_from_row(row: dict) -> dict:
@@ -2868,7 +3005,7 @@ async def _lifespan(_app: FastAPI):
         def _all_sessions():
             with _sessions_lock:
                 return list(SESSIONS.values())
-        watcher.ensure_started(_all_sessions, CFG, _bot_sell_fn, log)
+        watcher.ensure_started(_all_sessions, CFG, _bot_sell_fn, log)   # риск — per-session (sess.risk_cfg)
     yield
 
 app = FastAPI(title="GMGN AI Trader (local)", lifespan=_lifespan)
@@ -2913,12 +3050,14 @@ SHADOW_FUSES = os.getenv("ABC_SHADOW_FUSES", "").strip().lower() in ("1", "true"
 HOUSE_LIVE = os.getenv("ABC_HOUSE_LIVE", "").strip().lower() in ("1", "true", "yes", "on")
 
 def _fuses_on(s) -> bool:
-    return s.mode == "LIVE" or SHADOW_FUSES
+    """House в SHADOW копит выборку без пауз. Тестер настраивает лимиты сам — они действуют
+    и на бумаге (иначе проверка стратегии с риск-менеджментом бессмысленна)."""
+    return s.mode == "LIVE" or SHADOW_FUSES or getattr(s, "risk_prefs", None) is not None
 
 def _max_positions(s) -> int:
     """SHADOW — без потолка числа позиций/экспозиции (решение юзера 10.10: «пусть торгует
     неограниченно», бумага копит выборку). LIVE — CFG. Размер сделки ограничен всегда."""
-    return CFG["max_concurrent_positions"] if _fuses_on(s) else 10 ** 6
+    return s.risk_cfg()["max_concurrent_positions"] if _fuses_on(s) else 10 ** 6
 
 def _block_if_public():
     """公开演示为只读：所有写操作（含触发 CLI / 改配置 / 买卖）一律拒绝。"""
@@ -3267,6 +3406,40 @@ def api_strategy_select(sel: StrategyIn, x_wallet: str | None = WalletHeader, x_
     if not _sees_internals(sess, x_auth):
         return dict(ok=True, active=sid)
     return dict(ok=True, active=sid, strategy=st)
+
+# ── Per-user риск: пресет + ручные правки (размер, лимиты, стоп, тейки, трейлинг) ──
+class RiskIn(BaseModel):
+    preset: str | None = None        # careful | standard | bold
+    overrides: dict | None = None    # ключи risk_view(); None у ключа = вернуть умолчание
+    reset: bool = False              # сбросить все ручные правки
+
+def _risk_payload(sess: UserSession) -> dict:
+    prefs = sess.risk_prefs or dict(preset=DEFAULT_RISK_PRESET, overrides={})
+    pub = strategy.PUBLIC.get(sess.strategy_id) or {}
+    return dict(editable=not sess._default, preset=prefs["preset"], overrides=prefs["overrides"],
+                effective=sess.risk_view(), strategy=sess.strategy_id,
+                strategy_name=pub.get("name", strategy.get(sess.strategy_id)["name"]),
+                presets={k: dict(v) for k, v in RISK_PRESETS.items()},
+                bounds=risk_bounds(), manual_cap_sol=CFG["max_per_trade_sol"])
+
+@app.get("/api/risk")
+def api_risk(x_wallet: str | None = WalletHeader):
+    return _risk_payload(get_session(x_wallet))
+
+@app.post("/api/risk")
+def api_risk_set(r: RiskIn, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
+    _block_if_public()
+    sess = get_session(x_wallet)
+    _guard_write(sess, x_auth)
+    if sess._default:
+        raise HTTPException(400, "house risk is set by the operator (env); connect a wallet")
+    if r.preset is not None and r.preset not in RISK_PRESETS:
+        raise HTTPException(400, "preset: careful | standard | bold")
+    with sess.lock:
+        v = sess.set_risk(preset=r.preset, overrides=r.overrides, reset=r.reset)
+    log("RISK", "ABC", f"risk {sess.risk_prefs['preset']} · size {v['size_sol']} · stop -{v['stop_pct']:.0%}",
+        mode=sess.mode, pubkey=sess.pubkey)
+    return _risk_payload(sess)
 
 @app.post("/api/strategy/apply")
 def api_strategy_apply(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
@@ -3636,7 +3809,7 @@ def _bot_buy_fn(sess: UserSession):
     def fn(chain, address, size_sol):
         mode = sess.bot.cfg.get("mode")
         cap = CFG["auto_max_per_trade_sol"] if mode == "n3" else CFG["bot_max_per_trade_sol"]
-        size_sol = round(min(size_sol, cap), 4)
+        size_sol = round(min(sess.risk_cfg().get("user_size_sol") or size_sol, cap), 4)   # тестер: свой размер
         # протухшие рыночные данные (GMGN в бане/кулдауне) → не входим по старой цене/метрикам
         age = MK.trending_age(chain)
         if age is not None and age > BOT_MAX_DATA_AGE_S:
@@ -3703,8 +3876,8 @@ def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader, x_auth: str | N
         screen_fn=lambda c: screen_once(c, sess),
         buy_fn=_bot_buy_fn(sess),
         sell_fn=_bot_sell_fn(sess),
-        positions_fn=lambda: sess.positions, risk_cfg=CFG, lock=sess.lock,
-        halted_fn=lambda: sess.risk.halted_now(CFG["daily_loss_cap_sol"], _fuses_on(sess)),
+        positions_fn=lambda: sess.positions, risk_cfg=sess.risk_cfg, lock=sess.lock,
+        halted_fn=lambda: sess.risk.halted_now(sess.risk_cfg()["daily_loss_cap_sol"], _fuses_on(sess)),
         max_positions_fn=lambda: _max_positions(sess))
     log("BOT", "ABC", "Autonomous loop started" if started else "Already running (duplicate start ignored)", mode=sess.mode)
     return dict(ok=True, started=started, **_bot_status(sess, x_auth))

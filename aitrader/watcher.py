@@ -173,8 +173,9 @@ class PositionWatcher:
                 # остановили/рестартнули) или включённый бот; Phantom (self_custody без session)
                 # продать может только владелец — ему алерт о пробитом стопе.
                 auto = p.get("auto") or getattr(sess.bot, "enabled", False)
+                rc = sess.risk_cfg() if hasattr(sess, "risk_cfg") else self._risk_cfg   # свой риск тестера
                 if p.get("self_custody") and not p.get("session"):
-                    if p["pnl"] <= -float(self._risk_cfg.get("hard_stop_pct", 0.25)) and not p.get("stop_alerted"):
+                    if p["pnl"] <= -float(rc.get("hard_stop_pct", 0.25)) and not p.get("stop_alerted"):
                         p["stop_alerted"] = True
                         try:
                             import notify
@@ -185,7 +186,7 @@ class PositionWatcher:
                 if not auto:
                     continue
                 p.setdefault("tp_taken", [])
-                ed = botmod.decide_exit(p, None, self._risk_cfg, sess.bot.cfg)
+                ed = botmod.decide_exit(p, None, rc, sess.bot.cfg)
                 if ed.action != "SELL":
                     continue
                 partial = ed.rung >= 0 and ed.fraction < 1.0

@@ -1399,14 +1399,27 @@ class TestPerModeTradeCaps:
         seen = {}
         monkeypatch.setattr(appmod, "do_buy",
                             lambda ch, a, sz, s=None, lock=None, auto=False: seen.update(size=sz) or dict(ok=True))
+        sess.set_risk(overrides={"size_sol": 5})            # тестер просит больше потолка
         appmod._bot_buy_fn(sess)("sol", "ADDRN2", 0.4)      # дефолтный режим бота = n2
         assert seen["size"] == appmod.CFG["bot_max_per_trade_sol"]
 
     def test_n1_proposal_clamped_to_bot_cap(self, client):
         sess = appmod.get_session("CapWalletN1xxxx")
         sess.bot.cfg["mode"] = "n1"
+        sess.set_risk(overrides={"size_sol": 5})
         appmod._bot_buy_fn(sess)("sol", "ADDRN1", 0.4)
         assert sess.proposals[0]["size_sol"] == appmod.CFG["bot_max_per_trade_sol"]
+
+    def test_bot_enters_with_users_preset_size(self, client, monkeypatch):
+        sess = appmod.get_session("CapWalletSzxxxx")
+        seen = {}
+        monkeypatch.setattr(appmod, "do_buy",
+                            lambda ch, a, sz, s=None, lock=None, auto=False: seen.update(size=sz) or dict(ok=True))
+        appmod._bot_buy_fn(sess)("sol", "ADDRSZ", 0.4)
+        assert seen["size"] == appmod.RISK_PRESETS["standard"]["size_sol"]
+        sess.set_risk(preset="careful")
+        appmod._bot_buy_fn(sess)("sol", "ADDRSZ2", 0.4)
+        assert seen["size"] == appmod.RISK_PRESETS["careful"]["size_sol"]
 
     def test_n3_autopilot_clamped_to_auto_cap(self, client, monkeypatch):
         sess = appmod.get_session("CapWalletN3xxxx")
