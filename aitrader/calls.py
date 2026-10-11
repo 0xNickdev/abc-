@@ -30,7 +30,8 @@ _TG_NAME = re.compile(r"^[A-Za-z0-9_]{4,64}$")
 _X_NAME = re.compile(r"^[A-Za-z0-9_]{1,15}$")
 
 X_EVERY_S = 120.0          # опрос X-списка
-TG_EVERY_S = 120.0         # опрос Telegram-каналов
+TG_EVERY_S = 60.0          # проход по Telegram-каналам (очередью, TG_BATCH за проход)
+TG_BATCH = 15              # 60 каналов ≈ каждый раз в 4 мин — без долбёжки t.me
 PRICE_EVERY_S = 300.0      # обновление цен/пиков
 DISCOVER_EVERY_S = 30.0    # не чаще одного автопоиска в 30 с
 X_CHUNK = 10               # аккаунтов в одном поисковом запросе
@@ -126,6 +127,7 @@ class CallScanner:
                           last_error=None, last_x=None, last_tg=None)
         self._t = dict(x=0.0, tg=0.0, price=0.0, discover=0.0)
         self._src_mtime = 0.0
+        self._tg_cursor = 0
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._load()
@@ -273,7 +275,13 @@ class CallScanner:
 
     def poll_tg(self) -> int:
         n = 0
-        for ch in self.sources["tg"]:
+        chans = self.sources["tg"]
+        if not chans:
+            return 0
+        start = self._tg_cursor % len(chans)
+        batch = (chans[start:] + chans[:start])[:TG_BATCH]
+        self._tg_cursor = start + len(batch)
+        for ch in batch:
             try:
                 r = httpx.get(f"https://t.me/s/{ch}", timeout=12.0, follow_redirects=True,
                               headers={"User-Agent": "Mozilla/5.0 (compatible; abc-calls/1.0)"})

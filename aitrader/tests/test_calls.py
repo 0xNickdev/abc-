@@ -114,3 +114,15 @@ def test_sources_file_edit_is_picked_up_live(sc):
     os.utime(sc.src_path, (_t.time() + 5, _t.time() + 5))
     sc._load_sources()
     assert sc.sources == dict(x=["kolA"], tg=["chanA"])
+
+
+def test_tg_polls_channels_round_robin(sc, monkeypatch):
+    seen = []
+    class R:
+        status_code = 200
+        text = ""
+    monkeypatch.setattr(cm.httpx, "get", lambda url, **k: seen.append(url.rsplit("/", 1)[1]) or R())
+    monkeypatch.setattr(cm, "TG_BATCH", 2)
+    sc.set_sources(tg=["aaaa", "bbbb", "cccc"])
+    sc.poll_tg(); sc.poll_tg()
+    assert seen == ["aaaa", "bbbb", "cccc", "aaaa"]
