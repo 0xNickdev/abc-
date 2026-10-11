@@ -152,3 +152,9 @@ def test_house_stop_is_operator_setting_and_persists(client, monkeypatch):
         assert botmod.decide_exit(pos, None, appmod.CFG, appmod.ST.bot.cfg).action == "HOLD"   # −40% < стопа
     finally:
         appmod.CFG["hard_stop_pct"] = old
+
+
+def test_app_always_gets_public_view_even_for_operator(client):
+    st = client.get("/api/strategies", params={"view": "public"}).json()   # локально = оператор
+    assert all("trigger" not in x and "exits" in x for x in st["strategies"])
+    assert client.get("/api/strategies").json()["strategies"][0].get("trigger")   # /legacy — внутренний вид

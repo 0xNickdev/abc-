@@ -3137,6 +3137,7 @@ class SettingsIn(BaseModel):
 
 class RunIn(BaseModel):
     chain: str = "sol"       # 筛哪条链（每个 tab 独立）
+    view: str = ""           # "public" — витрина беты (/app) даже для оператора
 
 class ChainIn(BaseModel):
     chain: str
@@ -3411,7 +3412,7 @@ def api_run(r: RunIn, x_wallet: str | None = WalletHeader, x_auth: str | None = 
         return JSONResponse(_public_screen(data))
     ch = valid_chain(r.chain)
     sess = get_session(x_wallet)
-    view = (lambda o: o) if _sees_internals(sess, x_auth) else _public_screen
+    view = (lambda o: o) if (_sees_internals(sess, x_auth) and r.view != "public") else _public_screen
     # Rate-limit per-user: /api/run дёргает CLI/квоту оператора — не даём молотить чаще
     # RUN_MIN_INTERVAL_S (сек). UI опрашивает раз в ~5.6s, честным юзерам не мешает.
     now = time.monotonic()
@@ -3483,10 +3484,10 @@ def api_strategy(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthH
     return strategy.get(sess.strategy_id)
 
 @app.get("/api/strategies")
-def api_strategies(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
+def api_strategies(view: str = "", x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
     """全部具名策略 + 当前用户激活的（前端策略选择卡片直接渲染）。Тестерам — без порогов входа."""
     sess = get_session(x_wallet)
-    if not _sees_internals(sess, x_auth):
+    if view == "public" or not _sees_internals(sess, x_auth):     # /app всегда показывает витрину
         return strategy.describe_public(sess.strategy_id)
     return strategy.describe_all(sess.strategy_id)
 

@@ -446,7 +446,7 @@ details.adv[open] summary svg{transform:rotate(90deg)}
       </div>
 
       <div class="sec">
-        <div class="sechead"><h2>Open positions</h2><small id="posNote">Every position has a hard stop at −25%</small></div>
+        <div class="sechead"><h2>Open positions</h2><small id="posNote">&nbsp;</small></div>
         <div class="cards" id="pos"></div>
       </div>
     </div>
@@ -557,7 +557,7 @@ details.adv[open] summary svg{transform:rotate(90deg)}
 
 <footer>
   <span>Paper results are simulated. Memecoins are extremely risky — never trade money you can't lose.</span>
-  <span><a href="/legacy" class="adminonly">Operator panel</a></span>
+  <span></span>
 </footer>
 
 <div class="scrim" id="liveScrim" role="dialog" aria-modal="true" aria-labelledby="liveH">
@@ -847,6 +847,7 @@ function renderBot() {
   btn.className = on ? 'ghostbtn lg' : 'pill lg';
   if (S.risk) {
     const e = S.risk.effective, pr = S.risk.presets[S.risk.preset] || {};
+    $('posNote').textContent = 'Every position has a stop loss at −' + Math.round(e.stop_pct * 100) + '%';
     $('botSetup').innerHTML = 'Strategy <b>' + esc(S.risk.strategy_name) + '</b> · ' + esc(pr.label || '') + ' risk · ' + e.size_sol + ' SOL per trade · stop −' + Math.round(e.stop_pct * 100) + '% <a href="#strategy" class="linkbtn">Change</a>';
   }
   btn.textContent = on ? 'Stop bot' : 'Start bot';
@@ -973,7 +974,7 @@ let _sigBusy = false;
 async function refreshSignals() {
   if (_sigBusy) return; _sigBusy = true;
   try {
-    const d = await post('/api/run', { chain: 'sol' });
+    const d = await post('/api/run', { chain: 'sol', view: 'public' });
     S.signals = (d.decisions || []).map(x => x.decision).filter(x => x && x.action === 'ACTION')
       .sort((a, b) => (!!b.strategy_match - !!a.strategy_match));
     if (S.wallet && d.mode) S.mode = d.mode;
@@ -1170,7 +1171,7 @@ async function loadStrategy() {
   $('stLock').hidden = !!S.wallet;
   loadHouse();
   try {
-    const [st, rk] = await Promise.all([api('/api/strategies'), api('/api/risk')]);
+    const [st, rk] = await Promise.all([api('/api/strategies?view=public'), api('/api/risk')]);
     _strats = st; _risk = rk;
   } catch (e) { toast(e.message, 'err'); return; }
   renderStrategy();
