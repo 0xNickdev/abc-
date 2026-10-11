@@ -117,3 +117,22 @@ def test_risk_api_roundtrip(client):
 
 def test_house_risk_not_editable_via_api(client):
     assert client.post("/api/risk", json={"preset": "bold"}).status_code == 400
+
+
+def test_trades_are_tagged_and_results_split_by_strategy(client, monkeypatch):
+    import datetime
+    addr = "CLEANCATxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    h = {"X-Wallet": W1}
+    s = appmod.get_session(W1)
+    s.set_strategy("abc_sniper_v1")
+    s.set_risk(preset="careful")
+    assert client.post("/api/buy", headers=h, json={"address": addr, "size_sol": 0.1, "chain": "sol"}).status_code == 200
+    pos = s.positions[0]
+    assert (pos["strategy"], pos["risk_preset"], pos["by"]) == ("abc_sniper_v1", "careful", "manual")
+    assert client.post("/api/sell", headers=h, json={"address": addr}).status_code == 200
+    m = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m")
+    cal = client.get("/api/pnl/calendar", headers=h, params={"scope": "me", "month": m}).json()
+    assert cal["by_strategy"]["abc_sniper_v1"]["trades"] == 1
+    assert cal["strategy_names"]["abc_sniper_v1"] == "Sniper"
+    day = next(iter(cal["days"].values()))
+    assert day["list"][0]["strategy"] == "abc_sniper_v1"

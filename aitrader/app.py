@@ -2061,6 +2061,7 @@ def pnl_calendar(pubkey: str, month: str, since: str = "") -> dict:
     # SELL-выжимка (hot + архивы, кэш по size/mtime) вместо read_text() всего
     # журнала: память не зависит от возраста бота, история видна вся.
     months: set[str] = set()          # месяцы со сделками этого scope (UI прыгает на последний непустой)
+    by_strat: dict[str, dict] = {}    # Results по стратегиям (сделки до 11.10 — «untracked»)
     for r in backtest.sell_records(LOG_PATH):
         # pk="*" — не фильтруем (house/бот); иначе только записи этого pubkey
         if pk != "*" and r.get("pubkey", DEFAULT_PUBKEY) != pk:
@@ -2084,7 +2085,11 @@ def pnl_calendar(pubkey: str, month: str, since: str = "") -> dict:
         # детализация сделки: токен, PnL% и в SOL (вал/чистый), время (для клика по дню)
         cell["list"].append(dict(sym=r.get("symbol", "?"), pct=round(pct, 4),
                                  sol=round(sol, 6), net=round(net, 6), ts=r.get("ts", "")[11:16],
-                                 address=r.get("address", "")))
+                                 address=r.get("address", ""), strategy=r.get("strategy")))
+        bs = by_strat.setdefault(r.get("strategy") or "untracked",
+                                 dict(trades=0, wins=0, pnl=0.0, net=0.0))
+        bs["trades"] += 1; bs["wins"] += sol > 0
+        bs["pnl"] = round(bs["pnl"] + sol, 6); bs["net"] = round(bs["net"] + net, 6)
         tot["pnl"] = round(tot["pnl"] + sol, 6); tot["net"] = round(tot["net"] + net, 6); tot["trades"] += 1
         pcts.append(pct)
         if sol > 0:
@@ -2100,6 +2105,9 @@ def pnl_calendar(pubkey: str, month: str, since: str = "") -> dict:
         worst_pct=round(min(pcts), 4) if pcts else 0.0,
         total_sol=tot["pnl"], net_total_sol=tot["net"], fee_pct=FEE_ROUNDTRIP_PCT)
     return dict(month=month, days=days, total=tot, stats=stats, months=sorted(m for m in months if m), since=since,
+                by_strategy={k: dict(v, win_rate=round(v["wins"] / v["trades"], 3) if v["trades"] else 0.0)
+                             for k, v in by_strat.items()},
+                strategy_names={k: v["name"] for k, v in strategy.PUBLIC.items()},
                 winrate=round(tot["wins"] / tot["trades"], 3) if tot["trades"] else 0.0)
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -2632,6 +2640,12 @@ def _mock_drift(p):
 # ──────────────────────────────────────────────────────────────────────────
 # 12. 成交（人按下才发生）
 # ──────────────────────────────────────────────────────────────────────────
+def _trade_tags(s: UserSession, by: str) -> dict:
+    """Метки сделки для Results по стратегиям: стратегия, риск-пресет и кто открыл.
+    Пишутся в позицию при входе и уходят в SELL-записи журнала."""
+    return dict(strategy=s.strategy_id,
+                risk_preset=(s.risk_prefs or {}).get("preset") or "house", by=by)
+
 def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = None,
            lock=None, auto: bool = False) -> dict:
     """lock — замок сессии, если вызывающий его НЕ держит (бот): сеть идёт без замка,
@@ -2737,7 +2751,7 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
 
     with (lock if lock is not None else contextlib.nullcontext()):
         res = _buy_commit(s, chain, address, size_sol, symbol, entry, entry_price,
-                          filled, status_msg)
+                          filled, status_msg, auto=auto)
         if auto:                     # позиция бота: стопы watcher'а живут и после остановки бота
             for x in s.positions:
                 if x["address"] == address and not x.get("self_custody"):
@@ -2745,8 +2759,9 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         return res
 
 def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbol: str,
-                entry: dict, entry_price: float, filled: bool, status_msg: str) -> dict:
-    """Запись позиции после исполнения (под замком сессии)."""
+                entry: dict, entry_price: float, filled: bool, status_msg: str,
+                auto: bool = False) -> dict:
+    """Запись позиции после исполнения (под замком сессии). auto — вход бота (метка by)."""
     sim = None
     if SIM_COSTS and not (filled and s.mode == "LIVE") and entry_price > 0:
         liq = float((_attrib_for(address) or {}).get("liquidity", 0.0) or 0.0)
@@ -2797,7 +2812,8 @@ def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbo
                             sim_fixed_sol=(sim["fixed_sol"] if sim else 0.0), sim_entry=sim,
                             opened_ts=time.time(), entry_attrib=attrib,
                             entry_liq=float(attrib.get("liquidity", 0.0) or 0.0),   # базовая ликвидность для escape-диффа
-                            live=bool(filled and s.mode == "LIVE")))
+                            live=bool(filled and s.mode == "LIVE"),
+                            **_trade_tags(s, "bot" if auto else "manual")))
     s.save_positions()
     _verb = "filled" if filled else ("submitted·pending" if s.mode == "LIVE" else "recorded")
     log("BUY", symbol, f"{s.mode} {_verb} {size_sol} ({chain})",
@@ -2932,7 +2948,8 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         log("SELL", p["symbol"], f"{s.mode} closed PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=p.get("size_sol", 0.0), address=p.get("address"), fraction=1.0,
                  attrib=attrib, hold_min=hold_min, pnl_gross=pnl_gross, cost_sol=cost_sol,
-                 costed=costed, live=bool(p.get("live"))),
+                 costed=costed, live=bool(p.get("live")),
+                 strategy=p.get("strategy"), risk_preset=p.get("risk_preset"), by=p.get("by")),
             mode=s.mode, pubkey=s.pubkey)
         s.positions.pop(idx)
     else:
@@ -2944,7 +2961,8 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         log("SELL", p["symbol"], f"{s.mode} partial {pct}% PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac,
                  attrib=attrib, hold_min=hold_min, pnl_gross=pnl_gross, cost_sol=cost_sol,
-                 costed=costed, live=bool(p.get("live"))),
+                 costed=costed, live=bool(p.get("live")),
+                 strategy=p.get("strategy"), risk_preset=p.get("risk_preset"), by=p.get("by")),
             mode=s.mode, pubkey=s.pubkey)
     s.save_positions()
     if s.pubkey == DEFAULT_PUBKEY or p.get("live") or s.mode == "LIVE":
@@ -3677,7 +3695,8 @@ def _n3_execute(sess: UserSession, side: str, chain: str, address: str,
                 cur_price=entry_price, token_amount=int(fill["token_delta_raw"]),
                 self_custody=True, session=True, live=True, auto=True,
                 entry_src="fill", entry_src_fill=True,
-                wallet_tx=sig, opened_ts=time.time(), entry_attrib=attrib))
+                wallet_tx=sig, opened_ts=time.time(), entry_attrib=attrib,
+                **_trade_tags(sess, "bot")))
             sess.save_positions()
         log("BUY", symbol, f"N3 LIVE filled {spent:.6f} SOL → {tokens:g} · tx {sig[:16]}…",
             dict(size_sol=round(spent, 6), chain="sol", session=True, live=True, tx=sig,
@@ -4074,7 +4093,8 @@ def api_tx_confirm(c: TxConfirmIn, x_wallet: str | None = WalletHeader,
                 pnl=0.0, cycles=0, entry=entry, chain="sol", entry_price=price,
                 cur_price=price, token_amount=delta, self_custody=True, live=True,
                 entry_src="fill", entry_src_fill=True,
-                wallet_tx=c.signature, opened_ts=time.time(), entry_attrib=attrib))
+                wallet_tx=c.signature, opened_ts=time.time(), entry_attrib=attrib,
+                **_trade_tags(sess, "phantom")))
             sess.save_positions()
             log("BUY", symbol, f"PHANTOM filled {spent:.6f} SOL · {tag}",
                 dict(size_sol=round(spent, 6), chain="sol", self_custody=True, live=True,
