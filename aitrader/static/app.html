@@ -556,6 +556,28 @@ details.adv[open] summary svg{transform:rotate(90deg)}
       <div class="opgrid" id="hRevKpi" style="margin-top:0"></div>
       <div class="panel list" id="hProps" style="margin-top:14px"></div></div>
 
+    <div class="sec"><div class="sechead"><h2>House bot settings</h2><small>Entry gates and pacing of the house bot</small></div>
+      <div class="panel form" id="hCfg" style="margin-top:0"></div></div>
+
+    <div class="sec"><div class="sechead"><h2>Scan filters</h2><small>0 or empty = off · applies from the next scan</small></div>
+      <div class="panel form" id="hFlt" style="margin-top:0"></div></div>
+
+    <div class="sec"><div class="sechead"><h2>Scan command</h2><small id="hCmdNote">&nbsp;</small></div>
+      <div class="panel" style="padding:20px"><textarea class="src" id="hCmd" style="min-height:70px"></textarea>
+        <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:12px"><button class="ghostbtn sm" id="hCmdReset">Default</button><button class="pill sm" id="hCmdSave">Save command</button></div></div></div>
+
+    <div class="sec"><div class="sechead"><h2>Deep token check</h2><small>Independent on-chain + X checks and the farm detector · uses quota</small></div>
+      <div class="panel" style="padding:20px">
+        <div style="display:flex;gap:10px;flex-wrap:wrap"><input id="dcCa" class="src" style="min-height:0;height:42px;flex:1;min-width:240px" placeholder="Contract address">
+          <button class="pill sm" id="dcRun">Run deep check</button></div>
+        <div id="dcOut" class="muted" style="margin-top:14px;font-size:13.5px"></div></div></div>
+
+    <div class="sec"><div class="sechead"><h2>Backtest</h2><small id="hBtNote">full journal · operator only</small></div>
+      <div class="opgrid" id="hBt" style="margin-top:0"></div></div>
+
+    <div class="sec"><div class="sechead"><h2>House session wallet</h2><small>Autopilot (N3) wallet of the house bot</small></div>
+      <div class="panel lock" id="hSw" style="margin-top:0"><span id="hSwTxt">…</span><button class="ghostbtn sm" id="hSwOut">Withdraw to admin wallet</button></div></div>
+
     <div class="sec"><div class="sechead"><h2>Call sources</h2><small id="hSrcNote">&nbsp;</small></div>
       <div class="panel" style="padding:20px;display:grid;grid-template-columns:1fr 1fr;gap:16px">
         <div><label class="muted" style="font-size:12.5px">X accounts (one per line)</label><textarea class="src" id="srcX"></textarea></div>
@@ -1125,7 +1147,7 @@ async function loadOperator() {
       : '<tr><td colspan="5" class="empty">No open positions.</td></tr>';
   }
   markNil();
-  loadOpScan(); loadOpReview(); loadOpSources();
+  loadOpScan(); loadOpReview(); loadOpSources(); loadOpCfg(); loadOpFilters(); loadOpCmd(); loadOpBacktest(); loadOpWallet();
 }
 async function loadOpScan() {
   let d;
@@ -1140,7 +1162,8 @@ async function loadOpScan() {
   const acts = ds.filter(x => x.action === 'ACTION').sort((a, b) => (b.priority || 0) - (a.priority || 0));
   $('hCands').innerHTML = '<div class="cand head"><span>Candidate</span><span>Priority</span><span class="c-sc">Score</span><span class="c-why">Why</span></div>' + (acts.length ? acts.map(x =>
     '<div class="cand"><div class="tcell"><b>' + tokName(x.symbol, x.address) + '</b>' + caBtn(x.address) + '</div><span class="num">' + (x.priority ?? '—') + '</span>' +
-    '<span class="num c-sc">' + ((x.abc || {}).score ?? '—') + '</span><span class="muted c-why">' + esc(((x.abc || {}).reasons || []).join(' · ') || x.reason || '') + '</span></div>').join('') : '<div class="empty">No candidates right now.</div>');
+    '<span class="num c-sc">' + ((x.abc || {}).score ?? '—') + '</span><span class="muted c-why">' + esc(((x.abc || {}).reasons || []).join(' · ') || x.reason || '') +
+    ' <button class="linkbtn" data-deep="' + esc(x.address) + '">deep check</button></span></div>').join('') : '<div class="empty">No candidates right now.</div>');
 }
 async function loadOpReview() {
   let r;
@@ -1196,6 +1219,118 @@ $('v-operator').addEventListener('click', async e => {
   try { await api('/api/sell', Object.assign({ method: 'POST', json: { address: b.dataset.hsell } }, H)); toast('Closed'); } catch (err) { toast(err.message, 'err'); }
   loadOperator();
 });
+
+/* ── OPERATOR: settings, filters, scan command, deep check, backtest, wallet ── */
+const BOT_FIELDS = [
+  ['max_new_per_tick', 'New entries per check', 'int'], ['poll_s', 'Check every', 'num', 's'],
+  ['escape_severity_exit', 'Exit at escape severity ≥', 'int'], ['trail_activate_pct', 'Trailing starts after', 'pct', '%'],
+  ['min_priority', 'Min priority (0 = off)', 'int'], ['min_buy_ratio', 'Min buy ratio (0 = off)', 'pct', '%'],
+  ['max_sm_confluence', 'Max smart-money count (0 = off)', 'int']];
+async function loadOpCfg() {
+  try {
+    const [b, st] = await Promise.all([api('/api/bot', H), api('/api/strategies', H)]);
+    const c = b.cfg || {};
+    $('hCfg').innerHTML =
+      '<div class="fld"><label>Mode</label><div class="seg" id="hCfgMode">' + ['n1', 'n2'].map(m => '<button data-m="' + m + '" aria-pressed="' + (c.mode === m) + '">' + (m === 'n1' ? 'N1 · proposes' : 'N2 · trades itself') + '</button>').join('') + '</div></div>' +
+      '<div class="fld"><label>Strategy</label><div class="seg" id="hCfgStrat">' + st.strategies.map(x => '<button data-s="' + esc(x.id) + '" aria-pressed="' + (x.id === st.active) + '">' + esc((x.name || '').split(' (')[0]) + '</button>').join('') + '</div></div>' +
+      BOT_FIELDS.map(([k, label, t, u]) => fld('hc_' + k, label, t === 'pct' ? P(c[k]) : (c[k] ?? 0), u || '', '', 'step="any"')).join('') +
+      '<div class="fld"><label><input type="checkbox" id="hc_require_abc_trigger" ' + (c.require_abc_trigger ? 'checked' : '') + '> Only strategy-triggered entries</label></div>' +
+      '<div class="formacts"><button class="pill" id="hCfgSave">Save settings</button></div>';
+    $('hCfg').onclick = async e => {
+      const m = e.target.closest('[data-m]'), sb = e.target.closest('[data-s]');
+      if (m) { $('hCfgMode').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x === m))); return; }
+      if (sb) { $('hCfgStrat').querySelectorAll('button').forEach(x => x.setAttribute('aria-pressed', String(x === sb))); return; }
+      if (!e.target.closest('#hCfgSave')) return;
+      const btn = e.target.closest('#hCfgSave'); busy(btn, true);
+      const patch = { mode: ($('hCfgMode').querySelector('[aria-pressed="true"]') || {}).dataset?.m, require_abc_trigger: $('hc_require_abc_trigger').checked };
+      BOT_FIELDS.forEach(([k, , t]) => { const v = +$('hc_' + k).value; patch[k] = t === 'pct' ? v / 100 : t === 'int' ? Math.round(v) : v; });
+      try {
+        await api('/api/bot/config', Object.assign({ method: 'POST', json: patch }, H));
+        const sid = ($('hCfgStrat').querySelector('[aria-pressed="true"]') || {}).dataset?.s;
+        if (sid && sid !== st.active) await api('/api/strategy/select', Object.assign({ method: 'POST', json: { id: sid } }, H));
+        toast('House bot settings saved'); loadOpCfg();
+      } catch (err) { toast(err.message, 'err'); busy(btn, false); }
+    };
+  } catch (e) { $('hCfg').innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; }
+}
+const FLT_LABELS = { min_liquidity: ['Min liquidity', '$'], min_volume_1h: ['Min 1h volume', '$'], min_mcap: ['Min market cap', '$'], max_mcap: ['Max market cap', '$'],
+  min_age_min: ['Min age', 'min'], max_age_min: ['Max age', 'min'], max_sniper_count: ['Max snipers (−1 = off)', ''], max_vol_to_liq: ['Max volume / liquidity', 'x'],
+  min_fees_per_100k: ['Min fees per $100k mcap', 'SOL'], require_renounced_freeze: ['Require freeze renounced', ''], symbol_blacklist: ['Symbol blacklist', ''], address_blacklist: ['Address blacklist', ''] };
+async function loadOpFilters() {
+  try {
+    const d = await api('/api/filters', H), f = d.filters, t = d.types;
+    $('hFlt').innerHTML = Object.keys(t).map(k => {
+      const [label, u] = FLT_LABELS[k] || [k, ''];
+      if (t[k] === 'bool') return '<div class="fld"><label><input type="checkbox" data-f="' + k + '" ' + (f[k] ? 'checked' : '') + '> ' + label + '</label></div>';
+      if (t[k] === 'list') return '<div class="fld" style="grid-column:1/-1"><label>' + label + ' (comma separated)</label><div class="in"><input data-f="' + k + '" value="' + esc((f[k] || []).join(', ')) + '"></div></div>';
+      return '<div class="fld"><label>' + label + '</label><div class="in"><input data-f="' + k + '" type="number" step="any" value="' + (f[k] ?? 0) + '"><span class="u">' + u + '</span></div></div>';
+    }).join('') + '<div class="formacts"><button class="ghostbtn" id="hFltReset">Reset to defaults</button><button class="pill" id="hFltSave">Save filters</button></div>';
+    $('hFlt').onclick = async e => {
+      const save = e.target.closest('#hFltSave'), reset = e.target.closest('#hFltReset');
+      if (!save && !reset) return;
+      const b = save || reset; busy(b, true);
+      try {
+        if (reset) await api('/api/filters/reset', Object.assign({ method: 'POST', json: {} }, H));
+        else {
+          const patch = {};
+          $('hFlt').querySelectorAll('[data-f]').forEach(i => { const k = i.dataset.f; patch[k] = t[k] === 'bool' ? i.checked : t[k] === 'list' ? i.value.split(',').map(x => x.trim()).filter(Boolean) : +i.value; });
+          await api('/api/filters', Object.assign({ method: 'POST', json: patch }, H));
+        }
+        toast(reset ? 'Filters reset' : 'Filters saved'); loadOpFilters();
+      } catch (err) { toast(err.message, 'err'); busy(b, false); }
+    };
+  } catch (e) { $('hFlt').innerHTML = '<div class="empty">' + esc(e.message) + '</div>'; }
+}
+let _defCmd = '';
+async function loadOpCmd() {
+  try { const d = await api('/api/settings?chain=sol', H); $('hCmd').value = d.trending_cmd || ''; _defCmd = d.default_trending_cmd || ''; $('hCmdNote').textContent = 'market data command of the scanner'; }
+  catch (e) { $('hCmdNote').textContent = e.message; }
+}
+$('hCmdReset').onclick = () => { $('hCmd').value = _defCmd; };
+$('hCmdSave').onclick = async e => {
+  const b = e.currentTarget; busy(b, true);
+  try { await api('/api/settings', Object.assign({ method: 'POST', json: { trending_cmd: $('hCmd').value, chain: 'sol' } }, H)); toast('Scan command saved'); }
+  catch (err) { toast(err.message, 'err'); }
+  busy(b, false);
+};
+function kvList(o, skip) {
+  return Object.entries(o || {}).filter(([k, v]) => !(skip || []).includes(k) && v !== null && typeof v !== 'object')
+    .map(([k, v]) => '<span style="margin-right:14px"><span class="muted">' + esc(k.replace(/_/g, ' ')) + '</span> <b style="color:#fff;font-weight:500">' + esc(typeof v === 'number' ? (Math.abs(v) < 1 && v !== 0 ? v.toFixed(3) : v) : String(v)) + '</b></span>').join('');
+}
+async function runDeep(ca) {
+  ca = (ca || '').trim(); if (!ca) return;
+  $('dcCa').value = ca; $('dcOut').innerHTML = '<span class="spin"></span> Checking…';
+  const [q, f] = await Promise.all([api('/api/token/quality?address=' + encodeURIComponent(ca)).catch(e => ({ error: e.message })),
+                                    api('/api/token/farm?address=' + encodeURIComponent(ca)).catch(e => ({ error: e.message }))]);
+  const row = (t, html) => '<div style="padding:8px 0;border-top:1px solid var(--line)"><b style="color:#fff;font-weight:600">' + t + '</b><div style="margin-top:4px">' + (html || '—') + '</div></div>';
+  $('dcOut').innerHTML =
+    row('Verdict', q.error ? esc(q.error) : (q.red_flag ? '<span class="down">Red flag</span>' : '<span class="up">No red flag</span>') + ' · top10 ' + (q.top10 != null ? Math.round(q.top10 * 100) + '%' : '—') + (q.twitter ? ' · @' + esc(q.twitter) : '')) +
+    row('Fresh wallets', kvList(q.fresh)) + row('Holders risk', kvList(q.holders_risk)) + row('X account', kvList(q.x_reuse, ['cached'])) +
+    row('Contract posts on X', kvList(q.ca_timeline, ['cached'])) + row('Farm detector', f.error ? esc(f.error) : kvList(f) + (f.frontrunners ? '<br>' + kvList(f.frontrunners) : ''));
+}
+$('dcRun').onclick = () => runDeep($('dcCa').value);
+$('hCands').addEventListener('click', e => { const c = e.target.closest('[data-deep]'); if (c) { runDeep(c.dataset.deep); $('dcCa').scrollIntoView({ block: 'center' }); } });
+async function loadOpBacktest() {
+  try {
+    const b = await api('/api/backtest', H), r = b.realized || {}, fa = (b.funnel || {}).by_action || {};
+    const kv = (k, v, sub) => '<div class="kpi panel"><span>' + k + '</span><b class="num">' + v + '</b><small>' + (sub || '&nbsp;') + '</small></div>';
+    const pct0 = x => x == null ? '—' : Math.round(x * 100) + '%';
+    $('hBt').innerHTML = kv('Journal records', b.records ?? '—') + kv('Closed positions', r.trades ?? r.n ?? '—') +
+      kv('Win rate', pct0(r.win_rate ?? r.winrate)) + kv('Cash flow', r.total_pnl_sol != null ? sol(r.total_pnl_sol) : '—', 'all sells, before fees');
+    $('hBtNote').textContent = Object.entries(fa).map(([k, v]) => k + ' ' + v).join(' · ') || 'full journal';
+    markNil();
+  } catch (e) { $('hBtNote').textContent = e.message; }
+}
+async function loadOpWallet() {
+  try { const w = await api('/api/session-wallet', H); $('hSwTxt').innerHTML = (w.pubkey ? caBtn(w.pubkey) + ' · ' : '') + (+w.balance_sol || 0).toFixed(4) + ' SOL'; $('hSwOut').disabled = !(w.balance_sol > 0.0001); }
+  catch (e) { $('hSwTxt').textContent = e.message; $('hSwOut').disabled = true; }
+}
+$('hSwOut').onclick = async e => {
+  const b = e.currentTarget; busy(b, true);
+  try { await api('/api/session-wallet/withdraw', Object.assign({ method: 'POST', json: { to: S.wallet } }, H)); toast('Withdrawn to ' + short(S.wallet)); }
+  catch (err) { toast(err.message, 'err'); }
+  busy(b, false); loadOpWallet();
+};
 
 /* ── CALLS ── */
 let _csrc = 'all', _calls = [];
