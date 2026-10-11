@@ -812,7 +812,7 @@ function setWallet(pk) {
 
 /* ── header / routing ── */
 function go(view) {
-  if (!['bot', 'signals', 'calls', 'strategy', 'results', 'operator'].includes(view) || (view === 'operator' && !S.admin)) view = 'bot';
+  if (!['bot', 'signals', 'calls', 'strategy', 'results', 'operator'].includes(view) || (view === 'operator' && !(S.admin || S.adminWallet))) view = 'bot';
   S.view = view;
   document.querySelectorAll('.tab').forEach(t => t.setAttribute('aria-selected', String(t.dataset.view === view)));
   document.querySelectorAll('.view').forEach(v => v.classList.toggle('on', v.id === 'v-' + view));
@@ -837,7 +837,7 @@ function renderHeader() {
   $('mPaper').setAttribute('aria-pressed', String(!live));
   $('mLive').setAttribute('aria-pressed', String(live));
   document.body.classList.toggle('admin', !!S.admin);
-  document.querySelector('.optab').hidden = !S.admin;
+  document.querySelector('.optab').hidden = !(S.admin || S.adminWallet);
 }
 $('walletBtn').onclick = () => S.wallet ? disconnect() : connect();
 
@@ -868,7 +868,7 @@ async function setMode(m) {
 async function refreshStatus() {
   try {
     const d = await api('/api/status');
-    S.admin = !!d.admin; S.caps = d.caps || S.caps;
+    S.admin = !!d.admin; S.adminWallet = !!d.admin_wallet; S.caps = d.caps || S.caps;
     if (S.wallet) S.mode = d.mode;
     const a = (d.health && d.health.alerts) || [];
     const el = $('alert');
@@ -1123,8 +1123,12 @@ addEventListener('keydown', e => { if (e.key === 'Escape') document.querySelecto
 /* ── OPERATOR (house bot) ── */
 const H = { house: true };
 async function loadOperator() {
-  if (!S.admin) return;
-  try { await signIn(); } catch (e) { toast('Sign in with the admin wallet', 'err'); return; }
+  if (!S.admin && !S.adminWallet) return;
+  try {
+    if (!S.admin) { dropAuth(); await signIn(); await refreshStatus(); }   // токен протух после деплоя — новый вход
+    else await signIn();
+  } catch (e) { toast('Sign in with the admin wallet', 'err'); return; }
+  if (!S.admin) { toast('This wallet is not the operator wallet', 'err'); return; }
   const [b, pos, hr] = await Promise.all([api('/api/bot', H).catch(() => null), api('/api/positions?chain=sol', H).catch(() => null), api('/api/house/risk', H).catch(() => null)]);
   if (b) {
     const on = !!b.enabled, st = b.stats || {};

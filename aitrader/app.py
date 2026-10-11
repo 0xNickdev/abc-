@@ -3257,6 +3257,9 @@ def api_status(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHea
                 has_key=bool(load_env().get("GMGN_API_KEY")),
                 trading_locked=LIVE_TRADING_DISABLED, public_demo=PUBLIC_DEMO,
                 admin=_is_admin(s, x_auth),
+                # кошелёк из ABC_ADMIN, даже если токен входа протух (рестарт/деплой стирает токены
+                # в памяти) — UI покажет Operator и попросит подписать вход заново
+                admin_wallet=(s.pubkey in ADMIN_WALLETS),
                 caps=dict(manual=CFG["max_per_trade_sol"],
                           bot=CFG["bot_max_per_trade_sol"],
                           auto=CFG["auto_max_per_trade_sol"]),
