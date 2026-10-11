@@ -41,6 +41,13 @@ WS_ENABLED = os.getenv("ABC_WATCH_WS", "1").strip().lower() in ("1", "true", "ye
 _MAX_WS_SUBS = 25
 CURVE_RPC_EVERY_S = 10.0   # RPC-фолбэк цены кривой не чаще раза в N с на токен
 REBASE_WINDOW_S = 120.0    # окно перебазирования цены входа на источник watcher'а
+# Санити цены кривой (инцидент 11.10, Incognito): pump.fun-кривые с НЕ-SOL quote (SPCX и т.п.,
+# 6 знаков вместо 9) дают цену в ~1000 раз ниже → мгновенный фальшивый «стоп −100%».
+# Кривая показывает обвал > CURVE_SANITY_DROP от входа → сверяем с DexScreener; если тот
+# в CURVE_SANITY_X+ раз выше — кривой по этому токену больше не верим (настоящий раг
+# DexScreener тоже покажет, так что раги не прячутся).
+CURVE_SANITY_DROP = 0.80
+CURVE_SANITY_X = 5.0
 MIN_POLL_GAP_S = float(os.getenv("ABC_WATCH_MIN_GAP_S", "1.0") or 1.0)   # потолок частоты опроса
 STALE_AFTER_WAIT_S = 1.5   # цена старше этого после ожидания замка сессии не применяется          # Helius лимит подписок на соединение держим с запасом
 
@@ -69,6 +76,7 @@ class PositionWatcher:
         self._stop = threading.Event()
         self.stats = dict(polls=0, price_updates=0, exits=0, ws_kicks=0, ws_state="off")
         self._curve_rpc_at: dict[str, float] = {}
+        self._curve_bad: set[str] = set()          # токены, где цена кривой врёт (не-SOL quote)
 
     # ── lifecycle ──────────────────────────────────────────────────────────
     def start(self):
@@ -94,6 +102,26 @@ class PositionWatcher:
     def _mints(self) -> list[str]:
         return sorted({p["address"] for _, p in self._open_pairs()})
 
+    def _sanity_check_curve(self, pairs, prices: dict, src: dict):
+        """Обвал >80% по цене кривой → сверка с DexScreener; расходятся в разы — кривая врёт."""
+        suspect = sorted({p["address"] for _, p in pairs
+                          if src.get(p["address"]) in ("geyser", "curve-rpc")
+                          and float(p.get("entry_price") or 0) > 0
+                          and 0 < float(prices.get(p["address"]) or 0)
+                          < (1 - CURVE_SANITY_DROP) * float(p["entry_price"])})
+        if not suspect:
+            return
+        try:
+            dx = dexadapter.spot_prices(suspect)
+        except Exception:
+            dx = {}
+        for m in suspect:
+            d, cp = float(dx.get(m) or 0), float(prices.get(m) or 0)
+            if d > 0 and cp > 0 and d >= cp * CURVE_SANITY_X:
+                self._curve_bad.add(m)
+                prices[m], src[m] = d, "dex"
+                self.stats["curve_rejected"] = self.stats.get("curve_rejected", 0) + 1
+
     # ── одна итерация (вынесена для тестов) ────────────────────────────────
     def poll_once(self):
         pairs = self._open_pairs()
@@ -103,7 +131,7 @@ class PositionWatcher:
         # 1) Geyser (Shyft gRPC): токены на bonding curve — цена из резервов, обновление за
         #    десятки мс, без RPC-кредитов Helius. Авторитетный источник для кривой.
         geyser.FEED.set_mints(mints)
-        prices = geyser.FEED.prices_usd(mints)
+        prices = {m: v for m, v in geyser.FEED.prices_usd(mints).items() if m not in self._curve_bad}
         src = {m: "geyser" for m in prices}
         # 2) DexScreener — для мигрировавших (AMM) и всего, чего нет в Geyser
         rest = [m for m in mints if m not in prices]
@@ -118,7 +146,7 @@ class PositionWatcher:
         #    ещё не было сделки с момента подписки: Yellowstone не шлёт стартовый снимок).
         #    Не чаще раза в CURVE_RPC_EVERY_S на токен — Helius-кредиты не жжём.
         now_m = time.monotonic()
-        missing = [m for m in mints if not prices.get(m) and m.endswith("pump")
+        missing = [m for m in mints if not prices.get(m) and m.endswith("pump") and m not in self._curve_bad
                    and now_m - self._curve_rpc_at.get(m, 0.0) >= CURVE_RPC_EVERY_S]
         for m in missing:
             self._curve_rpc_at[m] = now_m
@@ -130,6 +158,7 @@ class PositionWatcher:
                 self.stats["curve_prices"] = self.stats.get("curve_prices", 0) + len(got)
             except Exception:
                 pass
+        self._sanity_check_curve(pairs, prices, src)
         if not prices:
             return                                  # оба источника легли — ждём следующего круга
         self.stats["polls"] += 1

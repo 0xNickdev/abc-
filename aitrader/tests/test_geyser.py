@@ -126,6 +126,37 @@ class TestRebaseNeverHidesCrash:
         assert p["entry_price"] == 1e-5 and p["pnl"] == pytest.approx(-0.7)
 
 
+class TestCurveSanity:
+    """Инцидент 11.10 (Incognito): кривая с не-SOL quote дала цену в ~1000 раз ниже →
+    фальшивый «стоп −100%» через 2 секунды после входа."""
+
+    def test_wrong_curve_price_is_replaced_by_dexscreener(self, monkeypatch):
+        p = dict(address=MINT, entry_price=1.7e-5, cur_price=1.7e-5, pnl=0.0, chain="sol",
+                 opened_ts=time.time() - 2)
+        s = _Sess([p])
+        monkeypatch.setattr(w.geyser.FEED, "set_mints", lambda m: None)
+        monkeypatch.setattr(w.geyser.FEED, "prices_usd", lambda m: {MINT: 1.7e-8})   # в 1000 раз ниже
+        monkeypatch.setattr(w.dexadapter, "spot_prices", lambda m: {MINT: 1.72e-5})
+        pw = w.PositionWatcher(lambda: [s], dict(hard_stop_pct=0.25), lambda sess: None)
+        pw.poll_once()
+        assert p["px_src"] == "dex" and p["pnl"] == pytest.approx(0.0118, abs=1e-3)
+        assert MINT in pw._curve_bad and pw.stats["curve_rejected"] == 1
+        pw.poll_once()                                   # дальше кривой по токену не верим
+        assert p["px_src"] == "dex"
+
+    def test_real_rug_still_counts_when_dexscreener_agrees(self, monkeypatch):
+        p = dict(address=MINT, entry_price=1e-5, cur_price=1e-5, pnl=0.0, chain="sol",
+                 opened_ts=time.time() - 5)
+        s = _Sess([p])
+        monkeypatch.setattr(w.geyser.FEED, "set_mints", lambda m: None)
+        monkeypatch.setattr(w.geyser.FEED, "prices_usd", lambda m: {MINT: 5e-7})     # −95% раг
+        monkeypatch.setattr(w.dexadapter, "spot_prices", lambda m: {MINT: 6e-7})     # DexScreener согласен
+        pw = w.PositionWatcher(lambda: [s], dict(hard_stop_pct=0.25), lambda sess: None)
+        pw.poll_once()
+        assert p["px_src"] == "geyser" and p["pnl"] == pytest.approx(-0.95)
+        assert MINT not in pw._curve_bad
+
+
 class TestShadowUnlimited:
     def test_shadow_no_position_cap_live_capped(self, tmp_path, monkeypatch):
         from test_app import _mu_client
