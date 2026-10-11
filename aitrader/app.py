@@ -268,7 +268,8 @@ def _public_decision(item: dict) -> dict | None:
         strategy_match=hit, strategy=pub_name,
         reason=(f"Matches your {pub_name} strategy" if hit and pub_name else
                 "Passed every safety check"),
-        features={k: f[k] for k in (*_PUB_SAFETY, *_PUB_MARKET) if k in f}))
+        features={k: f[k] for k in (*_PUB_SAFETY, *_PUB_MARKET) if k in f},
+        safety=check_verdict(check_items(f, None))))   # тот же вердикт, что в карточке проверки
 
 def _public_screen(out: dict) -> dict:
     decs = [x for x in (_public_decision(i) for i in (out or {}).get("decisions", [])) if x]
@@ -4251,6 +4252,182 @@ def api_token_quality(address: str):
         or (fresh_ratio >= 0.5) or ((out["top10"] or 0) >= 0.6)
     out["red_flag"] = red
     return out
+
+# ── Карточка проверки токена для тестеров (Signals → Safety). Факты о безопасности, не эдж.
+# Мгновенная часть — из скрина (features). Глубокая — rugcheck + RPC свежие коши + X (getxapi)
+# кэшируется по токену на всех: 10 тестеров на одном токене = 1 платный запрос.
+# Ферма (N+1 вызовов GMGN) сюда НЕ входит — бан GMGN останавливал бота (15–28.09).
+CHECK_TTL = 600.0
+CHECK_GLOBAL_PER_MIN = 30
+_CHECK_CACHE: dict[str, tuple[float, dict]] = {}
+_CHECK_RECENT: list[float] = []
+_CHECK_LOCK = threading.Lock()
+
+def _deep_check(address: str) -> tuple[dict, bool]:
+    """(данные, из_кэша). Сетевые вызовы — без замков сессий."""
+    now = time.monotonic()
+    with _CHECK_LOCK:
+        hit = _CHECK_CACHE.get(address)
+        if hit and now - hit[0] < CHECK_TTL:
+            return hit[1], True
+        _CHECK_RECENT[:] = [t for t in _CHECK_RECENT if now - t < 60]
+        if len(_CHECK_RECENT) >= CHECK_GLOBAL_PER_MIN:
+            raise HTTPException(429, "checks are busy — try again in a minute")
+        _CHECK_RECENT.append(now)
+    handle = ""
+    try:
+        handle = dexadapter.token_twitter(address)
+    except Exception:
+        pass
+    def _safe(fn, *a):
+        try:
+            return fn(*a) or None
+        except Exception:
+            return None
+    has_x = bool(xapi.key())
+    d = dict(handle=handle or None,
+             holders=_safe(rugcheck.check, address),
+             fresh=_safe(dexadapter.fresh_wallet_count, address),
+             x=_safe(xapi.reuse_check, address, handle) if (handle and has_x) else None,
+             renames=_safe(xapi.handle_history, handle) if handle else None,
+             timeline=_safe(xapi.ca_timeline, address, handle) if has_x else None,
+             x_available=has_x)
+    with _CHECK_LOCK:
+        _CHECK_CACHE[address] = (time.monotonic(), d)
+        if len(_CHECK_CACHE) > 2000:
+            _CHECK_CACHE.pop(next(iter(_CHECK_CACHE)))
+    return d, False
+
+def _features_for(address: str, sess: UserSession) -> dict:
+    """Мгновенные факты из последнего скрина (своего, любого или публичного кэша)."""
+    screens = [sess.last_screen, _PUBLIC_CACHE.get("data")] + [x.last_screen for x in list(SESSIONS.values())]
+    for sc in screens:
+        for it in (sc or {}).get("decisions", []):
+            d = it.get("decision") or {}
+            if d.get("address") == address:
+                return dict(d.get("features") or {}, symbol=d.get("symbol"))
+    return {}
+
+def _item(group, key, label, status, value, note=""):
+    return dict(group=group, key=key, label=label, status=status, value=value, note=note)
+
+def _pct(x) -> str:
+    return f"{float(x) * 100:.0f}%"
+
+def check_items(f: dict, deep: dict | None) -> list[dict]:
+    """Чек-лист ok / warn / bad / na простым языком."""
+    it = []
+    if f:
+        if f.get("honeypot"):
+            it.append(_item("Contract", "honeypot", "Can you sell", "bad", "Honeypot", "Sells are blocked"))
+        rm, rf = f.get("renounced_mint"), f.get("renounced_freeze")
+        if rm is not None:
+            it.append(_item("Contract", "mint", "Mint authority", "ok" if rm else "bad",
+                            "Renounced" if rm else "Active", "" if rm else "The dev can print more tokens"))
+        if rf is not None:
+            it.append(_item("Contract", "freeze", "Freeze authority", "ok" if rf else "bad",
+                            "Renounced" if rf else "Active", "" if rf else "The dev can freeze your tokens"))
+        tax = max(float(f.get("sell_tax") or 0), float(f.get("buy_tax") or 0))
+        it.append(_item("Contract", "tax", "Buy / sell tax", "ok" if tax <= 0.05 else "warn" if tax <= 0.10 else "bad",
+                        _pct(tax)))
+        if f.get("top10") is not None:
+            t = float(f["top10"])
+            it.append(_item("Holders", "top10", "Top 10 holders own", "ok" if t < 0.30 else "warn" if t < 0.50 else "bad",
+                            _pct(t), "" if t < 0.30 else "A few wallets can crash the price"))
+        if f.get("dev_hold") is not None:
+            v = float(f["dev_hold"])
+            it.append(_item("Dev", "dev_hold", "Dev still holds", "ok" if v < 0.05 else "warn" if v < 0.10 else "bad",
+                            _pct(v), "" if v < 0.05 else "The dev can dump on buyers"))
+        if f.get("rug_ratio") is not None:
+            v = float(f["rug_ratio"])
+            it.append(_item("Dev", "dev_history", "Dev's past tokens that rugged",
+                            "ok" if v < 0.20 else "warn" if v < 0.60 else "bad", _pct(v)))
+        if f.get("bundler") is not None:
+            v = float(f["bundler"])
+            it.append(_item("Holders", "bundles", "Bought in bundles at launch",
+                            "ok" if v < 0.15 else "warn" if v < 0.30 else "bad", _pct(v),
+                            "" if v < 0.15 else "Supply grabbed by coordinated wallets in the first block"))
+        if f.get("sniper_count") is not None:
+            n = int(f["sniper_count"])
+            it.append(_item("Holders", "snipers", "Sniper wallets", "ok" if n <= 5 else "warn" if n <= 15 else "bad", str(n)))
+    if deep is not None:
+        fr = deep.get("fresh") or (dict(fresh=f.get("fresh_wallets"), ratio=f.get("fresh_ratio"))
+                                    if f.get("fresh_ratio") is not None else None)
+        if fr and fr.get("ratio") is not None:
+            r = float(fr["ratio"])
+            it.append(_item("Holders", "fresh", "Brand-new wallets in top holders",
+                            "ok" if r < 0.30 else "warn" if r < 0.50 else "bad", _pct(r),
+                            "" if r < 0.30 else "Often one person splitting supply across new wallets"))
+        h = deep.get("holders")
+        if h and h.get("ok"):
+            bad = h.get("red_flag") or h.get("rugged")
+            ins = int(h.get("insiders") or 0)
+            note = "; ".join(str(x) for x in (h.get("danger") or [])[:2])
+            it.append(_item("Holders", "insiders", "Insider wallets", "bad" if bad else "warn" if ins else "ok",
+                            (f"{ins} in {h.get('insider_networks')} group{'s' if h.get('insider_networks') != 1 else ''}"
+                             if ins and h.get("insider_networks") else str(ins)),
+                            note or ("Linked wallets hold supply" if ins else "")))
+        handle = deep.get("handle")
+        if not handle:
+            it.append(_item("X account", "x_linked", "X account", "warn", "Not linked",
+                            "No official X account in the token's links"))
+        else:
+            x = deep.get("x") or {}
+            if x.get("ok"):
+                age, other = x.get("account_age_days"), int(x.get("other_tokens") or 0)
+                young = age is not None and age < 7
+                it.append(_item("X account", "x_account", "@" + handle,
+                                "bad" if (young or other >= 3) else "ok",
+                                (f"{age:.0f} days old" if age is not None else "age unknown") + f" · {int(x.get('followers') or 0):,} followers",
+                                "Brand-new account made for this launch" if young else ""))
+                it.append(_item("X account", "x_reuse", "Other tokens this account promoted",
+                                "bad" if other >= 3 else "warn" if other else "ok", str(other),
+                                "Serial shill account" if other >= 3 else ""))
+            elif deep.get("x_available") is False:
+                it.append(_item("X account", "x_account", "@" + handle, "na", "Linked", "Account history check is off"))
+            rn = deep.get("renames") or {}
+            if rn.get("ok"):
+                k = int(rn.get("renames") or 0)
+                it.append(_item("X account", "x_renames", "Handle renamed", "bad" if rn.get("red_flag") else "warn" if k else "ok",
+                                f"{k} times", "Recycled account" if rn.get("red_flag") else ""))
+        tl = deep.get("timeline") or {}
+        if tl.get("ok") and tl.get("mentions"):
+            it.append(_item("X account", "x_first", "Who posted the contract first",
+                            "warn" if tl.get("posted_before_official") else "ok",
+                            "Official account" if tl.get("first_by_official") else "Someone else",
+                            "Others had it before the official account" if tl.get("posted_before_official") else ""))
+    return it
+
+def check_verdict(items: list[dict]) -> dict:
+    bad = sum(1 for i in items if i["status"] == "bad")
+    warn = sum(1 for i in items if i["status"] == "warn")
+    if bad:
+        return dict(level="bad", label="Risky", summary=f"{bad} red flag{'s' if bad > 1 else ''}" + (f", {warn} to watch" if warn else ""))
+    if warn >= 2:
+        return dict(level="warn", label="Caution", summary=f"{warn} things to watch")
+    return dict(level="ok", label="Looks clean", summary="No red flags found" + (" · 1 thing to watch" if warn else ""))
+
+@app.get("/api/token/check")
+def api_token_check(address: str, deep: int = 1, x_wallet: str | None = WalletHeader):
+    """Чек-лист безопасности токена для тестера: мгновенные факты + (deep=1) holders/X из кэша."""
+    address = (address or "").strip()
+    if not (32 <= len(address) <= 44):
+        raise HTTPException(400, "bad address")
+    sess = get_session(x_wallet)
+    f = _features_for(address, sess)
+    d, cached = None, True
+    if deep:
+        with _CHECK_LOCK:
+            fresh = address in _CHECK_CACHE and time.monotonic() - _CHECK_CACHE[address][0] < CHECK_TTL
+        if not fresh:
+            now = time.monotonic()
+            if now - getattr(sess, "last_check", 0.0) < 3.0:
+                raise HTTPException(429, "one check every few seconds")
+            sess.last_check = now
+        d, cached = _deep_check(address)
+    items = check_items(f, d)
+    return dict(address=address, symbol=f.get("symbol"), items=items, verdict=check_verdict(items),
+                deep=bool(deep), cached=cached, checked_at=time.time())
 
 def _farm_fns(g):
     """Адаптер gmgn → колбэки для farm.detect. Терпимо к адаптерам без методов (→ пусто)."""
