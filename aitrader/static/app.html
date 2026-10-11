@@ -430,6 +430,8 @@ details.adv[open] summary svg{transform:rotate(90deg)}
         <div class="kpi panel rv" style="--i:3"><span>Win rate this month</span><b class="num" id="kWin">—</b><small id="kWinN">&nbsp;</small></div>
       </div>
 
+      <div class="panel lock" id="rentBox" hidden style="margin-top:14px"><span id="rentTxt"></span><button class="ghostbtn sm" id="rentBtn">Reclaim</button></div>
+
       <div class="sec" id="propSec" hidden>
         <div class="sechead"><h2>Waiting for your signature</h2><small>Your bot found these in Live mode</small></div>
         <div class="cards" id="props"></div>
@@ -799,6 +801,7 @@ async function refreshBot() {
   } catch (e) {}
   renderBot();
   if (S.wallet && S.mode === 'LIVE') refreshProposals(); else $('propSec').hidden = true;
+  refreshRent();
 }
 function renderOnboarding() {
   const s1 = !!S.wallet, s2 = s1 && !!S.auth;
@@ -890,11 +893,39 @@ $('pos').addEventListener('click', async e => {
   const p = S.positions[+b.dataset.sell]; if (!p) return;
   busy(b, true);
   try {
-    if (p.self_custody) { await phantomTrade('sell', p.address, 0, p.symbol); toast('Sold ' + p.symbol + ' — confirmed on-chain'); }
+    if (p.self_custody) { await phantomTrade('sell', p.address, 0, p.symbol); toast('Sold ' + p.symbol + ' — confirmed on-chain'); _rentAt = 0; }
     else { const r = await post('/api/sell', { address: p.address }); toast('Closed ' + p.symbol + (r && r.pnl != null ? ' at ' + pct(r.pnl) : '')); }
   } catch (err) { toast(err.message, 'err'); }
   busy(b, false); refreshPositions(); refreshBot();
 });
+
+/* Rent reclaim: every token account holds ~0.002 SOL; empty ones can be closed to get it back */
+let _rentAt = 0;
+async function refreshRent() {
+  if (!S.wallet || Date.now() - _rentAt < 60000) return;
+  _rentAt = Date.now();
+  try {
+    const r = await api('/api/wallet/rent');
+    $('rentBox').hidden = !(r.accounts > 0 && r.reclaim_sol >= 0.002);
+    $('rentTxt').textContent = r.reclaim_sol.toFixed(4) + ' SOL is locked in ' + r.accounts + ' empty token account' + (r.accounts > 1 ? 's' : '') + '. Close them to get it back to your wallet.';
+  } catch (e) {}
+}
+$('rentBtn').onclick = async e => {
+  const b = e.currentTarget; busy(b, true);
+  try {
+    await signIn();
+    const w3 = await web3();
+    const j = await post('/api/tx/reclaim');
+    if (!j.tx) { toast('Nothing to reclaim'); }
+    else {
+      const vtx = w3.VersionedTransaction.deserialize(Uint8Array.from(atob(j.tx), ch => ch.charCodeAt(0)));
+      toast('Confirm in Phantom');
+      await provider().signAndSendTransaction(vtx);
+      toast('Reclaimed ' + j.reclaim_sol.toFixed(4) + ' SOL' + (j.more ? ' · ' + j.more + ' more accounts left, press again' : ''));
+    }
+  } catch (err) { toast(err.message, 'err'); }
+  busy(b, false); _rentAt = 0; setTimeout(refreshRent, 4000);
+};
 
 /* Live-mode proposals: bot found an entry, the owner signs it */
 async function refreshProposals() {

@@ -432,6 +432,11 @@ SIM_SLIP = float(os.getenv("ABC_SIM_SLIP", "0.015") or 0.015)               # л
 SIM_SLIP_STOP = float(os.getenv("ABC_SIM_SLIP_STOP", "0.05") or 0.05)       # стоп на падающем рынке
 SIM_TX_FEE_SOL = float(os.getenv("ABC_SIM_TX_FEE_SOL", "0.00025") or 0.00025)  # priority (≤200k lam) + base
 SIM_ATA_RENT_SOL = 0.00204                                                   # рента токен-аккаунта
+# 11.10: рента ATA возвращается при закрытии пустого токен-аккаунта (N3 — сам после полной
+# продажи, Phantom — кнопкой Reclaim). Бумага зеркалит LIVE: при полном закрытии рента в плюс,
+# минус комиссия tx закрытия. ABC_SIM_RENT_REFUND=0 — считать ренту безвозвратной (как раньше).
+SIM_RENT_REFUND = os.getenv("ABC_SIM_RENT_REFUND", "1").strip().lower() in ("1", "true", "yes", "on")
+SIM_CLOSE_TX_FEE_SOL = 0.000005
 _SOL_USD_FALLBACK = 150.0
 
 
@@ -467,6 +472,8 @@ def sim_exit(p: dict, pnl_mark: float, frac: float, sold_sol: float, reason: str
     imp = _sim_impact(sold_sol * (1.0 + max(pnl_mark, -0.99)), liq)
     gross_back = (1.0 + pnl_mark) * (1.0 - fee - imp - slip)          # что вернётся на 1 SOL вложений
     fixed = SIM_TX_FEE_SOL + float(p.get("sim_fixed_sol", 0.0) or 0.0) * frac   # своя tx + доля входных
+    if SIM_RENT_REFUND and frac >= 0.999:                              # полное закрытие → рента назад
+        fixed -= SIM_ATA_RENT_SOL - SIM_CLOSE_TX_FEE_SOL
     net = gross_back - 1.0 - (fixed / sold_sol if sold_sol > 0 else 0.0)
     return round(max(-1.0, net), 4), round(fixed + (1.0 + pnl_mark - gross_back) * sold_sol, 6)
 
@@ -2963,6 +2970,9 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
     if pnl_override is None and SIM_COSTS and not p.get("live") and p.get("sim_entry"):
         pnl, cost_sol = sim_exit(p, float(pnl), frac, sold_sol, reason or "")
         costed = True
+        if frac < 0.999:                             # аудит 11.10: доля входных фикс-издержек списана —
+            p["sim_fixed_sol"] = round(float(p.get("sim_fixed_sol", 0.0) or 0.0) * (1.0 - frac), 8)
+                                                     # иначе финал списывал их целиком ещё раз (×1.7)
     tag = (f" · {reason}" if reason else "")
     # атрибуция входа + время удержания → в SELL-запись (топливо review-loop: исход × кошельки/KOL)
     attrib = p.get("entry_attrib") or {}
@@ -3763,8 +3773,54 @@ def _n3_execute(sess: UserSession, side: str, chain: str, address: str,
         if p not in sess.positions:
             return dict(ok=True, closed=True, note="already closed")
         p["token_amount"] = max(0, held - sold_raw)
-        return do_sell(address, frac, f"N3 LIVE · tx {sig[:16]}… · received {received:.6f} SOL · {reason or ''}",
-                       sess, pnl_override=real_pnl)
+        res = do_sell(address, frac, f"N3 LIVE · tx {sig[:16]}… · received {received:.6f} SOL · {reason or ''}",
+                      sess, pnl_override=real_pnl)
+    if frac >= 0.999:                                # продано всё → вернуть ренту токен-аккаунта
+        _reclaim_rent_async(kp, spk, [address], sess)
+    return res
+
+def _reclaim_rent_async(kp, owner: str, mints: list[str], sess: UserSession):
+    """N3: закрыть опустевший токен-аккаунт отдельной tx (в фоне, после подтверждённой
+    продажи). Сбой здесь ни на что не влияет — рента просто остаётся на счёте до Reclaim."""
+    def run():
+        try:
+            time.sleep(2.0)                          # дать RPC увидеть нулевой баланс
+            b = execution.build_close_empty(owner, mints)
+            if b.get("tx"):
+                sig = sessionwallet.sign_and_send(b["tx"], kp)
+                log("RECLAIM", "ABC", f"closed {b['count']} empty token account(s), +{b['reclaim_sol']} SOL · tx {sig[:16]}…",
+                    mode=sess.mode, pubkey=sess.pubkey)
+        except Exception as e:
+            log("RECLAIM_FAIL", "ABC", _redact(e)[:160], mode=sess.mode, pubkey=sess.pubkey)
+    threading.Thread(target=run, name="reclaim", daemon=True).start()
+
+# ── Возврат ренты для Phantom: найти пустые токен-аккаунты и собрать tx их закрытия ──
+@app.get("/api/wallet/rent")
+def api_wallet_rent(x_wallet: str | None = WalletHeader):
+    """Сколько SOL лежит в пустых токен-аккаунтах кошелька (чтение блокчейна, без записи)."""
+    sess = get_session(x_wallet)
+    if sess.pubkey == DEFAULT_PUBKEY:
+        return dict(accounts=0, reclaim_sol=0.0)
+    _throttle(f"rent:{sess.pubkey}", 5.0)
+    try:
+        accs = execution.empty_token_accounts(sess.pubkey)
+    except Exception as e:
+        raise HTTPException(502, f"rpc: {_redact(e)[:120]}")
+    return dict(accounts=len(accs), reclaim_sol=round(sum(a["lamports"] for a in accs) / 1e9, 6))
+
+@app.post("/api/tx/reclaim")
+def api_tx_reclaim(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
+    """Неподписанная tx закрытия пустых токен-аккаунтов: подписывает владелец в Phantom.
+    Рента возвращается на тот же кошелёк; токены не трогаются (только аккаунты с нулём)."""
+    _block_if_public()
+    sess = get_session(x_wallet)
+    if sess.pubkey == DEFAULT_PUBKEY:
+        raise HTTPException(400, "connect a wallet")
+    require_auth(sess, x_auth)
+    try:
+        return dict(ok=True, **execution.build_close_empty(sess.pubkey))
+    except Exception as e:
+        raise HTTPException(502, f"build: {_redact(e)[:120]}")
 
 # Авто-Verify перед входом БОТА (ABC_BOT_VERIFY=0 выключить): только бесплатные
 # RPC-детекторы — не жгут квоты GMGN/getxapi и не зависят от их банов. Ручных покупок
