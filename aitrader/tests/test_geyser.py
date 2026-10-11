@@ -99,7 +99,8 @@ class TestWatcherUsesGeyser:
         monkeypatch.setattr(w.dexadapter, "spot_prices", lambda m: called.append(m) or {})
         pw = w.PositionWatcher(lambda: [s], dict(hard_stop_pct=0.25), lambda sess: None)
         pw.poll_once()
-        assert called == []                                     # всё покрыто Geyser → DexScreener не нужен
+        # ×40 от входа → сверка с DexScreener (кривые в чужих quote, 11.10); тот молчит → верим кривой
+        assert called == [[MINT]] and MINT not in pw._curve_bad
         assert p["entry_price"] == 4e-6 and p["entry_price_orig"] == 1e-7
         assert p["pnl"] == 0.0 and p["px_src"] == "geyser"     # фальшивых ×40 больше нет
 
@@ -143,6 +144,17 @@ class TestCurveSanity:
         assert MINT in pw._curve_bad and pw.stats["curve_rejected"] == 1
         pw.poll_once()                                   # дальше кривой по токену не верим
         assert p["px_src"] == "dex"
+
+    def test_inflated_curve_price_does_not_fake_a_moonshot(self, monkeypatch):
+        p = dict(address=MINT, entry_price=1e-5, cur_price=1e-5, pnl=0.0, chain="sol",
+                 opened_ts=time.time() - 300)
+        s = _Sess([p])
+        monkeypatch.setattr(w.geyser.FEED, "set_mints", lambda m: None)
+        monkeypatch.setattr(w.geyser.FEED, "prices_usd", lambda m: {MINT: 1e-3})      # фальшивые ×100
+        monkeypatch.setattr(w.dexadapter, "spot_prices", lambda m: {MINT: 1.1e-5})
+        pw = w.PositionWatcher(lambda: [s], dict(hard_stop_pct=0.25), lambda sess: None)
+        pw.poll_once()
+        assert p["px_src"] == "dex" and p["pnl"] == pytest.approx(0.1)
 
     def test_real_rug_still_counts_when_dexscreener_agrees(self, monkeypatch):
         p = dict(address=MINT, entry_price=1e-5, cur_price=1e-5, pnl=0.0, chain="sol",

@@ -48,6 +48,9 @@ REBASE_WINDOW_S = 120.0    # окно перебазирования цены в
 # DexScreener тоже покажет, так что раги не прячутся).
 CURVE_SANITY_DROP = 0.80
 CURVE_SANITY_X = 5.0
+# То же вверх: кривые в токенизированных акциях (TSLAx, NVDAx — 11.10) и других quote могут
+# дать и завышенную цену → фальшивые иксы и тейки. Рост > CURVE_SANITY_UP раз от входа — сверка.
+CURVE_SANITY_UP = 5.0
 MIN_POLL_GAP_S = float(os.getenv("ABC_WATCH_MIN_GAP_S", "1.0") or 1.0)   # потолок частоты опроса
 STALE_AFTER_WAIT_S = 1.5   # цена старше этого после ожидания замка сессии не применяется          # Helius лимит подписок на соединение держим с запасом
 
@@ -103,12 +106,12 @@ class PositionWatcher:
         return sorted({p["address"] for _, p in self._open_pairs()})
 
     def _sanity_check_curve(self, pairs, prices: dict, src: dict):
-        """Обвал >80% по цене кривой → сверка с DexScreener; расходятся в разы — кривая врёт."""
+        """Обвал >80% или рост >5x по цене кривой → сверка с DexScreener; расходятся в разы — кривая врёт."""
+        def odd(p):
+            ep, cp = float(p.get("entry_price") or 0), float(prices.get(p["address"]) or 0)
+            return ep > 0 and cp > 0 and (cp < (1 - CURVE_SANITY_DROP) * ep or cp > CURVE_SANITY_UP * ep)
         suspect = sorted({p["address"] for _, p in pairs
-                          if src.get(p["address"]) in ("geyser", "curve-rpc")
-                          and float(p.get("entry_price") or 0) > 0
-                          and 0 < float(prices.get(p["address"]) or 0)
-                          < (1 - CURVE_SANITY_DROP) * float(p["entry_price"])})
+                          if src.get(p["address"]) in ("geyser", "curve-rpc") and odd(p)})
         if not suspect:
             return
         try:
@@ -117,7 +120,7 @@ class PositionWatcher:
             dx = {}
         for m in suspect:
             d, cp = float(dx.get(m) or 0), float(prices.get(m) or 0)
-            if d > 0 and cp > 0 and d >= cp * CURVE_SANITY_X:
+            if d > 0 and cp > 0 and max(d / cp, cp / d) >= CURVE_SANITY_X:   # расходятся в разы — кривая врёт
                 self._curve_bad.add(m)
                 prices[m], src[m] = d, "dex"
                 self.stats["curve_rejected"] = self.stats.get("curve_rejected", 0) + 1
