@@ -347,7 +347,7 @@ details.adv[open] summary svg{transform:rotate(90deg)}
   .br{grid-template-columns:22px minmax(0,1fr) 54px 60px;padding:11px 14px}
   .br .c-calls{display:none}
   .sig .mob{display:flex}
-  .trades th:nth-child(2),.trades td:nth-child(2){display:none}
+  .trades th:nth-child(2),.trades td:nth-child(2),.trades th:nth-child(3),.trades td:nth-child(3){display:none}
   .trades th,.trades td{padding:11px 14px}
 }
 @media (max-width:480px){.seg button{padding:5px 10px}.wallet span.lbl{display:none}.wallet{padding:0 11px}}
@@ -521,6 +521,10 @@ details.adv[open] summary svg{transform:rotate(90deg)}
       <div class="kpi panel rv" style="--i:3"><span>Win rate</span><b class="num" id="rWin">—</b><small id="rAvg">&nbsp;</small></div>
       <div class="kpi panel rv" style="--i:4"><span>Best / worst</span><b class="num" id="rBest">—</b><small id="rWorst">&nbsp;</small></div>
     </div>
+    <div class="sec" id="bySec" hidden style="margin-top:28px">
+      <div class="sechead"><h2>By strategy</h2><small>Which setup actually works, net after fees</small></div>
+      <div class="strats" id="byStrat"></div>
+    </div>
     <div class="panel chart rv" style="--i:5">
       <div class="sechead" style="margin:0 0 8px"><h2 style="font-size:15px">Cumulative net, SOL</h2><small id="chartNote">&nbsp;</small></div>
       <div class="empty" id="chartEmpty" hidden>The curve appears after the first closed trade.</div>
@@ -529,7 +533,7 @@ details.adv[open] summary svg{transform:rotate(90deg)}
     </div>
     <div class="sec">
       <div class="sechead"><h2>Recent trades</h2><small id="trNote">&nbsp;</small></div>
-      <div class="panel list"><table class="trades"><thead><tr><th>Token</th><th>Date</th><th class="r">Result</th><th class="r">Net SOL</th></tr></thead><tbody id="trades"></tbody></table></div>
+      <div class="panel list"><table class="trades"><thead><tr><th>Token</th><th>Date</th><th>Strategy</th><th class="r">Result</th><th class="r">Net SOL</th></tr></thead><tbody id="trades"></tbody></table></div>
       <p class="note">Net = after the estimated round-trip cost: swap fees, slippage, priority fee and account rent.</p>
     </div>
   </section>
@@ -1240,6 +1244,13 @@ function renderResults() {
   $('rAvg').textContent = st.trades ? 'avg win ' + pct(st.avg_win_pct, 0) + ' · avg loss ' + pct(st.avg_loss_pct, 0) : ' ';
   $('rBest').textContent = st.trades ? pct(st.best_pct, 0) : '—'; $('rBest').className = 'num ' + (st.trades ? cls(st.best_pct) : '');
   $('rWorst').textContent = st.trades ? 'worst ' + pct(st.worst_pct, 0) : ' ';
+  // by strategy: trades opened since strategy tagging went live (older ones are 'untracked')
+  const bs = Object.entries(c.by_strategy || {}).filter(([k]) => k !== 'untracked');
+  $('bySec').hidden = !bs.length;
+  $('byStrat').innerHTML = bs.sort((a, b) => b[1].net - a[1].net).map(([k, v]) =>
+    '<div class="strat panel" style="cursor:default"><div class="top1"><b>' + esc((c.strategy_names || {})[k] || k) + '</b><span class="sel">' + v.trades + ' trades</span></div>' +
+    '<div class="kpi" style="padding:0"><b class="num ' + cls(v.net) + '">' + sol(v.net) + '</b></div>' +
+    '<p>' + Math.round(v.win_rate * 100) + '% win rate · before fees ' + sol(v.pnl) + '</p></div>').join('');
   markNil();
   // cumulative net by day
   const days = Object.keys(c.days || {}).sort();
@@ -1276,8 +1287,9 @@ function renderResults() {
   $('trNote').textContent = rows.length > 30 ? 'last 30 of ' + rows.length : rows.length ? rows.length + ' trades' : ' ';
   $('trades').innerHTML = rows.length ? rows.slice(0, 30).map(t =>
     '<tr><td><b style="font-weight:600">' + esc(t.sym) + '</b></td><td class="muted num">' + dm(t.d) + ', ' + esc(t.ts) + '</td>' +
+    '<td class="muted">' + esc((c.strategy_names || {})[t.strategy] || '—') + '</td>' +
     '<td class="r num ' + cls(t.pct) + '">' + pct(t.pct, 1) + '</td><td class="r num ' + cls(t.net) + '">' + sol(t.net, 4).replace(' SOL', '') + '</td></tr>').join('')
-    : '<tr><td colspan="4" class="empty">' + (S.scope === 'me' ? 'No closed trades of yours this month yet.' : 'No closed trades this month.') + '</td></tr>';
+    : '<tr><td colspan="5" class="empty">' + (S.scope === 'me' ? 'No closed trades of yours this month yet.' : 'No closed trades this month.') + '</td></tr>';
 }
 
 $('chartEmpty').addEventListener('click', e => { const b = e.target.closest('[data-month]'); if (b) { S.month = b.dataset.month; S.monthTouched = true; loadResults(); } });
