@@ -147,6 +147,25 @@ class TestIngest:
         assert m["venue"] == "amm" and m["complete"] is True
         assert (m["buys"], m["sells"], m["vol_buy_ratio"]) == (1, 1, pytest.approx(2 / 3, abs=1e-3))
 
+    def test_amm_reversed_sol_base_pool(self, flow):
+        flow._pools[POOL] = (pf.SOL_MINT, MINT)            # SOL первым: buy base = продажа токена
+        flow.ingest(tx_update([amm_ev(True, base_amt=3 * 10**9, quote=10**12)]))
+        m = flow.metrics(MINT, 60)
+        assert (m["buys"], m["sells"], m["sell_vol_sol"]) == (0, 1, 3.0)
+
+    def test_amm_pool_from_token_balances(self, flow):
+        u = tx_update([amm_ev(True)])
+        meta = u.transaction.transaction.meta
+        for mint in (MINT, pf.SOL_MINT):
+            tb = meta.post_token_balances.add()
+            tb.owner, tb.mint = POOL, mint
+        flow.ingest(u)
+        assert flow.metrics(MINT, 60)["buys"] == 1 and flow.stats["unmapped_pool"] == 0
+
+    def test_non_sol_curve_is_not_a_failure(self, flow):
+        flow.ingest(tx_update([trade_ev(sol=0, vsol=0)]))
+        assert flow.stats["non_sol"] == 1 and flow.stats["verify_fail"] == 0
+
     def test_amm_event_without_known_pool(self, flow):
         flow.ingest(tx_update([amm_ev()], amm_ix=False))
         assert flow.stats["unmapped_pool"] == 1

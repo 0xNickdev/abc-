@@ -196,6 +196,18 @@ def iter_events(tx_info, pools: dict) -> tuple[list, int]:
     for i, ix in enumerate(msg.instructions):
         walk([ix])
         walk(inner.get(i, ()))
+    if any(k == "amm" and d["pool"] not in pools for k, d in out):
+        # пул не встретился в известных buy/sell (новые варианты инструкций PumpSwap):
+        # пары берём из балансов tx — у пула ровно два токен-счёта (base + quote) с owner=pool
+        owned: dict[str, set] = {}
+        for tb in list(meta.pre_token_balances) + list(meta.post_token_balances):
+            if tb.owner and tb.mint:
+                owned.setdefault(tb.owner, set()).add(tb.mint)
+        for k_, d in out:
+            if k_ == "amm" and d["pool"] not in pools:
+                ms = owned.get(d["pool"], set())
+                if len(ms) == 2 and SOL_MINT in ms:
+                    pools[d["pool"]] = (next(iter(ms - {SOL_MINT})), SOL_MINT)
     if not from_ix and not meta.log_messages_none:
         # emit! пишет событие в лог «Program data: <base64>» (без тега emit_cpi)
         for line in meta.log_messages:
@@ -314,7 +326,7 @@ class PumpFlow:
         self._last_gc = 0.0
         self._last_ingest = 0.0
         self.stats = dict(state="off", gaps=0, tx=0, trades=0, amm_trades=0, creates=0, completes=0, rejects=0,
-                          dropped=0, unmapped_pool=0, verify_fail=0, lag_ms=None)
+                          dropped=0, unmapped_pool=0, non_sol=0, verify_fail=0, lag_ms=None)
         self._lags: collections.deque = collections.deque(maxlen=500)
 
     # ── вход из стрима (нить gRPC: только положить и выйти) ─────────────────
@@ -405,8 +417,11 @@ class PumpFlow:
         self.stats["creates"] += 1
 
     def _on_trade(self, d, keyset, slot, now, tracked):
-        if _b58dec(d["mint"]) not in keyset or d["sol"] <= 0:
+        if _b58dec(d["mint"]) not in keyset:
             self.stats["verify_fail"] += 1
+            return
+        if d["sol"] <= 0 or d["vsol"] <= 0:
+            self.stats["non_sol"] += 1              # кривая с не-SOL котировкой (vsol=0) — не наш рынок
             return
         mf = self._get(d["mint"], now)
         if not mf.creator and d.get("creator"):
@@ -425,15 +440,21 @@ class PumpFlow:
             self.stats["unmapped_pool"] += 1
             return
         base, quote = pair
-        if quote != SOL_MINT or d["sol"] <= 0:
+        if quote == SOL_MINT:                       # канонический пул после миграции: token/SOL
+            mint, is_buy, lam, tok, r_sol, r_tok = base, d["is_buy"], d["sol"], d["tokens"], d["pool_quote"], d["pool_base"]
+        elif base == SOL_MINT:                      # «перевёрнутый» пул SOL/token: buy base(SOL) = продажа токена
+            mint, is_buy, lam, tok, r_sol, r_tok = quote, not d["is_buy"], d["tokens"], d["sol"], d["pool_base"], d["pool_quote"]
+        else:
             return                                  # не-SOL пулы (USDC и т.п.) не наш сценарий
-        mf = self._get(base, now)
-        if d["pool_base"] > 0:
-            mf.price_sol = (d["pool_quote"] / 1e9) / (d["pool_base"] / 10 ** TOKEN_DECIMALS)
+        if lam <= 0:
+            return
+        mf = self._get(mint, now)
+        if r_tok > 0:
+            mf.price_sol = (r_sol / 1e9) / (r_tok / 10 ** TOKEN_DECIMALS)
         mf.venue = "amm"
         mf.complete = True
-        mf.add(now, slot, d["is_buy"], d["sol"], d["tokens"], d["user"])
-        self._track(mf, d["user"], d["is_buy"], d["tokens"], tracked)
+        mf.add(now, slot, is_buy, lam, tok, d["user"])
+        self._track(mf, d["user"], is_buy, tok, tracked)
         self.stats["amm_trades"] += 1
 
     @staticmethod
