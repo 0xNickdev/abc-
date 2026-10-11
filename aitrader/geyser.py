@@ -20,6 +20,7 @@ import threading
 import time
 
 import pumpcurve
+import pumpflow
 
 _PROTO_DIR = pathlib.Path(__file__).resolve().parent / "ysproto"
 if str(_PROTO_DIR) not in sys.path:
@@ -60,6 +61,16 @@ def parse_curve_bytes(raw: bytes) -> tuple[float, bool]:
         return 0.0, False
 
 
+def _flow_refused(e: Exception) -> bool:
+    try:
+        import grpc
+        code = e.code() if isinstance(e, grpc.RpcError) else None
+    except Exception:
+        code = None
+    name = getattr(code, "name", "")
+    return name in ("PERMISSION_DENIED", "RESOURCE_EXHAUSTED", "INVALID_ARGUMENT", "UNIMPLEMENTED")
+
+
 class GeyserFeed:
     def __init__(self, on_update=None):
         self._on_update = on_update or (lambda mint: None)
@@ -72,6 +83,7 @@ class GeyserFeed:
         self._thread: threading.Thread | None = None
         self.stats = dict(state="off", updates=0, reconnects=0, subscribed=0, error="", last_update_ago_s=None)
         self._last_update = 0.0
+        self._flow_blocked = ""                      # тариф/нода отказали в tx-подписке → живём без потока
 
     # ── публичное ─────────────────────────────────────────────────────────
     def start(self):
@@ -120,6 +132,8 @@ class GeyserFeed:
         s = dict(self.stats)
         s["subscribed"] = len(self._want)
         s["last_update_ago_s"] = round(time.time() - self._last_update) if self._last_update else None
+        if self._flow_blocked:
+            s["flow_blocked"] = self._flow_blocked
         return s
 
     # ── поток ─────────────────────────────────────────────────────────────
@@ -130,6 +144,12 @@ class GeyserFeed:
         req = pb.SubscribeRequest(commitment=pb.CommitmentLevel.PROCESSED)
         if accs:
             req.accounts["positions"].account.extend(accs)
+        if pumpflow.enabled() and not self._flow_blocked:
+            # свой поток сделок (pumpflow): все успешные tx pump.fun + PumpSwap в ЭТОМ же стриме
+            f = req.transactions["flow"]
+            f.vote = False
+            f.failed = False
+            f.account_include.extend([pumpflow.PUMP_PROGRAM, pumpflow.AMM_PROGRAM])
         return req
 
     def _requests(self, q: queue.Queue):
@@ -150,6 +170,9 @@ class GeyserFeed:
             yield self._request()
 
     def _handle(self, upd):
+        if upd.HasField("transaction"):
+            pumpflow.FLOW.submit(upd)               # только в очередь: разбор в своей нити
+            return
         if not upd.HasField("account"):
             return
         import base58
@@ -180,6 +203,8 @@ class GeyserFeed:
         import grpc
         backoff = 0.0
         while not self._stop.is_set():
+            flow_req = pumpflow.enabled() and not self._flow_blocked
+            got_tx = False
             try:
                 creds = grpc.composite_channel_credentials(
                     grpc.ssl_channel_credentials(),
@@ -193,8 +218,9 @@ class GeyserFeed:
                     self._q = q                         # set_mints пишет в очередь ТЕКУЩЕГО стрима
                     self.stats["state"] = "streaming"
                     for upd in stub.Subscribe(self._requests(q)):
-                        if upd.HasField("account") or upd.HasField("pong"):
+                        if upd.HasField("account") or upd.HasField("transaction") or upd.HasField("pong"):
                             backoff = 0.0               # живые данные/ответ, а не только серверный ping
+                            got_tx = got_tx or upd.HasField("transaction")
                         self._handle(upd)
                         if self._stop.is_set():
                             break
@@ -202,6 +228,11 @@ class GeyserFeed:
                     self.stats["error"] = "stream ended"
             except Exception as e:
                 self.stats["error"] = f"{type(e).__name__}: {str(e)[:160]}"
+                if flow_req and not got_tx and _flow_refused(e):
+                    # отказ именно в подписке на поток (лимит тарифа/права) — цены позиций важнее:
+                    # следующий коннект без фильтра транзакций, через минимальный бэкофф
+                    self._flow_blocked = self.stats["error"]
+                    backoff = 0.0
             if self._stop.is_set():
                 return
             # обрыв ИЛИ «чистое» завершение стрима — всё равно бэкофф (иначе горячий цикл

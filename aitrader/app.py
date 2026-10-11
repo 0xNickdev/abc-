@@ -62,6 +62,7 @@ import calls  # сканер коллов: X (getxapi) + публичные Tele
 import kol  # Twitter/X KOL 信号（per-user opt-in）
 import notify  # Telegram-алерты оператору (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)
 import pumpcurve  # цена pump.fun из bonding curve по RPC (fallback для свежих токенов)
+import pumpflow  # свой поток сделок pump.fun/PumpSwap из Yellowstone (замена скана GMGN)
 import review  # офлайн review-loop: эдж кошельков/KOL + предложения по конфигу (обучение на своих данных)
 import rugcheck  # он-чейн риск холдеров (бандлеры/инсайдеры/danger) — белый лейбл, без бренда
 import sessionwallet  # N3: session-кошелёк с ограниченным балансом (этап 7)
@@ -2375,6 +2376,11 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
     # STEP 1 trending（便宜，行内已含富字段；同链 TTL 内复用缓存）→ top-N 粗筛
     candidates = s.trending_rows(chain)
     candidates = candidates[:CFG["top_n_prefilter"]]
+    if chain == "sol":
+        try:
+            pumpflow.COMPARE.observe(candidates, OUT_DIR / "flow_compare.jsonl")   # шаг 1: сверка потока с GMGN
+        except Exception:
+            pass                                  # сверка — наблюдение, скан не должен от неё падать
 
     decisions, survivors = [], []
     for t in candidates:
@@ -3266,6 +3272,15 @@ def api_status(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHea
                 watch=watcher.stats(),
                 health=health_snapshot(),
                 trending_cmd=MK.get_trending_cmd(MK.chain))
+
+@app.get("/api/flow")
+def api_flow(window_s: int = 300, n: int = 20, x_wallet: str | None = WalletHeader,
+             x_auth: str | None = AuthHeader):
+    """Свой поток (pumpflow): здоровье, сверка с GMGN, топ токенов окна. Только оператор."""
+    _block_if_not_admin(get_session(x_wallet), x_auth)
+    window_s = max(10, min(int(window_s), pumpflow.KEEP_S))
+    return dict(stats=pumpflow.FLOW.snapshot(), compare=pumpflow.COMPARE.summary(),
+                hot=pumpflow.FLOW.hot(window_s, max(1, min(int(n), 100))))
 
 @app.post("/api/config")
 def api_config(cfg: ConfigIn, x_wallet: str | None = WalletHeader,

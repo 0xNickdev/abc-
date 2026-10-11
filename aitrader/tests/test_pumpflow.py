@@ -1,0 +1,272 @@
+"""pumpflow: разбор событий pump.fun/PumpSwap из настоящих protobuf Yellowstone, проверки
+раскладки (mint в счетах tx, bool, время), окна/перевес/снайперы/дев/tracked, разрывы
+покрытия, сверка с GMGN, доступ к /api/flow и подписка в том же стриме geyser."""
+import base64
+import pathlib
+import struct
+import sys
+import time
+
+import base58
+import pytest
+
+import geyser
+import pumpflow as pf
+
+sys.path.insert(0, str(pathlib.Path(geyser.__file__).resolve().parent / "ysproto"))
+import geyser_pb2 as pb  # noqa: E402
+
+MINT = "BzLtiUrd4ex7B8YydzxnbUmr6je1AKWhsKwtJR7ppump"
+DEV = "Dev1111111111111111111111111111111111111111"
+USERS = [base58.b58encode(bytes([i + 1]) * 32).decode() for i in range(10)]
+POOL = base58.b58encode(b"\x77" * 32).decode()
+
+
+def k(a: str) -> bytes:
+    return base58.b58decode(a)
+
+
+def trade_ev(mint=MINT, sol=10**9, tokens=10**12, is_buy=True, user=USERS[0], ts=None,
+             vsol=40 * 10**9, vtok=800_000_000 * 10**6, creator=DEV, is_buy_byte=None) -> bytes:
+    ts = int(ts or time.time())
+    b = (k(mint) + struct.pack("<QQ", sol, tokens) + bytes([is_buy_byte if is_buy_byte is not None else int(is_buy)])
+         + k(user) + struct.pack("<qQQQQ", ts, vsol, vtok, 10 * 10**9, 500 * 10**12)
+         + b"\x00" * 32 + struct.pack("<QQ", 95, 1000) + k(creator) + struct.pack("<QQ", 5, 50))
+    return pf.EV_TRADE + b
+
+
+def create_ev(mint=MINT, creator=DEV, name="Dog", sym="DOG") -> bytes:
+    def s(x):
+        return struct.pack("<I", len(x)) + x.encode()
+    body = (s(name) + s(sym) + s("ipfs://x") + k(mint) + b"\x05" * 32 + k(creator) + k(creator)
+            + struct.pack("<q", int(time.time())) + b"\x00" * 40)
+    return pf.EV_CREATE + body
+
+
+def amm_ev(is_buy=True, base_amt=10**12, quote=2 * 10**9, user=USERS[1]) -> bytes:
+    vals = [int(time.time()), base_amt, 0, 0, 0, 100_000_000 * 10**6, 80 * 10**9, quote] + [0] * 6
+    return (pf.EV_AMM_BUY if is_buy else pf.EV_AMM_SELL) + struct.pack("<q13Q", *vals) + k(POOL) + k(user) + b"\x00" * 64
+
+
+def tx_update(events: list[bytes], slot=100, keys_extra=(), via="cpi", amm_ix=False):
+    """SubscribeUpdate(transaction) как с ноды: события — self-CPI инструкции или логи."""
+    keys = [k(USERS[0]), k(pf.PUMP_PROGRAM), k(pf.AMM_PROGRAM), k(MINT), k(POOL), k(pf.SOL_MINT)] + [k(x) for x in keys_extra]
+    u = pb.SubscribeUpdate()
+    u.created_at.FromNanoseconds(time.time_ns() - 40_000_000)
+    t = u.transaction
+    t.slot = slot
+    msg = t.transaction.transaction.message
+    msg.account_keys.extend(keys)
+    meta = t.transaction.meta
+    outer = msg.instructions.add()
+    if amm_ix:
+        outer.program_id_index = 2
+        outer.data = pf._disc("global", "buy") + b"\x00" * 16
+        outer.accounts = bytes([4, 0, 0, 3, 5])                 # pool, user, cfg, base_mint, quote_mint
+    else:
+        outer.program_id_index = 1
+        outer.data = pf._disc("global", "buy")
+        outer.accounts = bytes([3, 0])
+    if via == "cpi":
+        ii = meta.inner_instructions.add()
+        ii.index = 0
+        for e in events:
+            x = ii.instructions.add()
+            x.program_id_index = 2 if e[:8] in (pf.EV_AMM_BUY, pf.EV_AMM_SELL) else 1
+            x.data = pf.EVENT_IX_TAG + e
+    else:
+        meta.log_messages.extend(["Program log: Instruction: Buy"] + ["Program data: " + base64.b64encode(e).decode() for e in events])
+    return u
+
+
+@pytest.fixture
+def flow(monkeypatch):
+    f = pf.PumpFlow()
+    f._started_at = time.time() - 4000                          # покрытие «весь час»
+    f.stats["state"] = "on"
+    monkeypatch.setattr(f, "_tracked_set", lambda: {USERS[5]: {"name": "whale"}})
+    return f
+
+
+class TestParse:
+    def test_trade_layout(self):
+        d = pf.parse_trade(trade_ev(sol=3 * 10**9, is_buy=False)[8:])
+        assert d["mint"] == MINT and d["sol"] == 3 * 10**9 and d["is_buy"] is False
+        assert d["user"] == USERS[0] and d["creator"] == DEV and d["vsol"] == 40 * 10**9
+
+    def test_layout_guards(self):
+        with pytest.raises(ValueError):
+            pf.parse_trade(trade_ev(is_buy_byte=7)[8:])
+        with pytest.raises(ValueError):
+            pf.parse_trade(trade_ev(ts=1)[8:])                  # время из 1970 = сдвиг раскладки
+        assert pf._decode(pf.EV_TRADE + b"\x00" * 20, False) == "bad"
+
+    def test_create_and_amm(self):
+        c = pf.parse_create(create_ev()[8:])
+        assert (c["symbol"], c["mint"], c["creator"]) == ("DOG", MINT, DEV)
+        a = pf.parse_amm(amm_ev(is_buy=False)[8:], False)
+        assert a["pool"] == POOL and a["user"] == USERS[1] and a["sol"] == 2 * 10**9
+        assert a["pool_quote"] == 78 * 10**9                    # резервы после продажи
+
+
+class TestIngest:
+    def test_cpi_and_logs_paths_and_metrics(self, flow):
+        flow.ingest(tx_update([create_ev()], slot=100))
+        flow.ingest(tx_update([trade_ev(user=USERS[1])], slot=100))          # снайпер в слоте создания
+        flow.ingest(tx_update([trade_ev(user=USERS[2], sol=2 * 10**9)], slot=150, via="logs"))
+        flow.ingest(tx_update([trade_ev(user=USERS[3], is_buy=False)], slot=151))
+        flow.ingest(tx_update([trade_ev(user=DEV, is_buy=False, sol=5 * 10**8)], slot=152))
+        m = flow.metrics(MINT, 300)
+        assert (m["buys"], m["sells"]) == (2, 2) and m["buy_ratio"] == 0.5
+        assert m["buy_vol_sol"] == 3.0 and m["unique_buyers"] == 2
+        assert m["snipers"] == 1 and m["dev_sell_sol"] == 0.5 and m["dev_sells"] == 1
+        assert m["symbol"] == "DOG" and m["mcap_sol"] == pytest.approx(50.0)
+        assert m["full"] is True
+        s = flow.snapshot()
+        assert s["trades"] == 4 and s["creates"] == 1 and s["rejects"] == 0 and s["lag_ms"] >= 0
+
+    def test_cpi_wins_over_logs_no_double_count(self, flow):
+        u = tx_update([trade_ev()])
+        u.transaction.transaction.meta.log_messages.append("Program data: " + base64.b64encode(trade_ev()).decode())
+        flow.ingest(u)
+        assert flow.metrics(MINT, 60)["buys"] == 1
+
+    def test_mint_not_in_tx_is_rejected(self, flow):
+        other = base58.b58encode(b"\x09" * 32).decode()
+        flow.ingest(tx_update([trade_ev(mint=other)]))
+        assert flow.metrics(other) is None and flow.stats["verify_fail"] == 1
+
+    def test_garbage_counts_rejects(self, flow):
+        flow.ingest(tx_update([pf.EV_TRADE + b"\x01" * 30]))
+        assert flow.stats["rejects"] == 1 and flow.stats["trades"] == 0
+
+    def test_amm_maps_pool_to_mint(self, flow):
+        flow.ingest(tx_update([amm_ev(True, quote=2 * 10**9)], amm_ix=True))
+        flow.ingest(tx_update([amm_ev(False, quote=10**9, user=USERS[2])], amm_ix=True))
+        m = flow.metrics(MINT, 60)
+        assert m["venue"] == "amm" and m["complete"] is True
+        assert (m["buys"], m["sells"], m["vol_buy_ratio"]) == (1, 1, pytest.approx(2 / 3, abs=1e-3))
+
+    def test_amm_event_without_known_pool(self, flow):
+        flow.ingest(tx_update([amm_ev()], amm_ix=False))
+        assert flow.stats["unmapped_pool"] == 1
+
+    def test_tracked_wallet_in_and_out(self, flow):
+        flow.ingest(tx_update([trade_ev(user=USERS[5], tokens=100)], keys_extra=[USERS[5]]))
+        assert flow.metrics(MINT)["tracked_names"] == ["whale"]
+        flow.ingest(tx_update([trade_ev(user=USERS[5], tokens=100, is_buy=False)]))
+        assert flow.metrics(MINT)["tracked_in"] == 0
+
+    def test_windows_and_hot(self, flow, monkeypatch):
+        t = [time.time() - 1000]
+        monkeypatch.setattr(pf.time, "time", lambda: t[0])
+        for i in range(6):
+            flow.ingest(tx_update([trade_ev(user=USERS[i])]), recv=t[0])
+        t[0] += 900
+        flow.ingest(tx_update([trade_ev(user=USERS[7], is_buy=False)]), recv=t[0])
+        assert flow.metrics(MINT, 60)["buys"] == 0 and flow.metrics(MINT, 3600)["buys"] == 6
+        assert flow.hot(3600, min_buyers=5)[0]["mint"] == MINT
+        assert flow.hot(60, min_buyers=5) == []
+
+    def test_gap_marks_windows_incomplete(self, flow, monkeypatch):
+        t = [time.time()]
+        monkeypatch.setattr(pf.time, "time", lambda: t[0])
+        flow.ingest(tx_update([trade_ev()]), recv=t[0])
+        t[0] += 120                                             # стрим молчал 2 мин
+        flow.ingest(tx_update([trade_ev()]), recv=t[0])
+        assert flow.stats["gaps"] == 1 and flow.metrics(MINT, 3600)["full"] is False
+
+    def test_gc_drops_idle(self, flow):
+        flow.ingest(tx_update([trade_ev()]))
+        flow._m[MINT].last_ts -= pf.KEEP_S + 5
+        flow._gc(time.time())
+        assert flow.metrics(MINT) is None
+
+    def test_queue_full_drops_not_blocks(self, flow, monkeypatch):
+        monkeypatch.setattr(flow, "_q", pf.queue.Queue(maxsize=1))
+        monkeypatch.setattr(flow, "_thread", object())
+        flow.submit(1)
+        flow.submit(2)
+        assert flow.stats["dropped"] == 1
+
+
+class TestCompare:
+    def test_pairs_summary_and_journal(self, flow, tmp_path):
+        for i in range(4):
+            flow.ingest(tx_update([trade_ev(user=USERS[i])]))
+        flow.ingest(tx_update([trade_ev(user=USERS[6], is_buy=False)]))
+        c = pf.GmgnCompare(flow)
+        path = tmp_path / "fc.jsonl"
+        rows = [dict(address=MINT, symbol="DOG", buys=8, sells=2, volume=1000), dict(address="Unknown")]
+        c.observe(rows, path)
+        c.observe(rows, path)                                   # тот же токен — в журнал не чаще раза в 10 мин
+        s = c.summary()
+        assert s["trending_seen"] == 4 and s["in_flow"] == 2 and s["coverage"] == 0.5
+        assert s["buy_ratio_abs_diff_med"] == pytest.approx(0.0) and s["gate65_agree"] == 1.0
+        assert s["trades_flow_to_gmgn_med"] == 0.5
+        assert len(path.read_text().splitlines()) == 1
+
+
+class TestGeyserWiring:
+    def test_request_includes_flow_filter(self, monkeypatch):
+        monkeypatch.delenv("ABC_FLOW", raising=False)
+        req = geyser.GeyserFeed()._request()
+        f = req.transactions["flow"]
+        assert set(f.account_include) == {pf.PUMP_PROGRAM, pf.AMM_PROGRAM} and f.vote is False and f.failed is False
+
+    def test_flow_off(self, monkeypatch):
+        monkeypatch.setenv("ABC_FLOW", "0")
+        assert "flow" not in geyser.GeyserFeed()._request().transactions
+
+    def test_tx_update_goes_to_flow_queue(self, monkeypatch):
+        got = []
+        monkeypatch.setattr(pf.FLOW, "submit", got.append)
+        u = tx_update([trade_ev()])
+        geyser.GeyserFeed()._handle(u)
+        assert got == [u]
+
+
+@pytest.mark.realauth
+def test_api_flow_admin_only(tmp_path, monkeypatch):
+    import app as appmod
+    from test_app import _mu_client, _wallet_auth
+    c = _mu_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(appmod, "PUBLIC_DEPLOY", True)
+    monkeypatch.setattr(appmod, "ADMIN_MODE", False)
+    assert c.get("/api/flow").status_code == 403
+    pk, hdr = _wallet_auth(c)
+    monkeypatch.setattr(appmod, "ADMIN_WALLETS", frozenset({pk}))
+    r = c.get("/api/flow?window_s=60", headers=hdr)
+    assert r.status_code == 200 and {"stats", "compare", "hot"} <= set(r.json())
+
+
+def test_refused_flow_subscription_falls_back_to_positions_only(monkeypatch):
+    """Тариф не пускает tx-подписку → следующий коннект без потока, цены позиций живут."""
+    import grpc
+
+    class Refused(grpc.RpcError):
+        def code(self):
+            return grpc.StatusCode.PERMISSION_DENIED
+
+    feed = geyser.GeyserFeed()
+    reqs = []
+
+    class Stub:
+        def __init__(self, ch):
+            pass
+
+        def Subscribe(self, it):
+            reqs.append(next(it))
+            if len(reqs) == 1:
+                raise Refused()
+            feed._stop.set()
+            return iter(())
+
+    import geyser_pb2_grpc
+    monkeypatch.setattr(geyser_pb2_grpc, "GeyserStub", Stub)
+    monkeypatch.setattr(grpc, "secure_channel", lambda *a, **k: __import__("contextlib").nullcontext())
+    monkeypatch.setattr(feed._stop, "wait", lambda t: None)
+    monkeypatch.delenv("ABC_FLOW", raising=False)
+    feed._loop()
+    assert "flow" in reqs[0].transactions and "flow" not in reqs[1].transactions
+    assert "flow_blocked" in feed.snapshot()

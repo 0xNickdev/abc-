@@ -381,6 +381,10 @@ def stats() -> dict | None:
         return None
     s = dict(_started.stats)
     s["geyser"] = geyser.FEED.snapshot() if geyser.enabled() else "off"
+    if geyser.enabled() and geyser.pumpflow.enabled():
+        s["flow"] = dict(geyser.pumpflow.FLOW.snapshot(), compare=geyser.pumpflow.COMPARE.summary())
+    else:
+        s["flow"] = "off"
     return s
 
 
