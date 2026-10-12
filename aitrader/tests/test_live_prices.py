@@ -45,3 +45,20 @@ class TestLivePricesApi:
         appmod._LIVE_QUOTES["CA"] = dict(price=0.1, mcap=123456, ts=1.0)
         d = client.get("/api/prices").json()
         assert d["quotes"]["CA"]["mcap"] == 123456
+
+
+def test_positions_view_never_calls_gmgn(monkeypatch):
+    """GET /api/positions (панель Operator) — без сети: security из кэша тика, цена watcher (12.10)."""
+    import types
+    import app as appmod
+    calls = []
+    g = types.SimpleNamespace(token_security=lambda a: calls.append(a) or {}, token_price=lambda a: calls.append(a) or 1.0)
+    s = types.SimpleNamespace(is_live_adapter=True, adapter_for=lambda ch: g,
+                              positions=[dict(address="A1pump", chain="sol", entry={"top10": 0.1}),
+                                         dict(address="B2pump", chain="sol", entry={})])
+    appmod._SEC_CACHE["A1pump"] = (__import__("time").time(), {"top10": 0.3})
+    pre = appmod.prefetch_positions("sol", {}, s, fast=True)
+    assert calls == []
+    assert pre["A1pump"] == ({"top10": 0.3}, None, None) and pre["B2pump"] == ({}, None, None)
+    appmod.prefetch_positions("sol", {}, s)                  # тик бота — ходит в сеть и греет кэш
+    assert "B2pump" in calls and "B2pump" in appmod._SEC_CACHE

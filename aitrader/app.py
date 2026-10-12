@@ -2539,6 +2539,21 @@ def _sec_from_row(row: dict) -> dict:
                 burn_ratio=_f(row.get("burn_ratio")),
                 top10=_f(row.get("top_10_holder_rate")))
 
+_SEC_CACHE: dict[str, tuple[float, dict]] = {}     # addr -> (ts, security): греет тик бота, читают GET-и
+SEC_CACHE_S = 600.0
+
+def _sec_cached(p: dict) -> dict:
+    hit = _SEC_CACHE.get(p["address"])
+    return dict(hit[1]) if hit and time.time() - hit[0] < SEC_CACHE_S else dict(p["entry"])
+
+def _security(g, addr: str) -> dict:
+    sec = g.token_security(addr)
+    _SEC_CACHE[addr] = (time.time(), sec)
+    if len(_SEC_CACHE) > 500:
+        for k in sorted(_SEC_CACHE, key=lambda k: _SEC_CACHE[k][0])[:100]:
+            _SEC_CACHE.pop(k, None)
+    return sec
+
 def _fetch_offlist(g, p: dict, rt_fresh: bool):
     """Сеть для позиции вне хот-листа → (cur_sec, cur_price|None, err|None). Без мутаций p:
     зовётся БЕЗ замка сессии (аудит 28.09: скан держал замок 20-40с, watcher со стопами ждал →
@@ -2546,11 +2561,11 @@ def _fetch_offlist(g, p: dict, rt_fresh: bool):
     addr = p["address"]
     if rt_fresh:
         try:
-            return g.token_security(addr), None, None
+            return _security(g, addr), None, None
         except Exception:
-            return dict(p["entry"]), None, None  # security недоступен — дифф нулевой
+            return _sec_cached(p), None, None    # security недоступен — последний известный / дифф нулевой
     try:
-        return g.token_security(addr), g.token_price(addr), None
+        return _security(g, addr), g.token_price(addr), None
     except Exception as e:
         # GMGN недоступен (429-бан/таймаут) — цена НЕ должна замерзать: замёрзший
         # pnl = спящий hard-stop. Fallback: DexScreener, для свежих pump.fun — bonding curve.
@@ -2565,14 +2580,22 @@ def _fetch_offlist(g, p: dict, rt_fresh: bool):
                 price = 0.0
         return dict(p["entry"]), price, e
 
-def prefetch_positions(chain: str, rows_by_addr: dict | None, s: UserSession) -> dict:
+def prefetch_positions(chain: str, rows_by_addr: dict | None, s: UserSession, fast: bool = False) -> dict:
     """Сходить в сеть за позициями вне листа ДО взятия замка. Снимок списка без замка —
-    безопасен (читаем, не мутируем); исчезнувшие позиции просто не используются."""
+    безопасен (читаем, не мутируем); исчезнувшие позиции просто не используются.
+    fast=True (просмотр в UI): без сети — security из кэша тика бота, цена от watcher.
+    Иначе GET /api/positions шёл в gmgn-cli последовательно по каждой позиции: 12 позиций
+    под лимитом GMGN = минута пустой панели Operator (12.10)."""
     rows_by_addr = rows_by_addr or {}
     if not s.is_live_adapter:
         return {}
-    g = s.adapter_for(chain)
     pre = {}
+    if fast:
+        for p in list(s.positions):
+            if p.get("chain", "sol") == chain and p["address"] not in rows_by_addr:
+                pre[p["address"]] = (_sec_cached(p), None, None)
+        return pre
+    g = s.adapter_for(chain)
     for p in list(s.positions):
         if p.get("chain", "sol") != chain or p["address"] in rows_by_addr:
             continue
@@ -3493,7 +3516,7 @@ def api_positions(chain: str = "sol", x_wallet: str | None = WalletHeader):
         return dict(positions=[], portfolio=None)
     ch = valid_chain(chain)
     sess = get_session(x_wallet)
-    pre = prefetch_positions(ch, {}, sess)          # сеть без замка (его ждёт watcher со стопами)
+    pre = prefetch_positions(ch, {}, sess, fast=True)   # без сети: кэш security + цена watcher
     with sess.lock:
         return dict(positions=monitor_positions(ch, s=sess, pre=pre), portfolio=_portfolio(sess))
 
