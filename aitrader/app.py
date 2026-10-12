@@ -61,6 +61,7 @@ import farm  # детектор ферм по кластеризации ист�
 import gmgnguard  # общий ban-гейт + лимитер для всех вызовов gmgn-cli
 import calls  # сканер коллов: X (getxapi) + публичные Telegram-каналы + автопоиск коллеров
 import kol  # Twitter/X KOL 信号（per-user opt-in）
+import learn  # самообучение: все кандидаты скана + исходы по своему потоку (датасет для модели)
 import notify  # Telegram-алерты оператору (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)
 import pumpcurve  # цена pump.fun из bonding curve по RPC (fallback для свежих токенов)
 import pumpflow  # свой поток сделок pump.fun/PumpSwap из Yellowstone (замена скана GMGN)
@@ -2285,29 +2286,14 @@ def _attrib_for(address: str) -> dict:
 def _enrich_flow(attrib: dict, address: str) -> None:
     """Ончейн-срез из своего потока (pumpflow) на момент входа → attrib["flow"]. Разбор 12.10:
     половина позиций умирает за ~2 мин с −54% (стоп не спасает — гэп/раг), и по полям GMGN
-    это не видно. Здесь то, чего у GMGN нет: продажи дева, снайперы блока создания, чистый
-    приток и перевес за 30с/1м/5м, уникальные покупатели — топливо для поиска фильтра."""
+    это не видно. Здесь то, чего у GMGN нет: дев (продажи/откупы/доля саплая), снайперы блока
+    создания, чистый приток и перевес за 30с/1м/5м, уникальные покупатели."""
     try:
-        w = {k: pumpflow.FLOW.metrics(address, sec) for k, sec in (("30s", 30), ("1m", 60), ("5m", 300))}
+        snap = pumpflow.FLOW.entry_snapshot(address)
     except Exception:
         return
-    m5 = w.get("5m")
-    if not m5:
-        return
-    snap = dict(venue=m5["venue"], age_s=m5["age_s"], curve_sol=m5["curve_sol"], full=m5["full"],
-                snipers=m5["snipers"], sniper_sol=m5["sniper_sol"], dev_buy_sol=m5["dev_buy_sol"],
-                dev_sell_sol=m5["dev_sell_sol"], dev_sells=m5["dev_sells"], dev_rebuy_sol=m5["dev_rebuy_sol"],
-                dev_rebuys=m5["dev_rebuys"], dev_rebuy_delay_s=m5["dev_rebuy_delay_s"],
-                dev_hold_share=m5["dev_hold_share"], dev_last_sell_ago_s=m5["dev_last_sell_ago_s"],
-                dev_supply_pct=m5["dev_supply_pct"], dev_supply_peak_pct=m5["dev_supply_peak_pct"],
-                tracked_in=m5["tracked_in"],
-                last_trade_ago_s=m5["last_trade_ago_s"])
-    for k, m in w.items():
-        if m:
-            snap[k] = dict(b=m["buys"], s=m["sells"], br=m["buy_ratio"], vbr=m["vol_buy_ratio"],
-                           net=m["net_flow_sol"], vol=round(m["buy_vol_sol"] + m["sell_vol_sol"], 3),
-                           uniq=m["unique_buyers"])
-    attrib["flow"] = snap
+    if snap:
+        attrib["flow"] = snap
 
 def _enrich_x_signal(attrib: dict, address: str, s: UserSession, price: float = 0.0) -> None:
     """Соц-сигнал X на момент BUY: кол-во упоминаний CA + подписчики топ-автора → в entry_attrib.
@@ -2494,6 +2480,12 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
     with s.lock:                                             # замок только на мутацию позиций
         positions_out = monitor_positions(chain, rows_by_addr, s, pre=pre)
         portfolio = _portfolio(s)
+
+    if chain == "sol" and s is ST:        # самообучение: каждый кандидат (и отклонённый) + исход по потоку
+        try:
+            learn.REC.observe_decisions(decisions)
+        except Exception:
+            pass
 
     if db.enabled():          # снапшот всех решений прохода в SQLite (opt-in ABC_SNAPSHOT_DB=1)
         try:
@@ -3324,6 +3316,7 @@ def api_status(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHea
                           auto=CFG["auto_max_per_trade_sol"]),
                 watch=watcher.stats(),
                 argus=ARGUS.snapshot(),
+                learn=learn.REC.snapshot(),
                 health=health_snapshot(),
                 trending_cmd=MK.get_trending_cmd(MK.chain))
 

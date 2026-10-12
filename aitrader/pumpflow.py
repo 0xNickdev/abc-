@@ -534,6 +534,28 @@ class PumpFlow:
             full=observed_from <= lo or (mf.created_ts > 0 and mf.created_ts >= self._started_at),
         )
 
+    def price(self, mint: str) -> tuple[float, float] | None:
+        """(цена в SOL, время последней сделки) — дёшево, для разметки исходов."""
+        mf = self._m.get(mint)
+        return (mf.price_sol, mf.last_ts) if mf and mf.price_sol > 0 else None
+
+    def entry_snapshot(self, mint: str) -> dict | None:
+        """Компактный ончейн-срез токена (30с/1м/5м + дев/снайперы) — признаки для входа и обучения."""
+        w = {k: self.metrics(mint, sec) for k, sec in (("30s", 30), ("1m", 60), ("5m", 300))}
+        m5 = w.get("5m")
+        if not m5:
+            return None
+        snap = {k: m5[k] for k in ("venue", "age_s", "curve_sol", "full", "snipers", "sniper_sol", "dev_buy_sol",
+                                   "dev_sell_sol", "dev_sells", "dev_rebuy_sol", "dev_rebuys", "dev_rebuy_delay_s",
+                                   "dev_hold_share", "dev_last_sell_ago_s", "dev_supply_pct", "dev_supply_peak_pct",
+                                   "tracked_in", "last_trade_ago_s", "price_sol", "mcap_sol")}
+        for k, m in w.items():
+            if m:
+                snap[k] = dict(b=m["buys"], s=m["sells"], br=m["buy_ratio"], vbr=m["vol_buy_ratio"],
+                               net=m["net_flow_sol"], vol=round(m["buy_vol_sol"] + m["sell_vol_sol"], 3),
+                               uniq=m["unique_buyers"])
+        return snap
+
     def metrics(self, mint: str, window_s: float = 300) -> dict | None:
         now = time.time()
         with self._lock:
