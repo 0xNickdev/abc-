@@ -1147,7 +1147,7 @@ async function loadOperator() {
     $('hPos').innerHTML = ps.length ? ps.map((p, i) =>
       '<tr><td><div class="tcell"><b style="font-weight:600">' + tokName(p.symbol, p.address) + '</b>' + caBtn(p.address) + '</div></td><td class="num">' + (+p.size_sol || 0).toFixed(3) + '</td>' +
       '<td class="muted">' + esc(p.px_src || (p.signals && p.signals[0] ? 'scan' : '—')) + '</td><td class="r num ' + cls(p.pnl) + '">' + pct(p.pnl) + '</td>' +
-      '<td class="r"><button class="ghostbtn sm" data-hsell="' + esc(p.address) + '">Sell</button></td></tr>').join('')
+      '<td class="r"><button class="ghostbtn sm" data-hsell="' + esc(p.address) + '">Sell</button> <button class="ghostbtn sm" data-hunmon="' + esc(p.address) + '" title="Stop tracking without selling and without a result">Remove</button></td></tr>').join('')
       : '<tr><td colspan="5" class="empty">No open positions.</td></tr>';
   }
   markNil();
@@ -1218,6 +1218,12 @@ $('hStopSave').onclick = async e => {
   busy(b, false);
 };
 $('v-operator').addEventListener('click', async e => {
+  const u = e.target.closest('[data-hunmon]');
+  if (u) {
+    busy(u, true);
+    try { await api('/api/unmonitor', Object.assign({ method: 'POST', json: { address: u.dataset.hunmon } }, H)); toast('Removed from tracking'); } catch (err) { toast(err.message, 'err'); }
+    loadOperator(); return;
+  }
   const b = e.target.closest('[data-hsell]'); if (!b) return;
   busy(b, true);
   try { await api('/api/sell', Object.assign({ method: 'POST', json: { address: b.dataset.hsell } }, H)); toast('Closed'); } catch (err) { toast(err.message, 'err'); }
