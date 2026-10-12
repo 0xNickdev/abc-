@@ -305,3 +305,27 @@ def test_entry_attrib_gets_flow_snapshot(flow, monkeypatch):
     other = {}
     appmod._enrich_flow(other, "NoSuchMint1111")
     assert other == {}
+
+
+class TestDevSequence:
+    def test_shakeout_sell_then_rebuy(self, flow, monkeypatch):
+        t = [time.time()]
+        monkeypatch.setattr(pf.time, "time", lambda: t[0])
+        flow.ingest(tx_update([create_ev()], slot=100), recv=t[0])
+        flow.ingest(tx_update([trade_ev(user=DEV, sol=10**9, tokens=1000)], slot=100), recv=t[0])
+        t[0] += 5
+        flow.ingest(tx_update([trade_ev(user=DEV, is_buy=False, sol=2 * 10**9, tokens=1000)], slot=110), recv=t[0])
+        m = flow.metrics(MINT)
+        assert m["dev_hold_share"] == 0 and m["dev_rebuys"] == 0 and m["dev_last_sell_ago_s"] == 0
+        t[0] += 25
+        flow.ingest(tx_update([trade_ev(user=DEV, sol=5 * 10**8, tokens=600)], slot=170), recv=t[0])
+        m = flow.metrics(MINT)
+        assert m["dev_rebuys"] == 1 and m["dev_rebuy_sol"] == 0.5 and m["dev_rebuy_delay_s"] == 25
+        assert m["dev_hold_share"] == pytest.approx(600 / 1600, abs=1e-3) and m["dev_last_sell_ago_s"] == 25
+
+    def test_dev_buys_before_any_sell_are_not_rebuys(self, flow):
+        flow.ingest(tx_update([create_ev()], slot=100))
+        flow.ingest(tx_update([trade_ev(user=DEV, tokens=10)], slot=100))
+        flow.ingest(tx_update([trade_ev(user=DEV, tokens=10)], slot=101))
+        m = flow.metrics(MINT)
+        assert m["dev_rebuys"] == 0 and m["dev_hold_share"] == 1.0 and m["dev_last_sell_ago_s"] is None

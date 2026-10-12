@@ -2296,7 +2296,10 @@ def _enrich_flow(attrib: dict, address: str) -> None:
         return
     snap = dict(venue=m5["venue"], age_s=m5["age_s"], curve_sol=m5["curve_sol"], full=m5["full"],
                 snipers=m5["snipers"], sniper_sol=m5["sniper_sol"], dev_buy_sol=m5["dev_buy_sol"],
-                dev_sell_sol=m5["dev_sell_sol"], dev_sells=m5["dev_sells"], tracked_in=m5["tracked_in"],
+                dev_sell_sol=m5["dev_sell_sol"], dev_sells=m5["dev_sells"], dev_rebuy_sol=m5["dev_rebuy_sol"],
+                dev_rebuys=m5["dev_rebuys"], dev_rebuy_delay_s=m5["dev_rebuy_delay_s"],
+                dev_hold_share=m5["dev_hold_share"], dev_last_sell_ago_s=m5["dev_last_sell_ago_s"],
+                tracked_in=m5["tracked_in"],
                 last_trade_ago_s=m5["last_trade_ago_s"])
     for k, m in w.items():
         if m:

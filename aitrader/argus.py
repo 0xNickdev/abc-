@@ -108,7 +108,12 @@ def flow_line(m: dict | None) -> str:
     if m.get("snipers"):
         parts.append(f"{m['snipers']} snipers")
     if m.get("dev_sell_sol"):
-        parts.append(f"dev sold {m['dev_sell_sol']:.1f} SOL")
+        dev = f"dev sold {m['dev_sell_sol']:.1f} SOL"
+        if m.get("dev_rebuy_sol"):
+            dev += f", rebought {m['dev_rebuy_sol']:.1f}"
+        elif m.get("dev_hold_share") == 0:
+            dev += ", fully out"
+        parts.append(dev)
     if m.get("tracked_in"):
         parts.append(f"{m['tracked_in']} smart wallets in")
     return " · ".join(parts)
@@ -525,7 +530,15 @@ class Argus:
             if fl:
                 out.append(f"{label}: {esc(fl)}")
         if m and m.get("dev_sells"):
-            out.append(f"<b>Dev sold {m['dev_sell_sol']:.2f} SOL</b> ({m['dev_sells']} sells)")
+            line = f"<b>Dev sold {m['dev_sell_sol']:.2f} SOL</b> ({m['dev_sells']} sells"
+            if m.get("dev_last_sell_ago_s") is not None:
+                line += f", last {dur(m['dev_last_sell_ago_s'])} ago"
+            line += ")"
+            if m.get("dev_rebuys"):
+                line += f" · rebought {m['dev_rebuy_sol']:.2f} SOL after {dur(m['dev_rebuy_delay_s'] or 0)}"
+            if m.get("dev_hold_share") is not None:
+                line += f" · dev still holds {m['dev_hold_share']:.0%} of bought tokens"
+            out.append(line)
         if not (m or h) and not cs:
             out.append("No trades seen in our stream for the last hour and no tracked calls.")
         if cs:

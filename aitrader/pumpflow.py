@@ -258,7 +258,8 @@ _AMM_B = _b58dec(AMM_PROGRAM)
 class MintFlow:
     __slots__ = ("mint", "name", "symbol", "creator", "created_ts", "create_slot", "first_seen",
                  "last_ts", "buckets", "recent", "users", "tracked", "dev_buy_sol", "dev_sell_sol",
-                 "dev_sells", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue")
+                 "dev_sells", "dev_tok_in", "dev_tok_out", "dev_first_sell", "dev_last_sell", "dev_rebuy_sol",
+                 "dev_rebuys", "dev_rebuy_delay", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue")
 
     def __init__(self, mint: str, now: float):
         self.mint = mint
@@ -273,6 +274,12 @@ class MintFlow:
         self.tracked: dict[str, int] = {}                       # tracked-адрес → чистые токены (≈в позиции)
         self.dev_buy_sol = self.dev_sell_sol = 0
         self.dev_sells = 0
+        # последовательность действий дева: шейкаут (продал → откупил) vs раг (продал всё и тишина)
+        self.dev_tok_in = self.dev_tok_out = 0
+        self.dev_first_sell = self.dev_last_sell = 0.0
+        self.dev_rebuy_sol = 0
+        self.dev_rebuys = 0
+        self.dev_rebuy_delay: float | None = None   # с первой продажи до первого откупа, с
         self.snipers: set = set()
         self.sniper_sol = 0
         self.price_sol = 0.0
@@ -298,9 +305,18 @@ class MintFlow:
         if self.creator and user == self.creator:
             if is_buy:
                 self.dev_buy_sol += lamports
+                self.dev_tok_in += tokens
+                if self.dev_first_sell:
+                    self.dev_rebuy_sol += lamports
+                    self.dev_rebuys += 1
+                    if self.dev_rebuy_delay is None:
+                        self.dev_rebuy_delay = now - self.dev_first_sell
             else:
                 self.dev_sell_sol += lamports
                 self.dev_sells += 1
+                self.dev_tok_out += tokens
+                self.dev_first_sell = self.dev_first_sell or now
+                self.dev_last_sell = now
         elif is_buy and self.create_slot and slot - self.create_slot <= SNIPER_SLOTS:
             self.snipers.add(user)
             self.sniper_sol += lamports
@@ -501,6 +517,11 @@ class PumpFlow:
             creator=mf.creator,
             dev_buy_sol=round(mf.dev_buy_sol / 1e9, 4), dev_sell_sol=round(mf.dev_sell_sol / 1e9, 4),
             dev_sells=mf.dev_sells,
+            dev_rebuy_sol=round(mf.dev_rebuy_sol / 1e9, 4), dev_rebuys=mf.dev_rebuys,
+            dev_rebuy_delay_s=round(mf.dev_rebuy_delay) if mf.dev_rebuy_delay is not None else None,
+            # доля купленного девом, что ещё у него (по токенам; None = дев не покупал в нашем окне)
+            dev_hold_share=round(max(0, mf.dev_tok_in - mf.dev_tok_out) / mf.dev_tok_in, 3) if mf.dev_tok_in else None,
+            dev_last_sell_ago_s=round(now - mf.dev_last_sell) if mf.dev_last_sell else None,
             snipers=len(mf.snipers), sniper_sol=round(mf.sniper_sol / 1e9, 4),
             tracked_in=len(tracked_in),
             tracked_names=[(tr.get(a) or {}).get("name", a[:6]) for a in tracked_in][:10],
