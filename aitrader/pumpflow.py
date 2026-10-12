@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import collections
 import hashlib
+import heapq
 import os
 import queue
 import struct
@@ -259,7 +260,7 @@ class MintFlow:
     __slots__ = ("mint", "name", "symbol", "creator", "created_ts", "create_slot", "first_seen",
                  "last_ts", "buckets", "recent", "users", "tracked", "dev_buy_sol", "dev_sell_sol",
                  "dev_sells", "dev_tok_in", "dev_tok_out", "dev_first_sell", "dev_last_sell", "dev_rebuy_sol",
-                 "dev_rebuys", "dev_rebuy_delay", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue")
+                 "dev_rebuys", "dev_rebuy_delay", "bal", "reserve_tok", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue")
 
     def __init__(self, mint: str, now: float):
         self.mint = mint
@@ -280,6 +281,8 @@ class MintFlow:
         self.dev_rebuy_sol = 0
         self.dev_rebuys = 0
         self.dev_rebuy_delay: float | None = None   # с первой продажи до первого откупа, с
+        self.bal: dict[str, int] = {}               # кошелёк → чистые токены по нашим наблюдениям
+        self.reserve_tok = 0                        # токены в резерве кривой/пула (для ёмкости дампа)
         self.snipers: set = set()
         self.sniper_sol = 0
         self.price_sol = 0.0
@@ -302,6 +305,8 @@ class MintFlow:
             b[2] += 1
             b[4] += lamports
         self.recent.append((now, slot, is_buy, lamports, user))
+        if user in self.bal or len(self.bal) < USERS_CAP:
+            self.bal[user] = self.bal.get(user, 0) + (tokens if is_buy else -tokens)
         if self.creator and user == self.creator:
             if is_buy:
                 self.dev_buy_sol += lamports
@@ -445,6 +450,7 @@ class PumpFlow:
         if d["vtok"] > 0:
             mf.price_sol = (d["vsol"] / 1e9) / (d["vtok"] / 10 ** TOKEN_DECIMALS)
         mf.real_sol = d["real_sol"]
+        mf.reserve_tok = d["vtok"]
         mf.venue = "curve"
         mf.add(now, slot, d["is_buy"], d["sol"], d["tokens"], d["user"])
         self._track(mf, d["user"], d["is_buy"], d["tokens"], tracked)
@@ -467,6 +473,7 @@ class PumpFlow:
         mf = self._get(mint, now)
         if r_tok > 0:
             mf.price_sol = (r_sol / 1e9) / (r_tok / 10 ** TOKEN_DECIMALS)
+            mf.reserve_tok = r_tok
         mf.venue = "amm"
         mf.complete = True
         mf.add(now, slot, is_buy, lam, tok, d["user"])
@@ -490,7 +497,33 @@ class PumpFlow:
             self._pools.clear()                     # перезаполнится из инструкций buy/sell
 
     # ── чтение ──────────────────────────────────────────────────────────────
-    def _metrics(self, mf: MintFlow, window_s: float, now: float) -> dict:
+    @staticmethod
+    def dump_impact(reserve_tok: int, sell_tok: int) -> float:
+        """Падение цены (доля) от продажи sell_tok в кривую/пул x·y=k: цена ∝ 1/резерв², значит
+        после продажи цена = (R/(R+dt))² от прежней. Точно для кривой pump.fun и пула PumpSwap."""
+        if reserve_tok <= 0 or sell_tok <= 0:
+            return 0.0
+        return 1 - (reserve_tok / (reserve_tok + sell_tok)) ** 2
+
+    def _dump(self, mf: MintFlow) -> dict:
+        """«Ёмкость дампа»: насколько обвалится цена, если продадут дев / снайперы / топ-10
+        держателей разом. Честно только при полной истории (видели создание); иначе None."""
+        keys = ("dump_dev_pct", "dump_snipers_pct", "dump_top10_pct", "top10_supply_pct", "top1_supply_pct")
+        if not mf.create_slot or mf.reserve_tok <= 0:
+            return dict.fromkeys(keys)
+        supply = PUMP_SUPPLY * 10 ** TOKEN_DECIMALS
+        dev = max(0, mf.dev_tok_in - mf.dev_tok_out)
+        snip = sum(max(0, mf.bal.get(u, 0)) for u in mf.snipers)
+        top = heapq.nlargest(10, (v for v in mf.bal.values() if v > 0))
+        top10 = sum(top)
+        R = mf.reserve_tok
+        return dict(dump_dev_pct=round(100 * self.dump_impact(R, dev), 1),
+                    dump_snipers_pct=round(100 * self.dump_impact(R, snip), 1),
+                    dump_top10_pct=round(100 * self.dump_impact(R, top10), 1),
+                    top10_supply_pct=round(100 * top10 / supply, 2),
+                    top1_supply_pct=round(100 * (top[0] if top else 0) / supply, 2))
+
+    def _metrics(self, mf: MintFlow, window_s: float, now: float, deep: bool = True) -> dict:
         lo = now - window_s
         buys = sells = buy_l = sell_l = 0
         for t0, b, s, bl, sl in mf.buckets:
@@ -532,6 +565,7 @@ class PumpFlow:
             last_trade_ago_s=round(now - mf.last_ts, 1),
             # окно целиком видели (стрим шёл всё окно или токен моложе окна) — иначе цифры занижены
             full=observed_from <= lo or (mf.created_ts > 0 and mf.created_ts >= self._started_at),
+            **(self._dump(mf) if deep else {}),
         )
 
     def price(self, mint: str) -> tuple[float, float] | None:
@@ -548,7 +582,8 @@ class PumpFlow:
         snap = {k: m5[k] for k in ("venue", "age_s", "curve_sol", "full", "snipers", "sniper_sol", "dev_buy_sol",
                                    "dev_sell_sol", "dev_sells", "dev_rebuy_sol", "dev_rebuys", "dev_rebuy_delay_s",
                                    "dev_hold_share", "dev_last_sell_ago_s", "dev_supply_pct", "dev_supply_peak_pct",
-                                   "tracked_in", "last_trade_ago_s", "price_sol", "mcap_sol")}
+                                   "tracked_in", "last_trade_ago_s", "price_sol", "mcap_sol", "dump_dev_pct",
+                                   "dump_snipers_pct", "dump_top10_pct", "top10_supply_pct", "top1_supply_pct")}
         for k, m in w.items():
             if m:
                 snap[k] = dict(b=m["buys"], s=m["sells"], br=m["buy_ratio"], vbr=m["vol_buy_ratio"],
@@ -566,7 +601,7 @@ class PumpFlow:
         """Самые денежные токены окна (по объёму покупок) — кандидаты для скана."""
         now = time.time()
         with self._lock:
-            rows = [self._metrics(mf, window_s, now) for mf in self._m.values() if now - mf.last_ts <= window_s]
+            rows = [self._metrics(mf, window_s, now, deep=False) for mf in self._m.values() if now - mf.last_ts <= window_s]
         rows = [r for r in rows if r["unique_buyers"] >= min_buyers]
         rows.sort(key=lambda r: -r["buy_vol_sol"])
         return rows[:n]

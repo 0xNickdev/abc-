@@ -39,6 +39,10 @@ CFG = {
     # после 7% издержек в тесте; <0.60: −14%. sm_confluence > 8 — одна из худших корзин.
     # priority/liquidity/chg_5m/возраст перевеса не дали. 0 = выключить фильтр.
     "min_buy_ratio": float(os.getenv("ABC_BOT_MIN_BUY_RATIO", "0.65") or 0),
+    # Ёмкость дампа (12.10, «давай попробуем»; откат — тег rollback-2026-10-12-pre-dump): не входить,
+    # если топ-10 держателей, продав разом, обвалят цену сильнее порога (%). Стоп −20% исполнялся
+    # на −40…−100%: дамп — одна tx, цена перепрыгивает стоп. 0 = выкл; токены без полной истории проходят.
+    "max_dump_pct": float(os.getenv("ABC_BOT_MAX_DUMP_PCT", "50") or 0),
     "max_sm_confluence": int(os.getenv("ABC_BOT_MAX_SM", "8") or 0),
 }
 
@@ -53,7 +57,7 @@ class ExitDecision:
 
 def select_entries(decisions, held_addrs, n_open, max_concurrent, max_new,
                    *, require_trigger: bool = True, min_priority: float = 0.0,
-                   min_buy_ratio: float = 0.0, max_sm_confluence: int = 0):
+                   min_buy_ratio: float = 0.0, max_sm_confluence: int = 0, max_dump_pct: float = 0.0):
     """从一轮 screen 结果挑【可自主建仓】的候选。
 
     条件：通过全部闸门（decision.action=="ACTION"）+ ABC 触发 + 未持有 + 不超并发。
@@ -80,6 +84,9 @@ def select_entries(decisions, held_addrs, n_open, max_concurrent, max_new,
             continue                                  # перевес только при доминировании покупок
         if max_sm_confluence and int(feats.get("sm_confluence", 0) or 0) > max_sm_confluence:
             continue                                  # «все умники уже внутри» — поздний вход
+        dump = feats.get("dump_top10_pct")
+        if max_dump_pct and dump is not None and float(dump) > max_dump_pct:
+            continue                                  # топ-10 держателей могут обвалить цену сильнее порога
         size = dec.get("size_sol", 0.0)
         if not size or size <= 0:
             continue
@@ -203,6 +210,7 @@ class BotRunner:
                     require_trigger=self.cfg["require_abc_trigger"],
                     min_priority=self.cfg.get("min_priority", 0),
                     min_buy_ratio=self.cfg.get("min_buy_ratio", 0),
+                    max_dump_pct=self.cfg.get("max_dump_pct", 0),
                     max_sm_confluence=self.cfg.get("max_sm_confluence", 0))
         if entries:                                # сеть (pre-entry проверки, цена) — без замка
             for addr, size, _sym in entries:

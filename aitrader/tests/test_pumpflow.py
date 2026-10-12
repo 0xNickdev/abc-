@@ -340,3 +340,36 @@ class TestDevSequence:
         flow.ingest(tx_update([trade_ev(user=DEV, tokens=10)], slot=101))
         m = flow.metrics(MINT)
         assert m["dev_rebuys"] == 0 and m["dev_hold_share"] == 1.0 and m["dev_last_sell_ago_s"] is None
+
+
+class TestDumpCapacity:
+    def test_curve_math(self):
+        assert pf.PumpFlow.dump_impact(1000, 0) == 0.0
+        assert pf.PumpFlow.dump_impact(1000, 1000) == pytest.approx(0.75)      # резерв ×2 → цена /4
+
+    def test_dump_from_holders(self, flow):
+        tok = 10**6 * 10**6                                                   # 1M токенов
+        flow.ingest(tx_update([create_ev()], slot=100))
+        flow.ingest(tx_update([trade_ev(user=DEV, tokens=30 * tok, vtok=800 * tok)], slot=100))
+        flow.ingest(tx_update([trade_ev(user=USERS[1], tokens=20 * tok, vtok=780 * tok)], slot=101))  # снайпер
+        flow.ingest(tx_update([trade_ev(user=USERS[2], tokens=10 * tok, vtok=770 * tok)], slot=150))
+        m = flow.metrics(MINT)
+        R = 770 * tok
+        assert m["dump_dev_pct"] == pytest.approx(100 * pf.PumpFlow.dump_impact(R, 30 * tok), abs=0.1)
+        assert m["dump_snipers_pct"] == pytest.approx(100 * pf.PumpFlow.dump_impact(R, 20 * tok), abs=0.1)
+        assert m["dump_top10_pct"] == pytest.approx(100 * pf.PumpFlow.dump_impact(R, 60 * tok), abs=0.1)
+        assert m["top10_supply_pct"] == 6.0 and m["top1_supply_pct"] == 3.0
+
+    def test_unknown_without_full_history(self, flow):
+        flow.ingest(tx_update([trade_ev()]))
+        assert flow.metrics(MINT)["dump_top10_pct"] is None
+
+
+def test_bot_skips_high_dump_capacity():
+    import bot
+
+    def d(addr, dump):
+        return dict(decision=dict(action="ACTION", address=addr, size_sol=0.2, abc=dict(triggered=True, score=1),
+                                  features=dict(buy_ratio=0.7, dump_top10_pct=dump)))
+    out = bot.select_entries([d("A", 80.0), d("B", 30.0), d("C", None)], set(), 0, 10, 5, max_dump_pct=50)
+    assert [a for a, _, _ in out] == ["B", "C"]

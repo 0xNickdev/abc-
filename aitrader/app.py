@@ -2455,6 +2455,12 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
         if _fresh:
             _ft["fresh_wallets"], _ft["fresh_ratio"] = _fresh.get("fresh"), _fresh.get("ratio")
             _ft["fresh_checked"] = _fresh.get("checked")
+        try:                                      # ёмкость дампа из своего потока (None = нет полной истории)
+            _fm = pumpflow.FLOW.metrics(f.address, 60) or {}
+            _ft.update({k: _fm.get(k) for k in ("dump_dev_pct", "dump_snipers_pct", "dump_top10_pct",
+                                                 "top10_supply_pct", "top1_supply_pct")})
+        except Exception:
+            pass
         abc = strategy.evaluate_for(s.strategy_id, f).as_dict()   # 按该用户选定策略评入场信号
         abc["strategy"] = strategy.get(s.strategy_id)["name"]
         decisions.append(dict(
@@ -3763,6 +3769,7 @@ class BotConfigIn(BaseModel):
     min_priority: int | None = None
     min_buy_ratio: float | None = None       # фильтр перевеса (анализ 10.10), 0 = выкл
     max_sm_confluence: int | None = None
+    max_dump_pct: float | None = None        # ёмкость дампа топ-10 держателей, %; 0 = выкл
 
 # ── Этап 6: N1 — бот не исполняет, а кладёт предложение в очередь; человек кликает.
 def _propose(sess: UserSession, side: str, chain: str, address: str,
@@ -4124,6 +4131,8 @@ def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader, x_auth: 
         raise HTTPException(400, "mode: n1 | n2 | n3")
     if "poll_s" in patch:                          # 0/минус = busy-loop по GMGN (бан IP)
         patch["poll_s"] = max(5.0, float(patch["poll_s"]))
+    if "max_dump_pct" in patch:
+        patch["max_dump_pct"] = max(0.0, min(100.0, float(patch["max_dump_pct"])))
     if "max_new_per_tick" in patch:
         patch["max_new_per_tick"] = max(0, min(5, int(patch["max_new_per_tick"])))
     with sess.lock:

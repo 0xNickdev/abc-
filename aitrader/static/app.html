@@ -1235,7 +1235,8 @@ const BOT_FIELDS = [
   ['max_new_per_tick', 'New entries per check', 'int'], ['poll_s', 'Check every', 'num', 's'],
   ['escape_severity_exit', 'Exit at escape severity ≥', 'int'], ['trail_activate_pct', 'Trailing starts after', 'pct', '%'],
   ['min_priority', 'Min priority (0 = off)', 'int'], ['min_buy_ratio', 'Min buy ratio (0 = off)', 'pct', '%'],
-  ['max_sm_confluence', 'Max smart-money count (0 = off)', 'int']];
+  ['max_sm_confluence', 'Max smart-money count (0 = off)', 'int'],
+  ['max_dump_pct', 'Max dump if top-10 sell (0 = off)', 'num', '%']];
 async function loadOpCfg() {
   try {
     const [b, st] = await Promise.all([api('/api/bot', H), api('/api/strategies', H)]);
