@@ -2299,6 +2299,7 @@ def _enrich_flow(attrib: dict, address: str) -> None:
                 dev_sell_sol=m5["dev_sell_sol"], dev_sells=m5["dev_sells"], dev_rebuy_sol=m5["dev_rebuy_sol"],
                 dev_rebuys=m5["dev_rebuys"], dev_rebuy_delay_s=m5["dev_rebuy_delay_s"],
                 dev_hold_share=m5["dev_hold_share"], dev_last_sell_ago_s=m5["dev_last_sell_ago_s"],
+                dev_supply_pct=m5["dev_supply_pct"], dev_supply_peak_pct=m5["dev_supply_peak_pct"],
                 tracked_in=m5["tracked_in"],
                 last_trade_ago_s=m5["last_trade_ago_s"])
     for k, m in w.items():

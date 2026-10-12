@@ -539,6 +539,8 @@ class Argus:
             if m.get("dev_hold_share") is not None:
                 line += f" · dev still holds {m['dev_hold_share']:.0%} of bought tokens"
             out.append(line)
+        if m and m.get("dev_supply_pct") is not None:
+            out.append(f"Dev holds {m['dev_supply_pct']:.1f}% of supply (max {m['dev_supply_peak_pct']:.1f}%)")
         if not (m or h) and not cs:
             out.append("No trades seen in our stream for the last hour and no tracked calls.")
         if cs:

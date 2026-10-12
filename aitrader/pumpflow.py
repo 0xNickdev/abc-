@@ -522,6 +522,10 @@ class PumpFlow:
             # доля купленного девом, что ещё у него (по токенам; None = дев не покупал в нашем окне)
             dev_hold_share=round(max(0, mf.dev_tok_in - mf.dev_tok_out) / mf.dev_tok_in, 3) if mf.dev_tok_in else None,
             dev_last_sell_ago_s=round(now - mf.dev_last_sell) if mf.dev_last_sell else None,
+            # % саплая у дева: честно только если видели создание (первая покупка дева — в tx создания)
+            dev_supply_pct=round(100 * max(0, mf.dev_tok_in - mf.dev_tok_out) / (PUMP_SUPPLY * 10 ** TOKEN_DECIMALS), 2)
+            if mf.create_slot else None,
+            dev_supply_peak_pct=round(100 * mf.dev_tok_in / (PUMP_SUPPLY * 10 ** TOKEN_DECIMALS), 2) if mf.create_slot else None,
             snipers=len(mf.snipers), sniper_sol=round(mf.sniper_sol / 1e9, 4),
             tracked_in=len(tracked_in),
             tracked_names=[(tr.get(a) or {}).get("name", a[:6]) for a in tracked_in][:10],

@@ -323,6 +323,17 @@ class TestDevSequence:
         assert m["dev_rebuys"] == 1 and m["dev_rebuy_sol"] == 0.5 and m["dev_rebuy_delay_s"] == 25
         assert m["dev_hold_share"] == pytest.approx(600 / 1600, abs=1e-3) and m["dev_last_sell_ago_s"] == 25
 
+    def test_dev_supply_share(self, flow):
+        flow.ingest(tx_update([create_ev()], slot=100))
+        flow.ingest(tx_update([trade_ev(user=DEV, tokens=50_000_000 * 10**6)], slot=100))     # 5% саплая
+        flow.ingest(tx_update([trade_ev(user=DEV, is_buy=False, tokens=20_000_000 * 10**6)], slot=105))
+        m = flow.metrics(MINT)
+        assert m["dev_supply_pct"] == 3.0 and m["dev_supply_peak_pct"] == 5.0
+
+    def test_dev_supply_unknown_without_create(self, flow):
+        flow.ingest(tx_update([trade_ev(user=DEV, tokens=10**12)]))
+        assert flow.metrics(MINT)["dev_supply_pct"] is None
+
     def test_dev_buys_before_any_sell_are_not_rebuys(self, flow):
         flow.ingest(tx_update([create_ev()], slot=100))
         flow.ingest(tx_update([trade_ev(user=DEV, tokens=10)], slot=100))
