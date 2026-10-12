@@ -289,3 +289,19 @@ def test_refused_flow_subscription_falls_back_to_positions_only(monkeypatch):
     feed._loop()
     assert "flow" in reqs[0].transactions and "flow" not in reqs[1].transactions
     assert "flow_blocked" in feed.snapshot()
+
+
+def test_entry_attrib_gets_flow_snapshot(flow, monkeypatch):
+    """BUY бота несёт ончейн-срез потока (30с/1м/5м, дев, снайперы) — топливо разбора сливов."""
+    import app as appmod
+    flow.ingest(tx_update([create_ev()], slot=100))
+    flow.ingest(tx_update([trade_ev(user=USERS[1])], slot=100))
+    flow.ingest(tx_update([trade_ev(user=DEV, is_buy=False, sol=2 * 10**9)], slot=103))
+    monkeypatch.setattr(appmod.pumpflow, "FLOW", flow)
+    at = {}
+    appmod._enrich_flow(at, MINT)
+    f = at["flow"]
+    assert f["snipers"] == 1 and f["dev_sell_sol"] == 2.0 and f["30s"]["b"] == 1 and f["5m"]["s"] == 1
+    other = {}
+    appmod._enrich_flow(other, "NoSuchMint1111")
+    assert other == {}

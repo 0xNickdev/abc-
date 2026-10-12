@@ -2282,6 +2282,29 @@ def _attrib_for(address: str) -> dict:
     """Снимок атрибуции для адреса (пусто, если монету не скринили в этой сессии процесса)."""
     return dict(_ATTRIB_CACHE.get(address, {}))
 
+def _enrich_flow(attrib: dict, address: str) -> None:
+    """Ончейн-срез из своего потока (pumpflow) на момент входа → attrib["flow"]. Разбор 12.10:
+    половина позиций умирает за ~2 мин с −54% (стоп не спасает — гэп/раг), и по полям GMGN
+    это не видно. Здесь то, чего у GMGN нет: продажи дева, снайперы блока создания, чистый
+    приток и перевес за 30с/1м/5м, уникальные покупатели — топливо для поиска фильтра."""
+    try:
+        w = {k: pumpflow.FLOW.metrics(address, sec) for k, sec in (("30s", 30), ("1m", 60), ("5m", 300))}
+    except Exception:
+        return
+    m5 = w.get("5m")
+    if not m5:
+        return
+    snap = dict(venue=m5["venue"], age_s=m5["age_s"], curve_sol=m5["curve_sol"], full=m5["full"],
+                snipers=m5["snipers"], sniper_sol=m5["sniper_sol"], dev_buy_sol=m5["dev_buy_sol"],
+                dev_sell_sol=m5["dev_sell_sol"], dev_sells=m5["dev_sells"], tracked_in=m5["tracked_in"],
+                last_trade_ago_s=m5["last_trade_ago_s"])
+    for k, m in w.items():
+        if m:
+            snap[k] = dict(b=m["buys"], s=m["sells"], br=m["buy_ratio"], vbr=m["vol_buy_ratio"],
+                           net=m["net_flow_sol"], vol=round(m["buy_vol_sol"] + m["sell_vol_sol"], 3),
+                           uniq=m["unique_buyers"])
+    attrib["flow"] = snap
+
 def _enrich_x_signal(attrib: dict, address: str, s: UserSession, price: float = 0.0) -> None:
     """Соц-сигнал X на момент BUY: кол-во упоминаний CA + подписчики топ-автора → в entry_attrib.
     Топливо review-loop (коррелируем «соц-хайп на входе» с исходом сделки). Приоритет источников —
@@ -2882,6 +2905,7 @@ def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbo
     if not _fuses_on(s):                             # бумага: «остановил бы предохранитель?» → контрфакт
         attrib.setdefault("checks", {})["fuse"] = s.risk.fuse_reason()
     _enrich_x_signal(attrib, address, s, entry_price)   # + соц-сигнал X на входе (opt-in, quota-safe)
+    _enrich_flow(attrib, address)                    # + ончейн-срез своего потока на входе
     s.positions.append(dict(symbol=symbol, address=address, size_sol=round(size_sol, 4),
                             pnl=0.0, cycles=0, entry=entry, chain=chain,
                             entry_price=entry_price,
@@ -3810,6 +3834,7 @@ def _n3_execute(sess: UserSession, side: str, chain: str, address: str,
                      burn_ratio=sec.get("burn_ratio", 0.0), top10=sec.get("top10", 0.0))
         attrib = _attrib_for(address)
         _enrich_x_signal(attrib, address, sess, entry_price)
+        _enrich_flow(attrib, address)
         with ctx:
             sess.positions.append(dict(
                 symbol=symbol, address=address, size_sol=round(spent, 6), pnl=0.0,
@@ -4259,6 +4284,7 @@ def api_tx_confirm(c: TxConfirmIn, x_wallet: str | None = WalletHeader,
                 return dict(ok=True, symbol=symbol, averaged=True)
             attrib = _attrib_for(c.address)
             _enrich_x_signal(attrib, c.address, sess, price)
+            _enrich_flow(attrib, c.address)
             sess.positions.append(dict(
                 symbol=symbol, address=c.address, size_sol=round(spent, 6),
                 pnl=0.0, cycles=0, entry=entry, chain="sol", entry_price=price,
