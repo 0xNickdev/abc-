@@ -30,6 +30,7 @@ DEDUP_S = 600           # один образец на токен за 10 мин
 FLOW_TOP_EVERY_S = 60   # топ потока — кандидаты помимо GMGN (охват шире trending)
 FLOW_TOP_N = 30
 MAX_PENDING = 20000
+SANE_MAX_X = 50.0       # ×50 за час на пуле — почти всегда смена пула/масштаба, помечаем suspect
 
 
 def enabled() -> bool:
@@ -108,8 +109,9 @@ class Recorder:
             return
         self._last_flow_top = now
         try:
-            for r in self.flow.hot(300, FLOW_TOP_N):
-                self._add(r["mint"], "flow", None, None, now)
+            for r in self.flow.hot(300, FLOW_TOP_N * 3):
+                if r["mint"].endswith("pump"):       # наша вселенная — токены pump.fun (6 знаков, 1B саплай)
+                    self._add(r["mint"], "flow", None, None, now)
         except Exception as e:
             self.stats["last_error"] = f"{type(e).__name__}: {e}"[:160]
 
@@ -122,6 +124,8 @@ class Recorder:
         for smp in items:
             px = self.flow.price(smp["mint"])
             if px:
+                if smp["p0"] and not (1 / 1000 <= px[0] / smp["p0"] <= SANE_MAX_X):
+                    smp["suspect"] = True                # скачок цены вне физики — артефакт, а не исход
                 smp["last_px"], smp["last_trade"] = px
             ret = smp["last_px"] / smp["p0"] - 1 if smp["p0"] else 0.0
             age = now - smp["t0"]

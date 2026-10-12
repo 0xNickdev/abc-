@@ -58,6 +58,7 @@ USERS_CAP = 5000
 MAX_MINTS = 25000       # pump.fun ~15–30k новых токенов/сутки; живых в часе — меньше
 SNIPER_SLOTS = 2        # покупка в слоте создания … +2 слота = снайпер/бандл
 QUEUE_MAX = 20000
+POOL_FRESH_S = 600      # пул без сделок дольше — не кандидат в «главный» для цены
 GAP_S = 30              # тишина дольше — считаем разрывом покрытия (pump.fun не молчит и секунды)
 TOKEN_DECIMALS = 6      # pump.fun-токены всегда 6 знаков
 PUMP_SUPPLY = 1_000_000_000
@@ -197,6 +198,13 @@ def iter_events(tx_info, pools: dict) -> tuple[list, int]:
     for i, ix in enumerate(msg.instructions):
         walk([ix])
         walk(inner.get(i, ()))
+    if any(k == "amm" for k, d in out):
+        # точность токенов из балансов tx: у не-pump токенов бывает не 6 знаков → цена ×1000 мимо
+        decs = {tb.mint: tb.ui_token_amount.decimals for tb in list(meta.pre_token_balances) + list(meta.post_token_balances)
+                if tb.mint and tb.HasField("ui_token_amount")}
+        for k_, d in out:
+            if k_ == "amm":
+                d["decs"] = decs
     if any(k == "amm" and d["pool"] not in pools for k, d in out):
         # пул не встретился в известных buy/sell (новые варианты инструкций PumpSwap):
         # пары берём из балансов tx — у пула ровно два токен-счёта (base + quote) с owner=pool
@@ -260,7 +268,7 @@ class MintFlow:
     __slots__ = ("mint", "name", "symbol", "creator", "created_ts", "create_slot", "first_seen",
                  "last_ts", "buckets", "recent", "users", "tracked", "dev_buy_sol", "dev_sell_sol",
                  "dev_sells", "dev_tok_in", "dev_tok_out", "dev_first_sell", "dev_last_sell", "dev_rebuy_sol",
-                 "dev_rebuys", "dev_rebuy_delay", "bal", "reserve_tok", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue")
+                 "dev_rebuys", "dev_rebuy_delay", "bal", "reserve_tok", "pool_px", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue")
 
     def __init__(self, mint: str, now: float):
         self.mint = mint
@@ -283,6 +291,7 @@ class MintFlow:
         self.dev_rebuy_delay: float | None = None   # с первой продажи до первого откупа, с
         self.bal: dict[str, int] = {}               # кошелёк → чистые токены по нашим наблюдениям
         self.reserve_tok = 0                        # токены в резерве кривой/пула (для ёмкости дампа)
+        self.pool_px: dict[str, tuple] = {}         # пул → (цена SOL, резерв SOL, резерв токенов, ts)
         self.snipers: set = set()
         self.sniper_sol = 0
         self.price_sol = 0.0
@@ -339,6 +348,7 @@ class PumpFlow:
         self._lock = threading.Lock()
         self._m: dict[str, MintFlow] = {}
         self._pools: dict[str, tuple[str, str]] = {}
+        self._dec: dict[str, int] = {}              # mint → decimals (из балансов tx)
         self._q: queue.Queue = queue.Queue(maxsize=QUEUE_MAX)
         self._thread: threading.Thread | None = None
         self._started_at = 0.0
@@ -471,9 +481,21 @@ class PumpFlow:
         if lam <= 0:
             return
         mf = self._get(mint, now)
-        if r_tok > 0:
-            mf.price_sol = (r_sol / 1e9) / (r_tok / 10 ** TOKEN_DECIMALS)
-            mf.reserve_tok = r_tok
+        dec = (d.get("decs") or {}).get(mint)
+        if dec is not None:
+            self._dec[mint] = dec
+        dec = self._dec.get(mint, TOKEN_DECIMALS if mint.endswith("pump") else None)
+        if r_tok > 0 and dec is not None:
+            # 13.10: у токена бывает несколько пулов (канонический + чьи-то ещё) с разной ценой —
+            # цена «последней сделки» прыгала между ними и рисовала ×10⁹ и −99.8%. Цена токена =
+            # цена ГЛАВНОГО пула (больше всего SOL) среди обновлённых за 10 мин.
+            mf.pool_px[d["pool"]] = ((r_sol / 1e9) / (r_tok / 10 ** dec), r_sol, r_tok, now)
+            live = [v for v in mf.pool_px.values() if now - v[3] <= POOL_FRESH_S]
+            best = max(live, key=lambda v: v[1])
+            mf.price_sol, mf.reserve_tok = best[0], best[2]
+            if len(mf.pool_px) > 8:
+                for k in sorted(mf.pool_px, key=lambda k: mf.pool_px[k][3])[:len(mf.pool_px) - 8]:
+                    mf.pool_px.pop(k, None)
         mf.venue = "amm"
         mf.complete = True
         mf.add(now, slot, is_buy, lam, tok, d["user"])
@@ -493,6 +515,8 @@ class PumpFlow:
         if len(self._m) > MAX_MINTS:
             for m in sorted(self._m, key=lambda k: self._m[k].last_ts)[:len(self._m) - MAX_MINTS]:
                 del self._m[m]
+        if len(self._dec) > 50000:
+            self._dec.clear()
         if len(self._pools) > 50000:
             self._pools.clear()                     # перезаполнится из инструкций buy/sell
 

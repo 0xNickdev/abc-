@@ -65,8 +65,8 @@ def test_labels_path_and_writes_at_horizon(tmp_path):
 
 def test_flow_top_adds_tokens_beyond_gmgn(tmp_path):
     r, f = rec(tmp_path)
-    f.px["Z"] = 3.0
-    f.hot_rows = [dict(mint="Z")]
+    f.px["Zpump"] = 3.0
+    f.hot_rows = [dict(mint="Zpump")]
     r.observe_decisions([])
     assert [v["src"] for v in r.pending.values()] == ["flow"]
 
@@ -77,3 +77,20 @@ def test_disabled(tmp_path, monkeypatch):
     f.px["A"] = 1.0
     r.observe_decisions([dec("A")])
     assert not r.pending
+
+
+def test_suspect_jump_flagged(tmp_path):
+    r, f = rec(tmp_path)
+    f.px["A"] = 1.0
+    r._add("A", "gmgn", None, None, now=1000.0)
+    f.px["A"] = 1e6
+    r.label_tick(now=1010)
+    assert next(iter(r.pending.values()))["suspect"] is True
+
+
+def test_flow_top_only_pump_tokens(tmp_path):
+    r, f = rec(tmp_path)
+    f.px.update({"Xpump": 1.0, "Other": 1.0})
+    f.hot_rows = [dict(mint="Other"), dict(mint="Xpump")]
+    r.observe_decisions([])
+    assert [v["mint"] for v in r.pending.values()] == ["Xpump"]

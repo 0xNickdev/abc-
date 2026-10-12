@@ -373,3 +373,18 @@ def test_bot_skips_high_dump_capacity():
                                   features=dict(buy_ratio=0.7, dump_top10_pct=dump)))
     out = bot.select_entries([d("A", 80.0), d("B", 30.0), d("C", None)], set(), 0, 10, 5, max_dump_pct=50)
     assert [a for a, _, _ in out] == ["B", "C"]
+
+
+def test_price_from_main_pool_not_last_trade(flow):
+    """13.10: у токена два пула (главный и мелкий чужой) — цена не прыгает на мелкий."""
+    big, small = POOL, base58.b58encode(b"\x55" * 32).decode()
+    flow._pools[big] = (MINT, pf.SOL_MINT)
+    flow._pools[small] = (MINT, pf.SOL_MINT)
+
+    def ev(pool, sol_res, tok_res):
+        vals = [int(time.time()), 10**6, 0, 0, 0, tok_res, sol_res, 10**8] + [0] * 6
+        return pf.EV_AMM_BUY + struct.pack("<q13Q", *vals) + k(pool) + k(USERS[1]) + b"\x00" * 64
+    flow.ingest(tx_update([ev(big, 100 * 10**9, 10**15)], keys_extra=[small]))       # 100 SOL / 1e9 ток
+    p_big = flow.metrics(MINT)["price_sol"]
+    flow.ingest(tx_update([ev(small, 1 * 10**9, 10**12)], keys_extra=[small]))       # 1 SOL / 1e6 ток: ×10 дороже
+    assert flow.metrics(MINT)["price_sol"] == pytest.approx(p_big, rel=0.01)
