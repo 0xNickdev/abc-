@@ -94,3 +94,22 @@ def test_flow_top_only_pump_tokens(tmp_path):
     f.hot_rows = [dict(mint="Other"), dict(mint="Xpump")]
     r.observe_decisions([])
     assert [v["mint"] for v in r.pending.values()] == ["Xpump"]
+
+
+def test_pending_survives_restart(tmp_path):
+    r, f = rec(tmp_path)
+    f.px["A"] = 1.0
+    r._add("A", "gmgn", None, None)
+    r.save_pending()
+    r2, f2 = rec(tmp_path)
+    assert r2.load_pending() == 1
+    s = next(iter(r2.pending.values()))
+    assert s["mint"] == "A" and "gap" in s
+    f2.px["A"] = 1.0
+    assert r2._add("A", "gmgn", None, None) is False          # дедуп помнит восстановленный
+
+
+def test_trending_window_from_cmd():
+    import app as appmod
+    assert appmod._trending_window_s("gmgn-cli market trending --interval 5m --limit 100") == 300
+    assert appmod._trending_window_s("gmgn-cli market trending --limit 100") == 3600

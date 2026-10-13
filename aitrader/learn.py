@@ -167,15 +167,53 @@ class Recorder:
         except OSError as e:
             self.stats["last_error"] = f"{type(e).__name__}: {e}"[:160]
 
+    # ── переживать рестарт (деплой): неразмеченные образцы на диск, после старта — дальше ──
+    def save_pending(self):
+        try:
+            d = self._dir()
+            d.mkdir(parents=True, exist_ok=True)
+            with self.lock:
+                data = json.dumps(dict(saved=time.time(), pending=list(self.pending.values())), separators=(",", ":"))
+            tmp = d / "pending.tmp"
+            tmp.write_text(data)
+            tmp.replace(d / "pending.json")
+        except OSError as e:
+            self.stats["last_error"] = f"{type(e).__name__}: {e}"[:160]
+
+    def load_pending(self) -> int:
+        """После рестарта: вернуть образцы в разметку. Пока сервер лежал, путь цены не видели —
+        такие образцы помечаются gap (касания уровней за паузу могли быть пропущены)."""
+        f = self._dir() / "pending.json"
+        try:
+            d = json.loads(f.read_text())
+        except (OSError, ValueError):
+            return 0
+        now = time.time()
+        n = 0
+        with self.lock:
+            for smp in d.get("pending", []):
+                if now - smp.get("t0", 0) >= HORIZON_S * 2 or smp["id"] in self.pending:
+                    continue
+                smp["gap"] = round(now - float(d.get("saved") or now))
+                self.pending[smp["id"]] = smp
+                self.last_seen[smp["mint"]] = max(self.last_seen.get(smp["mint"], 0), smp["t0"])
+                n += 1
+        return n
+
     def _loop(self):
+        k = 0
         while not self._stop.wait(TICK_S):
             try:
                 self.label_tick()
+                k += 1
+                if k % 20 == 0:          # ~раз в минуту
+                    self.save_pending()
             except Exception as e:      # разметка никогда не роняет сервер
                 self.stats["last_error"] = f"{type(e).__name__}: {e}"[:160]
 
     def start(self):
         if self._thread is None and enabled():
+            self.stats["restored"] = self.load_pending()
             self.stats["state"] = "on"
             self._thread = threading.Thread(target=self._loop, name="learn", daemon=True)
             self._thread.start()

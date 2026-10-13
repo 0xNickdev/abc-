@@ -2381,6 +2381,13 @@ def ensure_live_prices():
         _live_started = True
     threading.Thread(target=_live_prices_loop, daemon=True).start()
 
+_INTERVAL_S = {"1m": 60, "5m": 300, "1h": 3600, "6h": 21600, "24h": 86400}
+
+def _trending_window_s(cmd: str) -> int:
+    """Окно buys/sells строки trending = --interval команды скана (юзер менял 1h → 5m 12.10)."""
+    m = re.search(r"--interval\s+(\S+)", cmd or "")
+    return _INTERVAL_S.get(m.group(1) if m else "1h", 3600)
+
 def screen_once(chain: str, s: UserSession | None = None) -> dict:
     s = s or ST                       # 会话（多用户：每 pubkey 自己的过滤器/持仓/风控）
     g = s.adapter_for(chain)          # 市场层共享（运营者 key），与会话无关
@@ -2392,7 +2399,8 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
     candidates = candidates[:CFG["top_n_prefilter"]]
     if chain == "sol":
         try:
-            pumpflow.COMPARE.observe(candidates, OUT_DIR / "flow_compare.jsonl")   # шаг 1: сверка потока с GMGN
+            pumpflow.COMPARE.observe(candidates, OUT_DIR / "flow_compare.jsonl",   # шаг 1: сверка потока с GMGN
+                                     window_s=_trending_window_s(s.get_trending_cmd(chain)))
         except Exception:
             pass                                  # сверка — наблюдение, скан не должен от неё падать
 
@@ -2898,7 +2906,7 @@ def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbo
         s.save_positions()
         _verb = "filled" if filled else ("submitted·pending" if s.mode == "LIVE" else "recorded")
         log("BUY", symbol, f"{s.mode} {_verb} +{size_sol} averaged → {new_sz} ({chain})",
-            dict(size_sol=size_sol, chain=chain, averaged=True, **exit_plan()), mode=s.mode)
+            dict(size_sol=size_sol, chain=chain, averaged=True, **exit_plan()), mode=s.mode, pubkey=s.pubkey)
         return dict(ok=True, status=status_msg, filled=filled, symbol=symbol, averaged=True)
     attrib = _attrib_for(address)                    # атрибуция входа (кошельки/KOL в场) → едет с позицией
     _chk = _PREENTRY_CHECKS.pop(address, None)       # результаты pre-entry детекторов (бот) → контрфакт
@@ -2920,7 +2928,7 @@ def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbo
     s.save_positions()
     _verb = "filled" if filled else ("submitted·pending" if s.mode == "LIVE" else "recorded")
     log("BUY", symbol, f"{s.mode} {_verb} {size_sol} ({chain})",
-        dict(size_sol=size_sol, chain=chain, attrib=attrib, **exit_plan()), mode=s.mode)
+        dict(size_sol=size_sol, chain=chain, attrib=attrib, **exit_plan()), mode=s.mode, pubkey=s.pubkey)
     return dict(ok=True, status=status_msg, filled=filled, symbol=symbol)
 
 # Реестр недавних закрытий: (pubkey, addr) -> (monotonic, pnl). Бот не перезаходит в CA
@@ -3155,6 +3163,7 @@ async def _lifespan(_app: FastAPI):
     # прогрев выжимки журнала в фоне: первый посетитель календаря не ждёт минуты после деплоя
     threading.Thread(target=lambda: backtest.collect(LOG_PATH), daemon=True).start()
     threading.Thread(target=_health_loop, daemon=True).start()
+    learn.REC.start()                     # самообучение: вернуть неразмеченные образцы после рестарта
     try:                                  # личные боты юзеров, включённые до рестарта
         _n = resume_user_bots()
         if _n:

@@ -657,7 +657,7 @@ class GmgnCompare:
         self._logged: dict[str, float] = {}
         self.seen = self.found = self.full = 0
 
-    def observe(self, gmgn_rows: list, path=None, log_every_s: float = 600):
+    def observe(self, gmgn_rows: list, path=None, log_every_s: float = 600, window_s: float = KEEP_S):
         if self.flow.stats["state"] != "on":
             return
         now = time.time()
@@ -667,7 +667,7 @@ class GmgnCompare:
             if not mint:
                 continue
             self.seen += 1
-            m = self.flow.metrics(mint, KEEP_S)
+            m = self.flow.metrics(mint, min(window_s, KEEP_S))
             if not m:
                 continue
             self.found += 1
@@ -678,7 +678,7 @@ class GmgnCompare:
                 gb, gs = int(float(r.get("buys") or 0)), int(float(r.get("sells") or 0))
             except (TypeError, ValueError):
                 continue
-            rec = dict(ts=round(now), mint=mint, sym=str(r.get("symbol") or "")[:20],
+            rec = dict(ts=round(now), win=int(window_s), mint=mint, sym=str(r.get("symbol") or "")[:20],
                        g_buys=gb, g_sells=gs, g_br=round(gb / (gb + gs), 4) if gb + gs else None,
                        g_vol_usd=r.get("volume"),
                        f_buys=m["buys"], f_sells=m["sells"], f_br=m["buy_ratio"],
