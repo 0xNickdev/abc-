@@ -542,6 +542,12 @@ class Argus:
         if m and m.get("dump_top10_pct") is not None:
             out.append(f"Dump risk: top-10 holders ({m['top10_supply_pct']:.1f}% of supply) selling at once → "
                        f"price −{m['dump_top10_pct']:.0f}% · dev alone −{m['dump_dev_pct']:.0f}% · snipers −{m['dump_snipers_pct']:.0f}%")
+        if m and m.get("dev_prev_tokens"):
+            out.append(f"Deployer history: {m['dev_prev_tokens']} earlier coins · {m['dev_prev_migrated']} migrated · "
+                       f"<b>{m['dev_prev_rugs']} rugged</b>")
+        if m and m.get("crash_1m_max_pct") is not None:
+            out.append(f"Last hour: worst 1-min crash −{m['crash_1m_max_pct']:.0f}% · now −{m['dd_from_high_pct'] or 0:.0f}% from high"
+                       + (f" · top-25 holders sit at {m['top25_profit_x']:.1f}x" if m.get("top25_profit_x") else ""))
         if m and m.get("dev_supply_pct") is not None:
             out.append(f"Dev holds {m['dev_supply_pct']:.1f}% of supply (max {m['dev_supply_peak_pct']:.1f}%)")
         if not (m or h) and not cs:

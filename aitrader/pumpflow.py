@@ -268,7 +268,8 @@ class MintFlow:
     __slots__ = ("mint", "name", "symbol", "creator", "created_ts", "create_slot", "first_seen",
                  "last_ts", "buckets", "recent", "users", "tracked", "dev_buy_sol", "dev_sell_sol",
                  "dev_sells", "dev_tok_in", "dev_tok_out", "dev_first_sell", "dev_last_sell", "dev_rebuy_sol",
-                 "dev_rebuys", "dev_rebuy_delay", "bal", "reserve_tok", "pool_px", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue")
+                 "dev_rebuys", "dev_rebuy_delay", "bal", "reserve_tok", "pool_px", "cost", "candles", "ticks60", "peak_px",
+                 "create_wall", "launch_px", "launch_max10", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue")
 
     def __init__(self, mint: str, now: float):
         self.mint = mint
@@ -292,6 +293,13 @@ class MintFlow:
         self.bal: dict[str, int] = {}               # кошелёк → чистые токены по нашим наблюдениям
         self.reserve_tok = 0                        # токены в резерве кривой/пула (для ёмкости дампа)
         self.pool_px: dict[str, tuple] = {}         # пул → (цена SOL, резерв SOL, резерв токенов, ts)
+        self.cost: dict[str, int] = {}              # кошелёк → потраченные лампорты на текущие токены (средняя цена)
+        self.candles: collections.deque = collections.deque(maxlen=61)   # [t0, open, high, low, close, max_drop_60s]
+        self.ticks60: collections.deque = collections.deque()             # (ts, цена) за последние 60 с
+        self.peak_px = 0.0
+        self.create_wall = 0.0                      # когда МЫ увидели создание (для «первых 10 секунд»)
+        self.launch_px = 0.0                        # первая цена после создания
+        self.launch_max10 = 0.0                     # максимум цены за первые 10 с
         self.snipers: set = set()
         self.sniper_sol = 0
         self.price_sol = 0.0
@@ -315,7 +323,12 @@ class MintFlow:
             b[4] += lamports
         self.recent.append((now, slot, is_buy, lamports, user))
         if user in self.bal or len(self.bal) < USERS_CAP:
-            self.bal[user] = self.bal.get(user, 0) + (tokens if is_buy else -tokens)
+            held = self.bal.get(user, 0)
+            if is_buy:
+                self.cost[user] = self.cost.get(user, 0) + lamports
+            elif held > 0:                          # продажа уменьшает себестоимость пропорционально
+                self.cost[user] = int(self.cost.get(user, 0) * max(0, held - tokens) / held)
+            self.bal[user] = held + (tokens if is_buy else -tokens)
         if self.creator and user == self.creator:
             if is_buy:
                 self.dev_buy_sol += lamports
@@ -335,6 +348,32 @@ class MintFlow:
             self.snipers.add(user)
             self.sniper_sol += lamports
         self.trim(now)
+
+    def tick_price(self, now: float):
+        """Минутные свечи, пик, цена запуска — после каждого обновления price_sol."""
+        px = self.price_sol
+        if px <= 0:
+            return
+        self.peak_px = max(self.peak_px, px)
+        t0 = int(now // 60 * 60)
+        c = self.candles[-1] if self.candles else None
+        if c is None or c[0] != t0:
+            self.candles.append([t0, c[4] if c else px, px, px, px, 0.0])
+            c = self.candles[-1]
+        c[2] = max(c[2], px)
+        c[3] = min(c[3], px)
+        c[4] = px
+        # «обвал за минуту» с учётом порядка: от максимума последних 60 с вниз к текущей цене
+        self.ticks60.append((now, px))
+        while self.ticks60 and self.ticks60[0][0] < now - 60:
+            self.ticks60.popleft()
+        if len(self.ticks60) > 400:
+            self.ticks60.popleft()
+        roll_hi = max(v for _, v in self.ticks60)
+        c[5] = max(c[5], 1 - px / roll_hi)
+        if self.create_wall and now - self.create_wall <= 10:
+            self.launch_px = self.launch_px or px
+            self.launch_max10 = max(self.launch_max10, px)
 
     def trim(self, now: float):
         while self.buckets and self.buckets[0][0] < now - KEEP_S - BUCKET_S:
@@ -356,6 +395,8 @@ class PumpFlow:
         self._tracked_at = 0.0
         self._last_gc = 0.0
         self._last_ingest = 0.0
+        self._creators: dict[str, list] = {}       # создатель → судьбы прошлых токенов
+        self._creators_saved = time.time()
         self.stats = dict(state="off", gaps=0, tx=0, trades=0, amm_trades=0, creates=0, completes=0, rejects=0,
                           dropped=0, unmapped_pool=0, non_sol=0, verify_fail=0, lag_ms=None)
         self._lags: collections.deque = collections.deque(maxlen=500)
@@ -374,6 +415,7 @@ class PumpFlow:
             if self._thread is not None:
                 return
             self._started_at = time.time()
+            self.load_creators()
             self.stats["state"] = "on"
             self._thread = threading.Thread(target=self._loop, daemon=True, name="pumpflow")
             self._thread.start()
@@ -445,6 +487,7 @@ class PumpFlow:
         mf = self._get(d["mint"], now)
         mf.name, mf.symbol, mf.creator = d["name"], d["symbol"], d["creator"]
         mf.created_ts, mf.create_slot = float(d["ts"]), slot
+        mf.create_wall = now
         self.stats["creates"] += 1
 
     def _on_trade(self, d, keyset, slot, now, tracked):
@@ -462,6 +505,7 @@ class PumpFlow:
         mf.real_sol = d["real_sol"]
         mf.reserve_tok = d["vtok"]
         mf.venue = "curve"
+        mf.tick_price(now)
         mf.add(now, slot, d["is_buy"], d["sol"], d["tokens"], d["user"])
         self._track(mf, d["user"], d["is_buy"], d["tokens"], tracked)
         self.stats["trades"] += 1
@@ -498,6 +542,7 @@ class PumpFlow:
                     mf.pool_px.pop(k, None)
         mf.venue = "amm"
         mf.complete = True
+        mf.tick_price(now)
         mf.add(now, slot, is_buy, lam, tok, d["user"])
         self._track(mf, d["user"], is_buy, tok, tracked)
         self.stats["amm_trades"] += 1
@@ -511,7 +556,10 @@ class PumpFlow:
         self._last_gc = now
         dead = [m for m, mf in self._m.items() if now - mf.last_ts > KEEP_S]
         for m in dead:
+            self._remember_creator(self._m[m])
             del self._m[m]
+        if now - self._creators_saved > 600:
+            self.save_creators()
         if len(self._m) > MAX_MINTS:
             for m in sorted(self._m, key=lambda k: self._m[k].last_ts)[:len(self._m) - MAX_MINTS]:
                 del self._m[m]
@@ -546,6 +594,80 @@ class PumpFlow:
                     dump_top10_pct=round(100 * self.dump_impact(R, top10), 1),
                     top10_supply_pct=round(100 * top10 / supply, 2),
                     top1_supply_pct=round(100 * (top[0] if top else 0) / supply, 2))
+
+    # ── история деплоеров (своя база: создатель → судьбы его прошлых токенов) ──
+    def _remember_creator(self, mf: MintFlow):
+        """Токен ушёл из памяти (час без сделок) — запомнить его судьбу за создателем."""
+        if not mf.creator or not mf.create_slot:
+            return
+        peak_mc = mf.peak_px * PUMP_SUPPLY
+        last_mc = mf.price_sol * PUMP_SUPPLY
+        rec = dict(m=mf.mint[-8:], ts=round(mf.created_ts), peak=round(peak_mc, 1), last=round(last_mc, 1),
+                   done=bool(mf.complete), dev_out=bool(mf.dev_tok_in and mf.dev_tok_out >= mf.dev_tok_in * 0.95),
+                   life=round(mf.last_ts - (mf.create_wall or mf.first_seen)))
+        h = self._creators.setdefault(mf.creator, [])
+        h.append(rec)
+        del h[:-20]
+        if len(self._creators) > 150000:
+            for k in list(self._creators)[:30000]:
+                self._creators.pop(k, None)
+
+    def creator_history(self, creator: str) -> dict:
+        h = self._creators.get(creator) or []
+        if not h:
+            return dict(dev_prev_tokens=0, dev_prev_migrated=0, dev_prev_rugs=0, dev_prev_best_mcap_sol=None)
+        # «раг» = дев вышел полностью и капа упала >80% от пика
+        rugs = sum(1 for r in h if r["dev_out"] and r["peak"] > 0 and r["last"] < 0.2 * r["peak"])
+        return dict(dev_prev_tokens=len(h), dev_prev_migrated=sum(1 for r in h if r["done"]),
+                    dev_prev_rugs=rugs, dev_prev_best_mcap_sol=max(r["peak"] for r in h))
+
+    def _creators_path(self):
+        import pathlib
+        d = os.getenv("ABC_DATA_DIR", "").strip()
+        base = pathlib.Path(d) if d else pathlib.Path(__file__).resolve().parent / "outputs"
+        return base / "flow_creators.json"
+
+    def save_creators(self):
+        self._creators_saved = time.time()
+        try:
+            import json
+            p = self._creators_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(self._creators, separators=(",", ":")))
+            tmp.replace(p)
+        except OSError:
+            pass
+
+    def load_creators(self):
+        try:
+            import json
+            self._creators = json.loads(self._creators_path().read_text())
+        except (OSError, ValueError):
+            self._creators = {}
+
+    def _shape(self, mf: MintFlow) -> dict:
+        """Форма цены и мотивация держателей: обвалы за час, откат от пика, всплеск запуска,
+        по какой цене вошли топ-25 (чем дешевле — тем сильнее соблазн слить)."""
+        out = dict(crash_1m_max_pct=None, dd_from_high_pct=None, launch_x10s=None,
+                   top25_basis_pct=None, top25_profit_x=None)
+        cs = list(mf.candles)
+        if cs:
+            out["crash_1m_max_pct"] = round(100 * max(c[5] for c in cs), 1)
+            hi = max(c[2] for c in cs)
+            if hi > 0 and mf.price_sol > 0:
+                out["dd_from_high_pct"] = round(100 * (1 - mf.price_sol / hi), 1)
+        if mf.launch_px > 0:
+            out["launch_x10s"] = round(mf.launch_max10 / mf.launch_px, 2)
+        if mf.create_slot and mf.price_sol > 0:
+            top = heapq.nlargest(25, ((v, u) for u, v in mf.bal.items() if v > 0))
+            tok = sum(v for v, _ in top)
+            lam = sum(mf.cost.get(u, 0) for _, u in top)
+            if tok > 0 and lam > 0:
+                basis = (lam / 1e9) / (tok / 10 ** TOKEN_DECIMALS)   # средняя цена входа, SOL/токен
+                out["top25_basis_pct"] = round(100 * basis / mf.price_sol, 1)
+                out["top25_profit_x"] = round(mf.price_sol / basis, 2)
+        return out
 
     def _metrics(self, mf: MintFlow, window_s: float, now: float, deep: bool = True) -> dict:
         lo = now - window_s
@@ -590,6 +712,8 @@ class PumpFlow:
             # окно целиком видели (стрим шёл всё окно или токен моложе окна) — иначе цифры занижены
             full=observed_from <= lo or (mf.created_ts > 0 and mf.created_ts >= self._started_at),
             **(self._dump(mf) if deep else {}),
+            **(self._shape(mf) if deep else {}),
+            **(self.creator_history(mf.creator) if deep and mf.creator else {}),
         )
 
     def price(self, mint: str) -> tuple[float, float] | None:
@@ -603,11 +727,14 @@ class PumpFlow:
         m5 = w.get("5m")
         if not m5:
             return None
-        snap = {k: m5[k] for k in ("venue", "age_s", "curve_sol", "full", "snipers", "sniper_sol", "dev_buy_sol",
+        snap = {k: m5.get(k) for k in ("venue", "age_s", "curve_sol", "full", "snipers", "sniper_sol", "dev_buy_sol",
                                    "dev_sell_sol", "dev_sells", "dev_rebuy_sol", "dev_rebuys", "dev_rebuy_delay_s",
                                    "dev_hold_share", "dev_last_sell_ago_s", "dev_supply_pct", "dev_supply_peak_pct",
                                    "tracked_in", "last_trade_ago_s", "price_sol", "mcap_sol", "dump_dev_pct",
-                                   "dump_snipers_pct", "dump_top10_pct", "top10_supply_pct", "top1_supply_pct")}
+                                   "dump_snipers_pct", "dump_top10_pct", "top10_supply_pct", "top1_supply_pct",
+                                   "crash_1m_max_pct", "dd_from_high_pct", "launch_x10s", "top25_basis_pct",
+                                   "top25_profit_x", "dev_prev_tokens", "dev_prev_migrated", "dev_prev_rugs",
+                                   "dev_prev_best_mcap_sol")}
         for k, m in w.items():
             if m:
                 snap[k] = dict(b=m["buys"], s=m["sells"], br=m["buy_ratio"], vbr=m["vol_buy_ratio"],

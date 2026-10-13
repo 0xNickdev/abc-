@@ -388,3 +388,55 @@ def test_price_from_main_pool_not_last_trade(flow):
     p_big = flow.metrics(MINT)["price_sol"]
     flow.ingest(tx_update([ev(small, 1 * 10**9, 10**12)], keys_extra=[small]))       # 1 SOL / 1e6 ток: ×10 дороже
     assert flow.metrics(MINT)["price_sol"] == pytest.approx(p_big, rel=0.01)
+
+
+class TestShapeAndDeployer:
+    def _clock(self, monkeypatch):
+        t = [1_800_000_000.0]
+        monkeypatch.setattr(pf.time, "time", lambda: t[0])
+        return t
+
+    def test_crash_drawdown_launch_spike(self, flow, monkeypatch):
+        t = self._clock(monkeypatch)
+        flow.ingest(tx_update([create_ev()], slot=100), recv=t[0])
+        tok = 10**6 * 10**6
+        for dt, vsol in ((1, 30), (5, 90), (20, 100), (70, 40), (130, 60)):   # SOL в кривой → цена
+            t[0] += dt if dt < 20 else 0
+            flow.ingest(tx_update([trade_ev(user=USERS[1], vsol=vsol * 10**9, vtok=800 * tok, ts=int(t[0]))], slot=101),
+                        recv=1_800_000_000.0 + dt)
+        m = flow.metrics(MINT, 3600)
+        assert m["launch_x10s"] == pytest.approx(3.0)                 # 30 → 90 за первые 10 с
+        assert m["dd_from_high_pct"] == pytest.approx(40.0)           # 100 → 60
+        assert m["crash_1m_max_pct"] == pytest.approx(60.0)           # 100 → 40 на стыке минут
+
+    def test_holder_basis(self, flow):
+        tok = 10**6 * 10**6
+        flow.ingest(tx_update([create_ev()], slot=100))
+        flow.ingest(tx_update([trade_ev(user=USERS[1], sol=10**9, tokens=100 * tok, vsol=40 * 10**9, vtok=800 * tok)], slot=101))
+        m = flow.metrics(MINT)
+        price = 40 / 800e6
+        basis = 1 / 100e6
+        assert m["top25_profit_x"] == pytest.approx(price / basis, rel=0.01)
+        flow.ingest(tx_update([trade_ev(user=USERS[1], is_buy=False, sol=10**9, tokens=50 * tok)], slot=102))
+        assert flow._m[MINT].cost[USERS[1]] == 5 * 10**8           # половину продал — себестоимость пополам
+
+    def test_deployer_history_survives_gc_and_restart(self, flow, tmp_path, monkeypatch):
+        monkeypatch.setenv("ABC_DATA_DIR", str(tmp_path))
+        flow.ingest(tx_update([create_ev()], slot=100))
+        tok = 10**6 * 10**6
+        flow.ingest(tx_update([trade_ev(user=DEV, tokens=50 * tok, vsol=80 * 10**9)], slot=100))
+        flow.ingest(tx_update([trade_ev(user=DEV, is_buy=False, tokens=50 * tok, vsol=10 * 10**9)], slot=110))
+        flow._m[MINT].last_ts -= pf.KEEP_S + 5
+        flow._gc(time.time())
+        h = flow.creator_history(DEV)
+        assert h["dev_prev_tokens"] == 1 and h["dev_prev_rugs"] == 1 and h["dev_prev_migrated"] == 0
+        flow.save_creators()
+        f2 = pf.PumpFlow()
+        f2.load_creators()
+        assert f2.creator_history(DEV)["dev_prev_rugs"] == 1
+
+    def test_snapshot_without_creator(self, flow):
+        flow.ingest(tx_update([trade_ev()]))
+        flow._m[MINT].creator = ""
+        snap = flow.entry_snapshot(MINT)
+        assert snap is not None and snap["dev_prev_tokens"] is None
