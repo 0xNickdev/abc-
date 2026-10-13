@@ -2229,3 +2229,39 @@ class TestPnlCalendar:
     def test_empty_month_is_current(self, client):
         d = client.get("/api/pnl/calendar").json()
         assert "days" in d and "total" in d and len(d["month"]) == 7
+
+
+class TestUserBotSurvivesRestart:
+    """13.10: деплой молча выключал личных ботов до ручного Start — теперь поднимаются сами."""
+    PK = "Usr1111111111111111111111111111111111111111"
+
+    def test_start_stop_config_persist_and_resume(self, tmp_path, monkeypatch):
+        c = _mu_client(tmp_path, monkeypatch)
+        started = []
+
+        def fake_start(sess, ch):
+            started.append((sess.pubkey, ch))
+            sess.bot.enabled = True
+            return True
+        monkeypatch.setattr(appmod, "_start_user_bot", fake_start)
+        h = {"X-Wallet": self.PK}
+        assert c.post("/api/bot/start", json={"chain": "sol"}, headers=h).status_code == 200
+        assert c.post("/api/bot/config", json={"min_buy_ratio": 0.7}, headers=h).status_code == 200
+        st = __import__("json").loads((tmp_path / "users" / self.PK / "bot_state.json").read_text())
+        assert st["on"] is True and st["chain"] == "sol" and st["cfg"]["min_buy_ratio"] == 0.7
+        # «рестарт»: память сессий пустая
+        monkeypatch.setattr(appmod, "SESSIONS", {})
+        started.clear()
+        assert appmod.resume_user_bots() == 1
+        assert started == [(self.PK, "sol")]
+        assert appmod.get_session(self.PK).bot.cfg["min_buy_ratio"] == 0.7
+
+    def test_stopped_bot_not_resumed(self, tmp_path, monkeypatch):
+        c = _mu_client(tmp_path, monkeypatch)
+        monkeypatch.setattr(appmod, "_start_user_bot", lambda s, ch: setattr(s.bot, "enabled", True) or True)
+        h = {"X-Wallet": self.PK}
+        c.post("/api/bot/start", json={"chain": "sol"}, headers=h)
+        monkeypatch.setattr(appmod.get_session(self.PK).bot, "stop", lambda: setattr(appmod.get_session(self.PK).bot, "enabled", False) or True)
+        c.post("/api/bot/stop", headers=h)
+        monkeypatch.setattr(appmod, "SESSIONS", {})
+        assert appmod.resume_user_bots() == 0

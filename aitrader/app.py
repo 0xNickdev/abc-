@@ -3155,6 +3155,12 @@ async def _lifespan(_app: FastAPI):
     # прогрев выжимки журнала в фоне: первый посетитель календаря не ждёт минуты после деплоя
     threading.Thread(target=lambda: backtest.collect(LOG_PATH), daemon=True).start()
     threading.Thread(target=_health_loop, daemon=True).start()
+    try:                                  # личные боты юзеров, включённые до рестарта
+        _n = resume_user_bots()
+        if _n:
+            log("BOT", "ABC", f"resumed {_n} user bot(s) after restart", mode=ST.mode)
+    except Exception:
+        pass
     if CALLS_ON:
         CALLS.start()                     # сканер коллов (X-список, Telegram, автопоиск)
         ARGUS.start()                     # Telegram-бот Argus (только при ARGUS_BOT_TOKEN)
@@ -4091,15 +4097,30 @@ def api_bot(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader
     return dict(**st, describe=bot.describe(),
                 mode=sess.mode, trading_locked=LIVE_TRADING_DISABLED)
 
-@app.post("/api/bot/start")
-def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
-    """启动该用户的自主执行回路。纸面优先：是否真实上链仍由 mode(LIVE) + ENABLE_LIVE_TRADING 决定。"""
-    _block_if_public()
-    ch = valid_chain(r.chain)
-    sess = get_session(x_wallet)
-    _guard_write(sess, x_auth)
+# ── Личный бот переживает перезапуск сервера (13.10): раньше каждый деплой молча выключал
+# ботов юзеров до ручного Start (у юзера бот стоял с 14:41 до утра). Состояние + настройки
+# бота — в users/<pk>/bot_state.json; при старте сервера включённые боты поднимаются сами.
+def _bot_state_path(pubkey: str) -> pathlib.Path:
+    return _user_dir(pubkey) / "bot_state.json"
+
+def _save_bot_state(sess: "UserSession", chain: str | None = None):
+    if sess.pubkey == DEFAULT_PUBKEY:
+        return                                   # house-бот — BOT_AUTOSTART
+    try:
+        d = _user_dir(sess.pubkey); d.mkdir(parents=True, exist_ok=True)
+        prev = {}
+        try:
+            prev = json.loads(_bot_state_path(sess.pubkey).read_text())
+        except Exception:
+            pass
+        _atomic_write(_bot_state_path(sess.pubkey), json.dumps(dict(
+            on=bool(sess.bot.enabled), chain=chain or prev.get("chain") or "sol", cfg=dict(sess.bot.cfg))))
+    except Exception:
+        pass
+
+def _start_user_bot(sess: "UserSession", ch: str) -> bool:
     # 把会话绑进回调：机器人跑在该用户的 过滤器/持仓/风控 上（tick 内部会拿 sess.lock）
-    started = sess.bot.start(
+    return sess.bot.start(
         ch,
         screen_fn=lambda c: screen_once(c, sess),
         buy_fn=_bot_buy_fn(sess),
@@ -4107,6 +4128,34 @@ def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader, x_auth: str | N
         positions_fn=lambda: sess.positions, risk_cfg=sess.risk_cfg, lock=sess.lock,
         halted_fn=lambda: sess.risk.halted_now(sess.risk_cfg()["daily_loss_cap_sol"], _fuses_on(sess)),
         max_positions_fn=lambda: _max_positions(sess))
+
+def resume_user_bots() -> int:
+    """После рестарта: поднять ботов юзеров, у которых он был включён. Настройки — как были."""
+    n = 0
+    for f in sorted(USERS_DIR.glob("*/bot_state.json")) if USERS_DIR.exists() else []:
+        try:
+            st = json.loads(f.read_text())
+            if not st.get("on"):
+                continue
+            sess = get_session(f.parent.name)
+            known = set(bot.CFG)
+            sess.bot.cfg.update({k: v for k, v in (st.get("cfg") or {}).items() if k in known})
+            if _start_user_bot(sess, valid_chain(st.get("chain") or "sol")):
+                n += 1
+                log("BOT", "ABC", "Autonomous loop resumed after server restart", mode=sess.mode, pubkey=sess.pubkey)
+        except Exception:
+            continue
+    return n
+
+@app.post("/api/bot/start")
+def api_bot_start(r: RunIn, x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHeader):
+    """启动该用户的自主执行回路。纸面优先：是否真实上链仍由 mode(LIVE) + ENABLE_LIVE_TRADING 决定。"""
+    _block_if_public()
+    ch = valid_chain(r.chain)
+    sess = get_session(x_wallet)
+    _guard_write(sess, x_auth)
+    started = _start_user_bot(sess, ch)
+    _save_bot_state(sess, ch)
     log("BOT", "ABC", "Autonomous loop started" if started else "Already running (duplicate start ignored)", mode=sess.mode)
     return dict(ok=True, started=started, **_bot_status(sess, x_auth))
 
@@ -4117,6 +4166,7 @@ def api_bot_stop(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthH
     sess = get_session(x_wallet)
     _guard_write(sess, x_auth)
     sess.bot.stop()
+    _save_bot_state(sess)
     log("BOT", "ABC", "Autonomous loop stopped", mode=sess.mode)
     return dict(ok=True, **_bot_status(sess, x_auth))
 
@@ -4137,6 +4187,7 @@ def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader, x_auth: 
         patch["max_new_per_tick"] = max(0, min(5, int(patch["max_new_per_tick"])))
     with sess.lock:
         sess.bot.cfg.update(patch)
+    _save_bot_state(sess)
     cfg = dict(sess.bot.cfg)
     if not _sees_internals(sess, x_auth):
         cfg = {k: v for k, v in cfg.items() if k in _PUB_BOT_CFG}
