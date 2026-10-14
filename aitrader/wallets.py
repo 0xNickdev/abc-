@@ -18,7 +18,11 @@ import os
 import pathlib
 
 HERE = pathlib.Path(__file__).resolve().parent
-WALLETS_PATH = HERE / "outputs" / "wallets.json"
+# 15.10: outputs/ в .gitignore → на VPS списка не было с переезда (tracked hits всегда 0).
+# Сначала каталог данных (ABC_DATA_DIR, том VPS), потом локальный outputs/.
+_DATA = os.getenv("ABC_DATA_DIR", "").strip()
+WALLETS_PATH = next((p for p in ([pathlib.Path(_DATA) / "wallets.json"] if _DATA else []) + [HERE / "outputs" / "wallets.json"]
+                     if p.exists()), HERE / "outputs" / "wallets.json")
 
 # Веса «доказанного эджа» кошельков считает офлайн review-loop (review.py) из
 # реализованных исходов и кладёт сюда; scoring читает их через edge_weight().
