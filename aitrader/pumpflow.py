@@ -691,6 +691,7 @@ class PumpFlow:
             unique_buyers=sum(1 for ts in mf.users.values() if ts >= lo),
             price_sol=mf.price_sol,
             mcap_sol=round(mf.price_sol * PUMP_SUPPLY, 2),
+            liq_sol=self._liq_sol(mf, now),
             curve_sol=round(mf.real_sol / 1e9, 3), complete=mf.complete,
             age_s=round(now - mf.created_ts) if mf.created_ts else None,
             creator=mf.creator,
@@ -730,7 +731,7 @@ class PumpFlow:
         snap = {k: m5.get(k) for k in ("venue", "age_s", "curve_sol", "full", "snipers", "sniper_sol", "dev_buy_sol",
                                    "dev_sell_sol", "dev_sells", "dev_rebuy_sol", "dev_rebuys", "dev_rebuy_delay_s",
                                    "dev_hold_share", "dev_last_sell_ago_s", "dev_supply_pct", "dev_supply_peak_pct",
-                                   "tracked_in", "last_trade_ago_s", "price_sol", "mcap_sol", "dump_dev_pct",
+                                   "tracked_in", "last_trade_ago_s", "price_sol", "mcap_sol", "liq_sol", "dump_dev_pct",
                                    "dump_snipers_pct", "dump_top10_pct", "top10_supply_pct", "top1_supply_pct",
                                    "crash_1m_max_pct", "dd_from_high_pct", "launch_x10s", "top25_basis_pct",
                                    "top25_profit_x", "dev_prev_tokens", "dev_prev_migrated", "dev_prev_rugs",
@@ -747,6 +748,32 @@ class PumpFlow:
         with self._lock:
             mf = self._m.get(mint)
             return self._metrics(mf, window_s, now) if mf else None
+
+    @staticmethod
+    def _liq_sol(mf: MintFlow, now: float) -> float:
+        """SOL в главном пуле (PumpSwap) или реальный SOL кривой — глубина рынка под размер входа."""
+        if mf.venue == "amm":
+            live = [v for v in mf.pool_px.values() if now - v[3] <= POOL_FRESH_S]
+            return round(max(v[1] for v in live) / 1e9, 2) if live else 0.0
+        return round(mf.real_sol / 1e9, 2)
+
+    def mid_candidates(self, min_mcap_sol: float, min_liq_sol: float, active_s: float = 300) -> list[tuple]:
+        """Рынок «второго этапа» (как HOTBOT): pump-токены после миграции на PumpSwap с капой от
+        порога и живыми сделками. → [(mint, mcap_sol, liq_sol)]. Без сети — только память потока."""
+        now = time.time()
+        out = []
+        with self._lock:
+            for mf in self._m.values():
+                if mf.venue != "amm" or not mf.mint.endswith("pump") or mf.price_sol <= 0:
+                    continue
+                if now - mf.last_ts > active_s:
+                    continue
+                mcap = mf.price_sol * PUMP_SUPPLY
+                liq = self._liq_sol(mf, now)
+                if mcap >= min_mcap_sol and liq >= min_liq_sol:
+                    out.append((mf.mint, round(mcap, 1), liq))
+        out.sort(key=lambda r: r[1])             # с меньших кап: целевой диапазон $200k+ первым,
+        return out                               # гиганты на миллиарды не съедают лимит выборки
 
     def hot(self, window_s: float = 300, n: int = 50, min_buyers: int = 5) -> list[dict]:
         """Самые денежные токены окна (по объёму покупок) — кандидаты для скана."""

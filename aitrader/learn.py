@@ -21,10 +21,22 @@ import pathlib
 import threading
 import time
 
-UP = (0.2, 0.5, 1.0, 2.0, 4.0)
-DN = (-0.2, -0.35, -0.5, -0.8)
-CHECKPOINTS = (120, 300, 900, 3600)
+UP = (0.1, 0.2, 0.3, 0.5, 1.0, 2.0, 4.0)
+DN = (-0.1, -0.15, -0.2, -0.35, -0.5, -0.8)
+CHECKPOINTS = (120, 300, 900, 1800, 3600, 7200, 14400)
 HORIZON_S = 3600
+
+# Рынок «второго этапа» (15.10, юзер: «делаем от 200к капы»; так торгует HOTBOT): pump-токены
+# после миграции на PumpSwap, капа ≥ $200k. Движения медленнее → горизонт 4 ч. Каждый кандидат
+# сверяется с DexScreener (капа/ликвидность/возраст/объём): цена потока и Dex расходятся >30% →
+# образец suspect. Ликвидность < $15k — фермы накрутки (у них ~$2k), не берём.
+MID_MIN_MCAP_USD = float(os.getenv("ABC_LEARN_MID_MCAP", "200000") or 200000)
+MID_MIN_LIQ_USD = 15000.0
+MID_HORIZON_S = 14400
+MID_EVERY_S = 60
+MID_MAX_PER_SCAN = 60
+MID_PRICE_TOL = 0.30
+MID_MAX_AGE_H = 168.0     # старше недели — уже не «второй этап», не берём
 TICK_S = 3.0
 DEDUP_S = 600           # один образец на токен за 10 мин (скан каждые 20 с)
 FLOW_TOP_EVERY_S = 60   # топ потока — кандидаты помимо GMGN (охват шире trending)
@@ -42,13 +54,17 @@ def _short_reason(r: str) -> str:
 
 
 class Recorder:
-    def __init__(self, out_dir: pathlib.Path | None = None, flow=None):
+    def __init__(self, out_dir: pathlib.Path | None = None, flow=None, dex_fn=None, sol_usd=None):
         self.out_dir = pathlib.Path(out_dir) if out_dir else None
         self._flow = flow
+        self._dex_fn = dex_fn                     # mints → {mint: info} (тесты подменяют сеть)
+        self._sol_usd = sol_usd
+        self._last_mid = 0.0
         self.lock = threading.Lock()
         self.pending: dict[str, dict] = {}      # id -> образец в разметке
         self.last_seen: dict[str, float] = {}   # mint -> ts последнего образца
-        self.stats = dict(state="off", recorded=0, labeled=0, skipped_no_flow=0, dropped=0, last_error=None)
+        self.stats = dict(state="off", recorded=0, labeled=0, skipped_no_flow=0, dropped=0, last_error=None,
+                          mid_recorded=0, mid_candidates=0, mid_rejected_dex=0, mid_price_mismatch=0, dex_errors=0)
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self._last_flow_top = 0.0
@@ -67,7 +83,8 @@ class Recorder:
         return self.out_dir / "learn"
 
     # ── запись образцов ──
-    def _add(self, mint: str, src: str, decision: dict | None, gmgn: dict | None, now: float | None = None) -> bool:
+    def _add(self, mint: str, src: str, decision: dict | None, gmgn: dict | None, now: float | None = None,
+             extra: dict | None = None) -> bool:
         now = now or time.time()
         if now - self.last_seen.get(mint, 0) < DEDUP_S:
             return False
@@ -81,7 +98,7 @@ class Recorder:
             return False
         sid = f"{mint}:{int(now)}"
         smp = dict(id=sid, mint=mint, src=src, t0=now, p0=px[0], decision=decision, gmgn=gmgn, flow=snap,
-                   hi=0.0, lo=0.0, up={}, dn={}, at={}, last_px=px[0], last_trade=px[1])
+                   hi=0.0, lo=0.0, up={}, dn={}, at={}, last_px=px[0], last_trade=px[1], **(extra or {}))
         with self.lock:
             self.pending[sid] = smp
             self.last_seen[mint] = now
@@ -115,6 +132,58 @@ class Recorder:
         except Exception as e:
             self.stats["last_error"] = f"{type(e).__name__}: {e}"[:160]
 
+    # ── рынок второго этапа (капа ≥ $200k) ──
+    def sol_usd(self) -> float:
+        if self._sol_usd:
+            return self._sol_usd()
+        import pumpcurve
+        return pumpcurve.sol_usd()
+
+    def dex(self, mints: list[str]) -> dict:
+        if self._dex_fn:
+            return self._dex_fn(mints)
+        return dex_info(mints)
+
+    def mid_scan(self, now: float | None = None) -> int:
+        now = now or time.time()
+        if now - self._last_mid < MID_EVERY_S:
+            return 0
+        self._last_mid = now
+        rate = self.sol_usd()
+        if rate <= 0:
+            return 0
+        cands = self.flow.mid_candidates(MID_MIN_MCAP_USD / rate, (MID_MIN_LIQ_USD / 2) / rate)
+        cands = [c for c in cands if now - self.last_seen.get(c[0], 0) >= DEDUP_S][:MID_MAX_PER_SCAN]
+        self.stats["mid_candidates"] += len(cands)
+        if not cands:
+            return 0
+        try:
+            info = self.dex([c[0] for c in cands])
+        except Exception as e:
+            self.stats["dex_errors"] += 1
+            self.stats["last_error"] = f"dex {type(e).__name__}: {e}"[:160]
+            return 0
+        n = 0
+        for mint, mcap_sol, liq_sol in cands:
+            d = info.get(mint)
+            why = ("no_dex" if not d else "mcap" if d["mcap"] < MID_MIN_MCAP_USD else "liq" if d["liq"] < MID_MIN_LIQ_USD
+                   else "age" if d.get("age_h") is not None and d["age_h"] > MID_MAX_AGE_H else None)
+            if why:
+                self.stats["mid_rejected_dex"] += 1
+                self.stats["mid_rej_" + why] = self.stats.get("mid_rej_" + why, 0) + 1
+                continue
+            px = self.flow.price(mint)
+            ours_usd = px[0] * rate if px else 0.0
+            ratio = ours_usd / d["price"] if d["price"] > 0 else 0.0
+            extra = dict(horizon=MID_HORIZON_S, dex=d, px_ratio=round(ratio, 3))
+            if not (1 - MID_PRICE_TOL <= ratio <= 1 / (1 - MID_PRICE_TOL)):
+                extra["suspect"] = True                 # наш поток и Dex не сходятся — не учим на этом
+                self.stats["mid_price_mismatch"] += 1
+            if self._add(mint, "mid", None, None, now, extra):
+                n += 1
+                self.stats["mid_recorded"] += 1
+        return n
+
     # ── разметка ──
     def label_tick(self, now: float | None = None) -> int:
         now = now or time.time()
@@ -137,10 +206,11 @@ class Recorder:
             for lv in DN:
                 if ret <= lv and str(lv) not in smp["dn"]:
                     smp["dn"][str(lv)] = round(age)
+            hz = smp.get("horizon", HORIZON_S)
             for cp in CHECKPOINTS:
-                if age >= cp and str(cp) not in smp["at"]:
+                if cp <= hz and age >= cp and str(cp) not in smp["at"]:
                     smp["at"][str(cp)] = round(ret, 4)
-            if age >= HORIZON_S:
+            if age >= hz:
                 done.append(smp)
         if done:
             self._write(done)
@@ -162,7 +232,7 @@ class Recorder:
                 for smp in samples:
                     out = {k: v for k, v in smp.items() if k not in ("last_px",)}
                     out["hi"], out["lo"] = round(out["hi"], 4), round(out["lo"], 4)
-                    out["dead_s"] = round(smp["t0"] + HORIZON_S - smp["last_trade"]) if smp["last_trade"] else None
+                    out["dead_s"] = round(smp["t0"] + smp.get("horizon", HORIZON_S) - smp["last_trade"]) if smp["last_trade"] else None
                     fh.write(json.dumps(out, ensure_ascii=False, separators=(",", ":")) + "\n")
         except OSError as e:
             self.stats["last_error"] = f"{type(e).__name__}: {e}"[:160]
@@ -192,7 +262,7 @@ class Recorder:
         n = 0
         with self.lock:
             for smp in d.get("pending", []):
-                if now - smp.get("t0", 0) >= HORIZON_S * 2 or smp["id"] in self.pending:
+                if now - smp.get("t0", 0) >= smp.get("horizon", HORIZON_S) * 2 or smp["id"] in self.pending:
                     continue
                 smp["gap"] = round(now - float(d.get("saved") or now))
                 self.pending[smp["id"]] = smp
@@ -204,6 +274,7 @@ class Recorder:
         k = 0
         while not self._stop.wait(TICK_S):
             try:
+                self.mid_scan()
                 self.label_tick()
                 k += 1
                 if k % 20 == 0:          # ~раз в минуту
@@ -220,6 +291,34 @@ class Recorder:
 
     def snapshot(self) -> dict:
         return dict(self.stats, pending=len(self.pending))
+
+
+def dex_info(mints: list[str]) -> dict:
+    """DexScreener пачками по 30: по каждому mint — главная пара Solana (макс. ликвидность)."""
+    import httpx
+    out: dict[str, dict] = {}
+    for i in range(0, len(mints), 30):
+        chunk = mints[i:i + 30]
+        r = httpx.get("https://api.dexscreener.com/latest/dex/tokens/" + ",".join(chunk), timeout=10.0)
+        r.raise_for_status()
+        for p in r.json().get("pairs") or []:
+            if p.get("chainId") != "solana":
+                continue
+            m = (p.get("baseToken") or {}).get("address")
+            if m not in chunk:
+                continue
+            liq = float((p.get("liquidity") or {}).get("usd") or 0)
+            if m in out and out[m]["liq"] >= liq:
+                continue
+            vol, tx, ch = p.get("volume") or {}, p.get("txns") or {}, p.get("priceChange") or {}
+            out[m] = dict(dex=p.get("dexId"), price=float(p.get("priceUsd") or 0), liq=liq,
+                          mcap=float(p.get("marketCap") or p.get("fdv") or 0),
+                          vol_h1=float(vol.get("h1") or 0), vol_h24=float(vol.get("h24") or 0),
+                          buys_h1=int((tx.get("h1") or {}).get("buys") or 0), sells_h1=int((tx.get("h1") or {}).get("sells") or 0),
+                          chg_h1=ch.get("h1"), chg_h6=ch.get("h6"), chg_h24=ch.get("h24"),
+                          age_h=round((time.time() * 1000 - float(p.get("pairCreatedAt") or 0)) / 3.6e6, 2)
+                          if p.get("pairCreatedAt") else None)
+    return out
 
 
 REC = Recorder()
