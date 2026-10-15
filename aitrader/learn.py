@@ -60,6 +60,7 @@ class Recorder:
         self._dex_fn = dex_fn                     # mints → {mint: info} (тесты подменяют сеть)
         self._sol_usd = sol_usd
         self._last_mid = 0.0
+        self._mid_skip: dict[str, float] = {}     # mint → до какого времени не предлагать (отказ Dex)
         self.lock = threading.Lock()
         self.pending: dict[str, dict] = {}      # id -> образец в разметке
         self.last_seen: dict[str, float] = {}   # mint -> ts последнего образца
@@ -153,7 +154,8 @@ class Recorder:
         if rate <= 0:
             return 0
         cands = self.flow.mid_candidates(MID_MIN_MCAP_USD / rate, (MID_MIN_LIQ_USD / 2) / rate)
-        cands = [c for c in cands if now - self.last_seen.get(c[0], 0) >= DEDUP_S][:MID_MAX_PER_SCAN]
+        cands = [c for c in cands if now - self.last_seen.get(c[0], 0) >= DEDUP_S
+                 and self._mid_skip.get(c[0], 0) <= now][:MID_MAX_PER_SCAN]
         self.stats["mid_candidates"] += len(cands)
         if not cands:
             return 0
@@ -163,6 +165,8 @@ class Recorder:
             self.stats["dex_errors"] += 1
             self.stats["last_error"] = f"dex {type(e).__name__}: {e}"[:160]
             return 0
+        if len(self._mid_skip) > 20000:
+            self._mid_skip = {m: t for m, t in self._mid_skip.items() if t > now}
         n = 0
         for mint, mcap_sol, liq_sol in cands:
             d = info.get(mint)
@@ -171,6 +175,8 @@ class Recorder:
             if why:
                 self.stats["mid_rejected_dex"] += 1
                 self.stats["mid_rej_" + why] = self.stats.get("mid_rej_" + why, 0) + 1
+                # отказ запоминаем: иначе те же старые токены каждую минуту занимают лимит выборки
+                self._mid_skip[mint] = now + (6 * 3600 if why == "age" else 1800)
                 continue
             px = self.flow.price(mint)
             ours_usd = px[0] * rate if px else 0.0

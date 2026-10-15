@@ -176,3 +176,16 @@ class TestMidMarket:
         r.mid_scan(now=10_000.0)
         assert r.stats["dex_errors"] == 1
         assert r.mid_scan(now=10_030.0) == 0 and r.stats["dex_errors"] == 1   # не чаще раза в минуту
+
+
+    def test_rejected_not_reoffered_every_minute(self, tmp_path):
+        r, f = self.mk(tmp_path, {"Old1pump": dict(self.d(), age_h=500.0), "Newpump": self.d()})
+        f.px.update(Old1pump=0.000001, Newpump=0.000001)
+        learn.MID_MAX_PER_SCAN, keep = 1, learn.MID_MAX_PER_SCAN
+        try:
+            f.mids = [("Old1pump", 1500.0, 200.0), ("Newpump", 1600.0, 200.0)]
+            assert r.mid_scan(now=10_000.0) == 0 and r.stats["mid_rej_age"] == 1     # лимит 1 — взял старый
+            assert r.mid_scan(now=10_061.0) == 1                                    # старый пропущен → новый
+            assert [v["mint"] for v in r.pending.values()] == ["Newpump"]
+        finally:
+            learn.MID_MAX_PER_SCAN = keep
