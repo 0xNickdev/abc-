@@ -84,6 +84,7 @@ class GeyserFeed:
         self.stats = dict(state="off", updates=0, reconnects=0, subscribed=0, error="", last_update_ago_s=None)
         self._last_update = 0.0
         self._flow_blocked = ""                      # тариф/нода отказали в tx-подписке → живём без потока
+        self._watch_mints: list[str] = []            # токены вне pump.fun (venues.py) — их сделки любой площадки
 
     # ── публичное ─────────────────────────────────────────────────────────
     def start(self):
@@ -112,6 +113,15 @@ class GeyserFeed:
             for m in list(self._prices):
                 if m not in want.values():
                     self._prices.pop(m, None)
+        self._q.put("resub")
+
+    def set_watch(self, mints: list[str]):
+        """Список наблюдения venues.py изменился → новый SubscribeRequest в живой стрим."""
+        want = sorted({m for m in mints if m and not m.endswith("pump")})
+        with self._lock:
+            if want == self._watch_mints:
+                return
+            self._watch_mints = want
         self._q.put("resub")
 
     def prices_usd(self, mints: list[str], max_age_s: float = FRESH_S) -> dict[str, float]:
@@ -150,6 +160,13 @@ class GeyserFeed:
             f.vote = False
             f.failed = False
             f.account_include.extend([pumpflow.PUMP_PROGRAM, pumpflow.AMM_PROGRAM])
+            with self._lock:
+                watch = list(self._watch_mints)
+            if watch:
+                w = req.transactions["watch"]
+                w.vote = False
+                w.failed = False
+                w.account_include.extend(watch)
         return req
 
     def _requests(self, q: queue.Queue):

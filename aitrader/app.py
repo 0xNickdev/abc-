@@ -3172,6 +3172,8 @@ async def _lifespan(_app: FastAPI):
     threading.Thread(target=lambda: backtest.collect(LOG_PATH), daemon=True).start()
     threading.Thread(target=_health_loop, daemon=True).start()
     learn.REC.start()                     # самообучение: вернуть неразмеченные образцы после рестарта
+    import venues
+    venues.WATCH.start()                  # Raydium/Meteora/Orca от $200k → подписка стрима по токенам
     try:                                  # личные боты юзеров, включённые до рестарта
         _n = resume_user_bots()
         if _n:
@@ -3347,6 +3349,7 @@ def api_status(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHea
                 argus=ARGUS.snapshot(),
                 learn=learn.REC.snapshot(),
                 funding=__import__("funding").FUND.snapshot(),
+                venues=__import__("venues").WATCH.snapshot(),
                 health=health_snapshot(),
                 trending_cmd=MK.get_trending_cmd(MK.chain))
 

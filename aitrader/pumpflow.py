@@ -63,6 +63,7 @@ WALLETS_CAP = 400_000
 PRO_MIN_CLOSED = 8        # «про»: ≥8 закрытых позиций, ≥55% в плюс, ≥ +2 SOL реализовано
 PRO_MIN_WINRATE = 0.55
 PRO_MIN_PNL_SOL = 2.0
+MIN_TRADE_LAMPORTS = 100_000   # меньше 0.0001 SOL — пыль/комиссии, не сделка
 POOL_FRESH_S = 600      # пул без сделок дольше — не кандидат в «главный» для цены
 GAP_S = 30              # тишина дольше — считаем разрывом покрытия (pump.fun не молчит и секунды)
 TOKEN_DECIMALS = 6      # pump.fun-токены всегда 6 знаков
@@ -280,6 +281,65 @@ def canonical_pool(mint: str) -> str:
     return c
 
 
+# программы площадок — только для метки venue у сделок из списка наблюдения (venues.py)
+VENUE_PROGRAMS = {
+    "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8": "raydium",
+    "CPMMoo8L3F4NbTegBCKVNunggL7H1ZpdTHKxQB5qKP1C": "raydium-cpmm",
+    "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VWaH5gzZHKZ5qy": "raydium-clmm",
+    "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj": "raydium-launchlab",
+    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo": "meteora-dlmm",
+    "Eo7WjKq67rjJQSZxS6z3YkapzY3eMj6Xy8X5EQVn5UaB": "meteora-damm",
+    "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG": "meteora-damm-v2",
+    "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN": "meteora-dbc",
+    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc": "orca",
+}
+
+
+def balance_trades(tx_info, watch: set) -> list[dict]:
+    """Сделки с токенами из списка наблюдения — по изменению балансов подписанта (любая площадка,
+    любой маршрут): токен ↑ и SOL(+WSOL) ↓ — покупка, наоборот — продажа. Арбитраж/круг (токен
+    не изменился) и не-SOL котировки пропускаются."""
+    meta = tx_info.meta
+    msg = tx_info.transaction.message
+    if not msg.account_keys:
+        return []
+    signer = b58(msg.account_keys[0])
+    pre: dict[tuple, int] = {}
+    post: dict[tuple, int] = {}
+    dec: dict[str, int] = {}
+    seen = set()
+    for src, dst in ((meta.pre_token_balances, pre), (meta.post_token_balances, post)):
+        for tb in src:
+            if tb.owner != signer:
+                continue
+            try:
+                amt = int(tb.ui_token_amount.amount or 0)
+            except ValueError:
+                continue
+            dst[tb.mint] = dst.get(tb.mint, 0) + amt
+            dec[tb.mint] = tb.ui_token_amount.decimals
+            seen.add(tb.mint)
+    mints = [m for m in seen if m in watch]
+    if not mints:
+        return []
+    sol = 0
+    if len(meta.pre_balances) and len(meta.post_balances):
+        sol = int(meta.post_balances[0]) - int(meta.pre_balances[0]) + int(meta.fee)
+    sol += post.get(SOL_MINT, 0) - pre.get(SOL_MINT, 0)
+    # программы площадок часто в таблицах адресов (ALT) — смотрим и загруженные адреса
+    keys = {b58(k) for k in list(msg.account_keys) + list(meta.loaded_writable_addresses)
+            + list(meta.loaded_readonly_addresses)}
+    venue = next((v for pid, v in VENUE_PROGRAMS.items() if pid in keys), "other")
+    out = []
+    for m in mints:
+        dt = post.get(m, 0) - pre.get(m, 0)
+        if dt > 0 and sol < -MIN_TRADE_LAMPORTS:
+            out.append(dict(mint=m, is_buy=True, lamports=-sol, tokens=dt, dec=dec[m], user=signer, venue=venue))
+        elif dt < 0 and sol > MIN_TRADE_LAMPORTS:
+            out.append(dict(mint=m, is_buy=False, lamports=sol, tokens=-dt, dec=dec[m], user=signer, venue=venue))
+    return out if len(out) == 1 else []          # несколько токенов за раз — маршрут/арбитраж, цену не делим
+
+
 def _b58dec(s: str) -> bytes:
     import base58
     return base58.b58decode(s)
@@ -443,6 +503,7 @@ class PumpFlow:
         self._last_ingest = 0.0
         self._creators: dict[str, list] = {}       # создатель → судьбы прошлых токенов
         self._wallets: dict[str, list] = {}        # кошелёк → сводка прибыли (про-трейдеры)
+        self._watch: set[str] = set()              # токены вне pump.fun под наблюдением (venues.py)
         self._creators_saved = time.time()
         self.stats = dict(state="off", gaps=0, tx=0, trades=0, amm_trades=0, creates=0, completes=0, rejects=0,
                           dropped=0, unmapped_pool=0, non_sol=0, verify_fail=0, lag_ms=None)
@@ -503,6 +564,14 @@ class PumpFlow:
         events, rej = iter_events(tx.transaction, self._pools)
         self.stats["tx"] += 1
         self.stats["rejects"] += rej
+        if self._watch and not events:
+            bt = balance_trades(tx.transaction, self._watch)
+            if bt:
+                tracked = self._tracked_set()
+                with self._lock:
+                    for d in bt:
+                        self._on_balance_trade(d, slot, now, tracked)
+            return
         if not events:
             return
         tracked = self._tracked_set()
@@ -521,6 +590,28 @@ class PumpFlow:
                     self.stats["completes"] += 1
             if now - self._last_gc > 30:
                 self._gc(now)
+
+    def set_watch(self, mints):
+        """Токены вне pump.fun (Raydium/Meteora/Orca…), которые разбираем по балансам (venues.py)."""
+        self._watch = {m for m in mints if m and not m.endswith("pump")}
+
+    def _on_balance_trade(self, d, slot, now, tracked):
+        if d["tokens"] <= 0:
+            return
+        mf = self._get(d["mint"], now)
+        px = (d["lamports"] / 1e9) / (d["tokens"] / 10 ** d["dec"])           # цена сделки (с комиссией)
+        if mf.price_sol > 0 and not (0.2 <= px / mf.price_sol <= 5):
+            # скачок ×5 за сделку — почти всегда кривая сделка (маршрут, рента ATA на пыли);
+            # 16.10 живая проверка: один токен ×60 мимо DexScreener → цену не двигаем
+            self.stats["venue_outliers"] = self.stats.get("venue_outliers", 0) + 1
+        else:
+            mf.price_sol = px
+        mf.venue = d["venue"]
+        mf.complete = True
+        mf.tick_price(now)
+        self._ledger(d["user"], mf.add(now, slot, d["is_buy"], d["lamports"], d["tokens"], d["user"]), d["lamports"], now)
+        self._track(mf, d["user"], d["is_buy"], d["tokens"], tracked)
+        self.stats["venue_trades"] = self.stats.get("venue_trades", 0) + 1
 
     def _get(self, mint: str, now: float) -> MintFlow:
         mf = self._m.get(mint)
@@ -841,7 +932,7 @@ class PumpFlow:
             net_flow_sol=round((buy_l - sell_l) / 1e9, 4),
             unique_buyers=sum(1 for ts in mf.users.values() if ts >= lo),
             price_sol=mf.price_sol,
-            mcap_sol=round(mf.price_sol * PUMP_SUPPLY, 2),
+            mcap_sol=round(mf.price_sol * PUMP_SUPPLY, 2) if mf.venue in ("curve", "amm") else None,
             liq_sol=self._liq_sol(mf, now),
             curve_sol=round(mf.real_sol / 1e9, 3), complete=mf.complete,
             age_s=round(now - mf.created_ts) if mf.created_ts else None,

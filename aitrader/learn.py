@@ -168,6 +168,15 @@ class Recorder:
         if rate <= 0:
             return 0
         cands = self.flow.mid_candidates(MID_MIN_MCAP_USD / rate, (MID_MIN_LIQ_USD / 2) / rate)
+        try:                                       # + Raydium/Meteora/Orca из venues с живыми сделками
+            import venues
+            have = {c[0] for c in cands}
+            for m in venues.WATCH.mints():
+                px = self.flow.price(m)
+                if m not in have and px and now - px[1] <= 300:
+                    cands.append((m, 0.0, 0.0))
+        except Exception:
+            pass
         cands = [c for c in cands if now - self.last_seen.get(c[0], 0) >= DEDUP_S
                  and self._mid_skip.get(c[0], 0) <= now][:MID_MAX_PER_SCAN]
         self.stats["mid_candidates"] += len(cands)
