@@ -517,3 +517,16 @@ def test_ledger_skips_sells_beyond_observed_holdings(flow):
     flow.ingest(tx_update([trade_ev(user=USERS[7], sol=10**9, tokens=10**12)], slot=10))
     flow.ingest(tx_update([trade_ev(user=USERS[7], is_buy=False, sol=10**9, tokens=3 * 10**12)], slot=11))
     assert USERS[7] not in flow._wallets
+
+
+def test_launch_bundle_same_slot(flow):
+    """Бандл Jito: несколько кошельков покупают в одном слоте запуска — и сколько держат сейчас."""
+    tok = 10**6 * 10**6
+    flow.ingest(tx_update([create_ev()], slot=100))
+    flow.ingest(tx_update([trade_ev(user=USERS[1], tokens=20 * tok), trade_ev(user=USERS[2], tokens=20 * tok),
+                           trade_ev(user=USERS[3], tokens=10 * tok)], slot=101))
+    flow.ingest(tx_update([trade_ev(user=USERS[4], tokens=5 * tok)], slot=103))
+    flow.ingest(tx_update([trade_ev(user=USERS[5], tokens=5 * tok)], slot=200))         # уже после окна запуска
+    flow.ingest(tx_update([trade_ev(user=USERS[2], is_buy=False, tokens=20 * tok)], slot=210))
+    m = flow.metrics(MINT)
+    assert m["launch_bundle_max"] == 3 and m["launch_bundle_wallets"] == 3 and m["launch_bundle_pct"] == 3.0

@@ -56,6 +56,7 @@ RECENT_S = 300          # сырые сделки (тонкие окна, сна
 RECENT_CAP = 3000
 USERS_CAP = 5000
 MAX_MINTS = 25000       # pump.fun ~15–30k новых токенов/сутки; живых в часе — меньше
+LAUNCH_SLOTS = 5         # окно запуска для поиска бандлов (≈2 с)
 SNIPER_SLOTS = 2        # покупка в слоте создания … +2 слота = снайпер/бандл
 QUEUE_MAX = 20000
 WALLETS_CAP = 400_000
@@ -294,7 +295,7 @@ class MintFlow:
                  "last_ts", "buckets", "recent", "users", "tracked", "dev_buy_sol", "dev_sell_sol",
                  "dev_sells", "dev_tok_in", "dev_tok_out", "dev_first_sell", "dev_last_sell", "dev_rebuy_sol",
                  "dev_rebuys", "dev_rebuy_delay", "bal", "reserve_tok", "pool_px", "cost", "candles", "ticks60", "peak_px",
-                 "create_wall", "launch_px", "launch_max10", "rpnl", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue")
+                 "create_wall", "launch_px", "launch_max10", "rpnl", "slot_buyers", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue")
 
     def __init__(self, mint: str, now: float):
         self.mint = mint
@@ -320,6 +321,7 @@ class MintFlow:
         self.pool_px: dict[str, tuple] = {}         # пул → (цена SOL, резерв SOL, резерв токенов, ts)
         self.cost: dict[str, int] = {}              # кошелёк → потраченные лампорты на текущие токены (средняя цена)
         self.rpnl: dict[str, int] = {}              # кошелёк → реализованный PnL по этому токену, лампорты
+        self.slot_buyers: dict[int, set] = {}      # слот запуска → покупатели (бандлы Jito: много кошельков в одном слоте)
         self.candles: collections.deque = collections.deque(maxlen=61)   # [t0, open, high, low, close, max_drop_60s]
         self.ticks60: collections.deque = collections.deque()             # (ts, цена) за последние 60 с
         self.peak_px = 0.0
@@ -388,6 +390,8 @@ class MintFlow:
         elif is_buy and self.create_slot and slot - self.create_slot <= SNIPER_SLOTS:
             self.snipers.add(user)
             self.sniper_sol += lamports
+        if is_buy and self.create_slot and 0 <= slot - self.create_slot <= LAUNCH_SLOTS and user != self.creator:
+            self.slot_buyers.setdefault(slot, set()).add(user)
         self.trim(now)
         return realized
 
@@ -781,6 +785,14 @@ class PumpFlow:
         pros = [u for u, v in mf.bal.items() if v > 0 and self.is_pro(u)]
         out["pro_in"] = len(pros)
         out["pro_buys_5m"] = sum(1 for r in mf.recent if r[0] >= now - 300 and r[2] and self.is_pro(r[4]))
+        out["launch_bundle_max"] = out["launch_bundle_wallets"] = out["launch_bundle_pct"] = None
+        if mf.create_slot:
+            groups = [b for b in mf.slot_buyers.values() if len(b) >= 2]
+            wallets = set().union(*groups) if groups else set()
+            supply = PUMP_SUPPLY * 10 ** TOKEN_DECIMALS
+            out["launch_bundle_max"] = max((len(b) for b in mf.slot_buyers.values()), default=0)
+            out["launch_bundle_wallets"] = len(wallets)
+            out["launch_bundle_pct"] = round(100 * sum(max(0, mf.bal.get(w, 0)) for w in wallets) / supply, 2)
         out["pool_canonical"] = out["pool_count"] = None
         if mf.venue == "amm" and mf.pool_px and mf.mint.endswith("pump"):
             live = {k: v for k, v in mf.pool_px.items() if now - v[3] <= POOL_FRESH_S} or mf.pool_px
@@ -861,6 +873,17 @@ class PumpFlow:
         mf = self._m.get(mint)
         return (mf.price_sol, mf.last_ts) if mf and mf.price_sol > 0 else None
 
+    def top_holders(self, mint: str, n: int = 15) -> tuple[list, str]:
+        """[(кошелёк, % саплая)] крупнейших держателей по нашим балансам + создатель.
+        Только при полной истории (видели создание) — иначе балансы неполные → []."""
+        with self._lock:
+            mf = self._m.get(mint)
+            if not mf or not mf.create_slot:
+                return [], (mf.creator if mf else "")
+            supply = PUMP_SUPPLY * 10 ** TOKEN_DECIMALS
+            top = heapq.nlargest(n, ((v, u) for u, v in mf.bal.items() if v > 0))
+            return [(u, round(100 * v / supply, 3)) for v, u in top], mf.creator
+
     def entry_snapshot(self, mint: str) -> dict | None:
         """Компактный ончейн-срез токена (30с/1м/5м + дев/снайперы) — признаки для входа и обучения."""
         w = {k: self.metrics(mint, sec) for k, sec in (("30s", 30), ("1m", 60), ("5m", 300))}
@@ -876,7 +899,8 @@ class PumpFlow:
                                    "top25_profit_x", "dev_prev_tokens", "dev_prev_migrated", "dev_prev_rugs",
                                    "dev_prev_best_mcap_sol", "dev_migration_rate", "holders_obs", "wash_share_5m",
                                    "top3_trader_share_5m", "lp_mc_ratio", "turnover_1h", "pool_canonical", "pool_count",
-                                   "pro_in", "pro_buys_5m")}
+                                   "pro_in", "pro_buys_5m", "launch_bundle_max", "launch_bundle_wallets",
+                                   "launch_bundle_pct")}
         for k, m in w.items():
             if m:
                 snap[k] = dict(b=m["buys"], s=m["sells"], br=m["buy_ratio"], vbr=m["vol_buy_ratio"],

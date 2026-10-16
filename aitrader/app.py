@@ -2463,6 +2463,14 @@ def screen_once(chain: str, s: UserSession | None = None) -> dict:
         if _fresh:
             _ft["fresh_wallets"], _ft["fresh_ratio"] = _fresh.get("fresh"), _fresh.get("ratio")
             _ft["fresh_checked"] = _fresh.get("checked")
+        try:                                      # инсайдеры/бандлеры: источники денег держателей (Helius, кэш)
+            import funding
+            _h, _cr = pumpflow.FLOW.top_holders(f.address)
+            if _h:
+                funding.FUND.request([w for w, _ in _h] + ([_cr] if _cr else []), 1)
+                _ft.update({k: v for k, v in funding.FUND.features(_h, _cr).items() if k != "fund_total"})
+        except Exception:
+            pass
         try:                                      # ёмкость дампа из своего потока (None = нет полной истории)
             _fm = pumpflow.FLOW.metrics(f.address, 60) or {}
             _ft.update({k: _fm.get(k) for k in ("dump_dev_pct", "dump_snipers_pct", "dump_top10_pct",
@@ -3338,6 +3346,7 @@ def api_status(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHea
                 watch=watcher.stats(),
                 argus=ARGUS.snapshot(),
                 learn=learn.REC.snapshot(),
+                funding=__import__("funding").FUND.snapshot(),
                 health=health_snapshot(),
                 trending_cmd=MK.get_trending_cmd(MK.chain))
 

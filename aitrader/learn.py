@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import pathlib
 import threading
 import time
@@ -42,6 +43,7 @@ DEDUP_S = 600           # один образец на токен за 10 мин
 FLOW_TOP_EVERY_S = 60   # топ потока — кандидаты помимо GMGN (охват шире trending)
 FLOW_TOP_N = 30
 MAX_PENDING = 20000
+FUND_SAMPLE = 0.2       # доля образцов датасета, по держателям которых спрашиваем источник денег
 SANE_MAX_X = 50.0       # ×50 за час на пуле — почти всегда смена пула/масштаба, помечаем suspect
 
 
@@ -97,6 +99,18 @@ class Recorder:
         if len(self.pending) >= MAX_PENDING:
             self.stats["dropped"] += 1
             return False
+        hold, creator = self.flow.top_holders(mint) if hasattr(self.flow, "top_holders") else ([], "")
+        if hold:
+            extra = dict(extra or {}, h=hold, creator=creator)
+            # источники денег держателей (инсайдеры/бандлеры): кандидаты бота — сразу, датасет —
+            # каждый 5-й образец (бюджет запросов Helius), кэш навсегда
+            act = (decision or {}).get("action") == "ACTION"
+            if act or random.random() < FUND_SAMPLE:
+                try:
+                    import funding
+                    funding.FUND.request([w for w, _ in hold] + ([creator] if creator else []), 1 if act else 5)
+                except Exception:
+                    pass
         sid = f"{mint}:{int(now)}"
         smp = dict(id=sid, mint=mint, src=src, t0=now, p0=px[0], decision=decision, gmgn=gmgn, flow=snap,
                    hi=0.0, lo=0.0, up={}, dn={}, at={}, last_px=px[0], last_trade=px[1], **(extra or {}))
@@ -237,6 +251,12 @@ class Recorder:
             with open(d / f"samples-{day}.jsonl", "a") as fh:
                 for smp in samples:
                     out = {k: v for k, v in smp.items() if k not in ("last_px",)}
+                    if smp.get("h"):
+                        try:
+                            import funding
+                            out["fund"] = funding.FUND.features(smp["h"], smp.get("creator"))
+                        except Exception:
+                            pass
                     out["hi"], out["lo"] = round(out["hi"], 4), round(out["lo"], 4)
                     out["dead_s"] = round(smp["t0"] + smp.get("horizon", HORIZON_S) - smp["last_trade"]) if smp["last_trade"] else None
                     fh.write(json.dumps(out, ensure_ascii=False, separators=(",", ":")) + "\n")
