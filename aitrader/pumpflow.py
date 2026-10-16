@@ -615,11 +615,14 @@ class PumpFlow:
     def creator_history(self, creator: str) -> dict:
         h = self._creators.get(creator) or []
         if not h:
-            return dict(dev_prev_tokens=0, dev_prev_migrated=0, dev_prev_rugs=0, dev_prev_best_mcap_sol=None)
+            return dict(dev_prev_tokens=0, dev_prev_migrated=0, dev_prev_rugs=0, dev_prev_best_mcap_sol=None,
+                        dev_migration_rate=None)
         # «раг» = дев вышел полностью и капа упала >80% от пика
         rugs = sum(1 for r in h if r["dev_out"] and r["peak"] > 0 and r["last"] < 0.2 * r["peak"])
-        return dict(dev_prev_tokens=len(h), dev_prev_migrated=sum(1 for r in h if r["done"]),
-                    dev_prev_rugs=rugs, dev_prev_best_mcap_sol=max(r["peak"] for r in h))
+        mig = sum(1 for r in h if r["done"])
+        return dict(dev_prev_tokens=len(h), dev_prev_migrated=mig, dev_prev_rugs=rugs,
+                    dev_prev_best_mcap_sol=max(r["peak"] for r in h),
+                    dev_migration_rate=round(mig / len(h), 3))
 
     def _creators_path(self):
         import pathlib
@@ -650,7 +653,33 @@ class PumpFlow:
         """Форма цены и мотивация держателей: обвалы за час, откат от пика, всплеск запуска,
         по какой цене вошли топ-25 (чем дешевле — тем сильнее соблазн слить)."""
         out = dict(crash_1m_max_pct=None, dd_from_high_pct=None, launch_x10s=None,
-                   top25_basis_pct=None, top25_profit_x=None)
+                   top25_basis_pct=None, top25_profit_x=None, holders_obs=None,
+                   wash_share_5m=None, top3_trader_share_5m=None, lp_mc_ratio=None, turnover_1h=None)
+        now = time.time()
+        # накрутка (как «organic volume» у Mobula): объём кошельков, что за 5 мин и купили, и
+        # продали (круги туда-обратно), и доля сделок трёх самых активных кошельков — фермы
+        rec = [r for r in mf.recent if r[0] >= now - 300]
+        if rec:
+            sides: dict[str, set] = {}
+            vol_by: dict[str, int] = {}
+            cnt_by: dict[str, int] = {}
+            for _, _, is_buy, lam, user in rec:
+                sides.setdefault(user, set()).add(is_buy)
+                vol_by[user] = vol_by.get(user, 0) + lam
+                cnt_by[user] = cnt_by.get(user, 0) + 1
+            total = sum(vol_by.values())
+            if total > 0:
+                out["wash_share_5m"] = round(sum(v for u, v in vol_by.items() if len(sides[u]) == 2) / total, 3)
+            out["top3_trader_share_5m"] = round(sum(heapq.nlargest(3, cnt_by.values())) / len(rec), 3)
+        if mf.price_sol > 0:
+            mcap = mf.price_sol * PUMP_SUPPLY
+            liq = self._liq_sol(mf, now)
+            if liq > 0:
+                out["lp_mc_ratio"] = round(2 * liq / mcap, 4)        # стоимость пула (две стороны) / капа
+            vol1h = sum(b[3] + b[4] for b in mf.buckets if b[0] + BUCKET_S > now - 3600) / 1e9
+            out["turnover_1h"] = round(vol1h / mcap, 3)
+        if mf.create_slot:
+            out["holders_obs"] = sum(1 for v in mf.bal.values() if v > 0)
         cs = list(mf.candles)
         if cs:
             out["crash_1m_max_pct"] = round(100 * max(c[5] for c in cs), 1)
@@ -735,7 +764,8 @@ class PumpFlow:
                                    "dump_snipers_pct", "dump_top10_pct", "top10_supply_pct", "top1_supply_pct",
                                    "crash_1m_max_pct", "dd_from_high_pct", "launch_x10s", "top25_basis_pct",
                                    "top25_profit_x", "dev_prev_tokens", "dev_prev_migrated", "dev_prev_rugs",
-                                   "dev_prev_best_mcap_sol")}
+                                   "dev_prev_best_mcap_sol", "dev_migration_rate", "holders_obs", "wash_share_5m",
+                                   "top3_trader_share_5m", "lp_mc_ratio", "turnover_1h")}
         for k, m in w.items():
             if m:
                 snap[k] = dict(b=m["buys"], s=m["sells"], br=m["buy_ratio"], vbr=m["vol_buy_ratio"],

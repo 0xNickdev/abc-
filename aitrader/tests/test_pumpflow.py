@@ -440,3 +440,24 @@ class TestShapeAndDeployer:
         flow._m[MINT].creator = ""
         snap = flow.entry_snapshot(MINT)
         assert snap is not None and snap["dev_prev_tokens"] is None
+
+
+class TestOrganicAndLiquidity:
+    def test_wash_share_and_top_traders(self, flow):
+        flow.ingest(tx_update([create_ev()], slot=100))
+        flow.ingest(tx_update([trade_ev(user=USERS[1], sol=10**9)], slot=101))           # круг туда-обратно
+        flow.ingest(tx_update([trade_ev(user=USERS[1], is_buy=False, sol=10**9)], slot=102))
+        flow.ingest(tx_update([trade_ev(user=USERS[2], sol=2 * 10**9)], slot=103))       # органичный покупатель
+        m = flow.metrics(MINT)
+        assert m["wash_share_5m"] == 0.5 and m["holders_obs"] == 1
+        assert m["top3_trader_share_5m"] == 1.0
+
+    def test_lp_mc_ratio_and_turnover(self, flow):
+        flow._pools[POOL] = (MINT, pf.SOL_MINT)
+        vals = [int(time.time()), 10**6, 0, 0, 0, 100_000_000 * 10**6, 80 * 10**9, 10**9] + [0] * 6
+        ev = pf.EV_AMM_BUY + struct.pack("<q13Q", *vals) + k(POOL) + k(USERS[1]) + b"\x00" * 64
+        flow.ingest(tx_update([ev]))
+        m = flow.metrics(MINT)
+        mcap = m["price_sol"] * pf.PUMP_SUPPLY
+        assert m["lp_mc_ratio"] == pytest.approx(2 * m["liq_sol"] / mcap, rel=1e-3)
+        assert m["turnover_1h"] == pytest.approx(1.0 / mcap, abs=1e-3)
