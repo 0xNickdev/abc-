@@ -3348,7 +3348,8 @@ def api_flow(window_s: int = 300, n: int = 20, x_wallet: str | None = WalletHead
     _block_if_not_admin(get_session(x_wallet), x_auth)
     window_s = max(10, min(int(window_s), pumpflow.KEEP_S))
     return dict(stats=pumpflow.FLOW.snapshot(), compare=pumpflow.COMPARE.summary(),
-                hot=pumpflow.FLOW.hot(window_s, max(1, min(int(n), 100))))
+                hot=pumpflow.FLOW.hot(window_s, max(1, min(int(n), 100))),
+                pros=pumpflow.FLOW.pro_stats(max(1, min(int(n), 100))))
 
 @app.post("/api/config")
 def api_config(cfg: ConfigIn, x_wallet: str | None = WalletHeader,

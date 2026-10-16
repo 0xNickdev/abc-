@@ -58,6 +58,10 @@ USERS_CAP = 5000
 MAX_MINTS = 25000       # pump.fun ~15–30k новых токенов/сутки; живых в часе — меньше
 SNIPER_SLOTS = 2        # покупка в слоте создания … +2 слота = снайпер/бандл
 QUEUE_MAX = 20000
+WALLETS_CAP = 400_000
+PRO_MIN_CLOSED = 8        # «про»: ≥8 закрытых позиций, ≥55% в плюс, ≥ +2 SOL реализовано
+PRO_MIN_WINRATE = 0.55
+PRO_MIN_PNL_SOL = 2.0
 POOL_FRESH_S = 600      # пул без сделок дольше — не кандидат в «главный» для цены
 GAP_S = 30              # тишина дольше — считаем разрывом покрытия (pump.fun не молчит и секунды)
 TOKEN_DECIMALS = 6      # pump.fun-токены всегда 6 знаков
@@ -254,6 +258,27 @@ def _decode(ev: bytes, amm: bool):
     return None
 
 
+_CANON: dict[str, str] = {}
+
+
+def canonical_pool(mint: str) -> str:
+    """Адрес пула PumpSwap, который pump.fun создаёт при миграции (index 0, creator = PDA
+    «pool-authority» токена). Проверено на живых данных 16.10: главный пул = канонический у
+    408 из 409 мигрировавших; исключение — торговля в чужом, вручную созданном пуле."""
+    c = _CANON.get(mint)
+    if c is None:
+        from solders.pubkey import Pubkey
+        m = Pubkey.from_string(mint)
+        auth, _ = Pubkey.find_program_address([b"pool-authority", bytes(m)], Pubkey.from_string(PUMP_PROGRAM))
+        pool, _ = Pubkey.find_program_address(
+            [b"pool", (0).to_bytes(2, "little"), bytes(auth), bytes(m), bytes(Pubkey.from_string(SOL_MINT))],
+            Pubkey.from_string(AMM_PROGRAM))
+        c = _CANON[mint] = str(pool)
+        if len(_CANON) > 100000:
+            _CANON.clear()
+    return c
+
+
 def _b58dec(s: str) -> bytes:
     import base58
     return base58.b58decode(s)
@@ -269,7 +294,7 @@ class MintFlow:
                  "last_ts", "buckets", "recent", "users", "tracked", "dev_buy_sol", "dev_sell_sol",
                  "dev_sells", "dev_tok_in", "dev_tok_out", "dev_first_sell", "dev_last_sell", "dev_rebuy_sol",
                  "dev_rebuys", "dev_rebuy_delay", "bal", "reserve_tok", "pool_px", "cost", "candles", "ticks60", "peak_px",
-                 "create_wall", "launch_px", "launch_max10", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue")
+                 "create_wall", "launch_px", "launch_max10", "rpnl", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue")
 
     def __init__(self, mint: str, now: float):
         self.mint = mint
@@ -294,6 +319,7 @@ class MintFlow:
         self.reserve_tok = 0                        # токены в резерве кривой/пула (для ёмкости дампа)
         self.pool_px: dict[str, tuple] = {}         # пул → (цена SOL, резерв SOL, резерв токенов, ts)
         self.cost: dict[str, int] = {}              # кошелёк → потраченные лампорты на текущие токены (средняя цена)
+        self.rpnl: dict[str, int] = {}              # кошелёк → реализованный PnL по этому токену, лампорты
         self.candles: collections.deque = collections.deque(maxlen=61)   # [t0, open, high, low, close, max_drop_60s]
         self.ticks60: collections.deque = collections.deque()             # (ts, цена) за последние 60 с
         self.peak_px = 0.0
@@ -308,6 +334,7 @@ class MintFlow:
         self.venue = "curve"
 
     def add(self, now: float, slot: int, is_buy: bool, lamports: int, tokens: int, user: str):
+        """Учёт сделки. Для продажи из позиции с известной себестоимостью → (pnl_лампорты, закрыта)."""
         self.last_ts = now
         t0 = int(now // BUCKET_S * BUCKET_S)
         if not self.buckets or self.buckets[-1][0] != t0:
@@ -322,12 +349,26 @@ class MintFlow:
             b[2] += 1
             b[4] += lamports
         self.recent.append((now, slot, is_buy, lamports, user))
+        realized = None
         if user in self.bal or len(self.bal) < USERS_CAP:
             held = self.bal.get(user, 0)
             if is_buy:
                 self.cost[user] = self.cost.get(user, 0) + lamports
+            elif held > 0 and tokens > held * 1.02:
+                # продаёт больше, чем мы видели купленным: токены пришли мимо потока (другой пул,
+                # Raydium, маршрут Jupiter, перевод) — себестоимость неизвестна, позицию не считаем
+                # (16.10: арбитражные боты давали фальшивые −50 SOL)
+                self.cost[user] = 0
+                self.rpnl[user] = 0
             elif held > 0:                          # продажа уменьшает себестоимость пропорционально
-                self.cost[user] = int(self.cost.get(user, 0) * max(0, held - tokens) / held)
+                c0 = self.cost.get(user, 0)
+                self.cost[user] = int(c0 * max(0, held - tokens) / held)
+                pnl = lamports - (c0 - self.cost[user])
+                self.rpnl[user] = self.rpnl.get(user, 0) + pnl
+                closed = held - tokens <= held * 0.02
+                realized = (pnl, closed, self.rpnl[user])
+                if closed:
+                    self.rpnl[user] = 0                 # следующий заход в этот токен — новая позиция
             self.bal[user] = held + (tokens if is_buy else -tokens)
         if self.creator and user == self.creator:
             if is_buy:
@@ -348,6 +389,7 @@ class MintFlow:
             self.snipers.add(user)
             self.sniper_sol += lamports
         self.trim(now)
+        return realized
 
     def tick_price(self, now: float):
         """Минутные свечи, пик, цена запуска — после каждого обновления price_sol."""
@@ -396,6 +438,7 @@ class PumpFlow:
         self._last_gc = 0.0
         self._last_ingest = 0.0
         self._creators: dict[str, list] = {}       # создатель → судьбы прошлых токенов
+        self._wallets: dict[str, list] = {}        # кошелёк → сводка прибыли (про-трейдеры)
         self._creators_saved = time.time()
         self.stats = dict(state="off", gaps=0, tx=0, trades=0, amm_trades=0, creates=0, completes=0, rejects=0,
                           dropped=0, unmapped_pool=0, non_sol=0, verify_fail=0, lag_ms=None)
@@ -416,6 +459,7 @@ class PumpFlow:
                 return
             self._started_at = time.time()
             self.load_creators()
+            self.load_wallets()
             self.stats["state"] = "on"
             self._thread = threading.Thread(target=self._loop, daemon=True, name="pumpflow")
             self._thread.start()
@@ -506,7 +550,7 @@ class PumpFlow:
         mf.reserve_tok = d["vtok"]
         mf.venue = "curve"
         mf.tick_price(now)
-        mf.add(now, slot, d["is_buy"], d["sol"], d["tokens"], d["user"])
+        self._ledger(d["user"], mf.add(now, slot, d["is_buy"], d["sol"], d["tokens"], d["user"]), d["sol"], now)
         self._track(mf, d["user"], d["is_buy"], d["tokens"], tracked)
         self.stats["trades"] += 1
 
@@ -543,9 +587,59 @@ class PumpFlow:
         mf.venue = "amm"
         mf.complete = True
         mf.tick_price(now)
-        mf.add(now, slot, is_buy, lam, tok, d["user"])
+        self._ledger(d["user"], mf.add(now, slot, is_buy, lam, tok, d["user"]), lam, now)
         self._track(mf, d["user"], is_buy, tok, tracked)
         self.stats["amm_trades"] += 1
+
+    # ── про-трейдеры: реальная прибыль каждого кошелька по нашему потоку ──
+    def _ledger(self, user: str, realized, lamports: int, now: float):
+        """Сводка по кошельку: [реализовано лампорт, закрыто позиций, из них в плюс, оборот, последняя]."""
+        if realized is None:
+            return
+        pnl, closed, pos_total = realized
+        led = self._wallets.get(user)
+        if led is None:
+            if len(self._wallets) >= WALLETS_CAP:
+                return
+            led = self._wallets[user] = [0, 0, 0, 0, 0.0]
+        led[0] += pnl
+        led[3] += lamports
+        led[4] = now
+        if closed:
+            led[1] += 1
+            led[2] += 1 if pos_total > 0 else 0
+
+    def is_pro(self, user: str) -> bool:
+        led = self._wallets.get(user)
+        return bool(led and led[1] >= PRO_MIN_CLOSED and led[2] >= PRO_MIN_WINRATE * led[1]
+                    and led[0] >= PRO_MIN_PNL_SOL * 1e9)
+
+    def pro_stats(self, n: int = 20) -> list[dict]:
+        rows = [(u, l) for u, l in self._wallets.items() if self.is_pro(u)]
+        rows.sort(key=lambda r: -r[1][0])
+        return [dict(wallet=u, pnl_sol=round(l[0] / 1e9, 2), closed=l[1], winrate=round(l[2] / l[1], 2),
+                     volume_sol=round(l[3] / 1e9, 1)) for u, l in rows[:n]]
+
+    def _wallets_path(self):
+        return self._creators_path().with_name("flow_wallets.json")
+
+    def save_wallets(self):
+        try:
+            import json
+            keep = {u: l for u, l in self._wallets.items() if l[1] >= 2}     # одиночки не нужны на диске
+            p = self._wallets_path()
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(json.dumps(keep, separators=(",", ":")))
+            tmp.replace(p)
+        except OSError:
+            pass
+
+    def load_wallets(self):
+        try:
+            import json
+            self._wallets = json.loads(self._wallets_path().read_text())
+        except (OSError, ValueError):
+            self._wallets = {}
 
     @staticmethod
     def _track(mf: MintFlow, user: str, is_buy: bool, tokens: int, tracked: dict):
@@ -560,6 +654,10 @@ class PumpFlow:
             del self._m[m]
         if now - self._creators_saved > 600:
             self.save_creators()
+            self.save_wallets()
+            if len(self._wallets) > WALLETS_CAP * 0.9:    # чистка: давно неактивные одиночки
+                cut = now - 7 * 86400
+                self._wallets = {u: l for u, l in self._wallets.items() if l[1] >= 2 or l[4] >= cut}
         if len(self._m) > MAX_MINTS:
             for m in sorted(self._m, key=lambda k: self._m[k].last_ts)[:len(self._m) - MAX_MINTS]:
                 del self._m[m]
@@ -680,6 +778,18 @@ class PumpFlow:
             out["turnover_1h"] = round(vol1h / mcap, 3)
         if mf.create_slot:
             out["holders_obs"] = sum(1 for v in mf.bal.values() if v > 0)
+        pros = [u for u, v in mf.bal.items() if v > 0 and self.is_pro(u)]
+        out["pro_in"] = len(pros)
+        out["pro_buys_5m"] = sum(1 for r in mf.recent if r[0] >= now - 300 and r[2] and self.is_pro(r[4]))
+        out["pool_canonical"] = out["pool_count"] = None
+        if mf.venue == "amm" and mf.pool_px and mf.mint.endswith("pump"):
+            live = {k: v for k, v in mf.pool_px.items() if now - v[3] <= POOL_FRESH_S} or mf.pool_px
+            main = max(live.items(), key=lambda kv: kv[1][1])[0]
+            try:
+                out["pool_canonical"] = main == canonical_pool(mf.mint)   # False = торгуют в чужом пуле
+            except Exception:
+                pass
+            out["pool_count"] = len(live)
         cs = list(mf.candles)
         if cs:
             out["crash_1m_max_pct"] = round(100 * max(c[5] for c in cs), 1)
@@ -765,7 +875,8 @@ class PumpFlow:
                                    "crash_1m_max_pct", "dd_from_high_pct", "launch_x10s", "top25_basis_pct",
                                    "top25_profit_x", "dev_prev_tokens", "dev_prev_migrated", "dev_prev_rugs",
                                    "dev_prev_best_mcap_sol", "dev_migration_rate", "holders_obs", "wash_share_5m",
-                                   "top3_trader_share_5m", "lp_mc_ratio", "turnover_1h")}
+                                   "top3_trader_share_5m", "lp_mc_ratio", "turnover_1h", "pool_canonical", "pool_count",
+                                   "pro_in", "pro_buys_5m")}
         for k, m in w.items():
             if m:
                 snap[k] = dict(b=m["buys"], s=m["sells"], br=m["buy_ratio"], vbr=m["vol_buy_ratio"],
@@ -821,6 +932,8 @@ class PumpFlow:
         s["mints"] = len(self._m)
         s["pools"] = len(self._pools)
         s["queue"] = self._q.qsize()
+        s["wallets"] = len(self._wallets)
+        s["pros"] = sum(1 for u in list(self._wallets) if self.is_pro(u))
         s["uptime_s"] = round(time.time() - self._started_at) if self._started_at else 0
         return s
 

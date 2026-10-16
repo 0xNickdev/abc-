@@ -461,3 +461,59 @@ class TestOrganicAndLiquidity:
         mcap = m["price_sol"] * pf.PUMP_SUPPLY
         assert m["lp_mc_ratio"] == pytest.approx(2 * m["liq_sol"] / mcap, rel=1e-3)
         assert m["turnover_1h"] == pytest.approx(1.0 / mcap, abs=1e-3)
+
+
+def test_canonical_pool_flag(flow):
+    canon = pf.canonical_pool(MINT)
+    for pool, sol in ((canon, 100), (POOL, 10)):
+        flow._pools[pool] = (MINT, pf.SOL_MINT)
+        vals = [int(time.time()), 10**6, 0, 0, 0, 10**15, sol * 10**9, 10**8] + [0] * 6
+        ev = pf.EV_AMM_BUY + struct.pack("<q13Q", *vals) + k(pool) + k(USERS[1]) + b"\x00" * 64
+        flow.ingest(tx_update([ev], keys_extra=[canon]))
+    m = flow.metrics(MINT)
+    assert m["pool_canonical"] is True and m["pool_count"] == 2
+    flow._m[MINT].pool_px[POOL] = (1.0, 10**12, 10**15, time.time())     # чужой пул стал главным
+    assert flow.metrics(MINT)["pool_canonical"] is False
+
+
+class TestProTraders:
+    def round_trip(self, flow, user, buy_sol, sell_sol, slot):
+        tok = 10**12
+        flow.ingest(tx_update([trade_ev(user=user, sol=buy_sol, tokens=tok)], slot=slot))
+        flow.ingest(tx_update([trade_ev(user=user, is_buy=False, sol=sell_sol, tokens=tok)], slot=slot + 1))
+
+    def test_ledger_realized_pnl_and_wins(self, flow):
+        self.round_trip(flow, USERS[3], 10**9, 3 * 10**9, 200)          # +2 SOL
+        self.round_trip(flow, USERS[3], 10**9, 5 * 10**8, 210)          # −0.5 SOL
+        led = flow._wallets[USERS[3]]
+        assert led[0] == int(1.5e9) and led[1] == 2 and led[2] == 1
+
+    def test_sell_of_tokens_bought_before_us_is_ignored(self, flow):
+        flow.ingest(tx_update([trade_ev(user=USERS[4], is_buy=False, sol=10**9, tokens=10**12)], slot=5))
+        assert USERS[4] not in flow._wallets
+
+    def test_pro_detection_and_features(self, flow, monkeypatch):
+        monkeypatch.setattr(pf, "PRO_MIN_CLOSED", 2)
+        for i in range(3):
+            self.round_trip(flow, USERS[5], 10**9, 3 * 10**9, 300 + 10 * i)
+        assert flow.is_pro(USERS[5]) and flow.pro_stats()[0]["pnl_sol"] == 6.0
+        flow.ingest(tx_update([create_ev()], slot=400))
+        flow.ingest(tx_update([trade_ev(user=USERS[5], tokens=10**12)], slot=401))
+        m = flow.metrics(MINT)
+        assert m["pro_in"] == 1 and m["pro_buys_5m"] >= 1
+
+    def test_wallets_persist(self, flow, tmp_path, monkeypatch):
+        monkeypatch.setenv("ABC_DATA_DIR", str(tmp_path))
+        for i in range(2):
+            self.round_trip(flow, USERS[6], 10**9, 2 * 10**9, 500 + 10 * i)
+        flow.save_wallets()
+        f2 = pf.PumpFlow()
+        f2.load_wallets()
+        assert f2._wallets[USERS[6]][1] == 2
+
+
+def test_ledger_skips_sells_beyond_observed_holdings(flow):
+    """16.10: арбитражник продаёт больше, чем мы видели купленным (токены мимо потока) — не в PnL."""
+    flow.ingest(tx_update([trade_ev(user=USERS[7], sol=10**9, tokens=10**12)], slot=10))
+    flow.ingest(tx_update([trade_ev(user=USERS[7], is_buy=False, sol=10**9, tokens=3 * 10**12)], slot=11))
+    assert USERS[7] not in flow._wallets
