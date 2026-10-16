@@ -2388,6 +2388,83 @@ def _trending_window_s(cmd: str) -> int:
     m = re.search(r"--interval\s+(\S+)", cmd or "")
     return _INTERVAL_S.get(m.group(1) if m else "1h", 3600)
 
+_MID_DEX: dict = {}          # mint → (ts, dex-инфо): DexScreener не чаще раза в минуту на токен
+
+def _mid_dex(mints: list[str]) -> dict:
+    now = time.time()
+    need = [m for m in mints if now - _MID_DEX.get(m, (0, None))[0] > 60]
+    if need:
+        try:
+            got = learn.dex_info(need)
+        except Exception:
+            got = {}
+        for m in need:
+            _MID_DEX[m] = (now, got.get(m))
+        if len(_MID_DEX) > 5000:
+            for k in [k for k, v in _MID_DEX.items() if now - v[0] > 600]:
+                _MID_DEX.pop(k, None)
+    return {m: _MID_DEX[m][1] for m in mints if _MID_DEX.get(m, (0, None))[1]}
+
+MID_MIN_MCAP = float(os.getenv("ABC_MID_MIN_MCAP", "200000") or 200000)
+MID_MIN_LIQ = 15000.0
+MID_MAX_AGE_H = 24.0
+
+def screen_mid(chain: str, s: UserSession | None = None) -> dict:
+    """Рынок от $200k (16.10): кандидаты из своего потока (PumpSwap + Raydium/Meteora из venues),
+    сверка DexScreener; моложе суток, ликвидность ≥ $15k, цена потока ≈ Dex, пул не чужой.
+    Без GMGN (баны) и без LLM — правила как в симуляции. Мониторинг цен/выходы — watcher."""
+    s = s or ST
+    rate = pumpcurve.sol_usd()
+    decisions = []
+    if chain != "sol" or rate <= 0:
+        return dict(decisions=[], portfolio=_portfolio(s), positions=[], mode=s.mode)
+    cands = [c[0] for c in pumpflow.FLOW.mid_candidates(MID_MIN_MCAP / rate, (MID_MIN_LIQ / 2) / rate)]
+    try:
+        import venues
+        for m in venues.WATCH.mints():
+            px = pumpflow.FLOW.price(m)
+            if px and time.time() - px[1] <= 300 and m not in cands:
+                cands.append(m)
+    except Exception:
+        pass
+    held = {p["address"] for p in s.positions}
+    cands = [m for m in cands if m not in held][:120]
+    info = _mid_dex(cands)
+    rows = []
+    for m in cands:
+        d = info.get(m)
+        if not d or d["mcap"] < MID_MIN_MCAP or d["liq"] < MID_MIN_LIQ:
+            continue
+        if d.get("age_h") is None or d["age_h"] >= MID_MAX_AGE_H:
+            continue
+        fm = pumpflow.FLOW.metrics(m, 300) or {}
+        if fm.get("pool_canonical") is False:
+            continue                                   # торгуют в чужом пуле
+        px = pumpflow.FLOW.price(m)
+        ratio = (px[0] * rate / d["price"]) if px and d["price"] > 0 else 0
+        if not 0.7 <= ratio <= 1.43:
+            continue                                   # поток и Dex не сходятся — цене не верим
+        rows.append((d.get("vol_h1") or 0, m, d, fm))
+    rows.sort(key=lambda r: -r[0])                     # активнее за час — первым
+    size = position_size()
+    for vol, m, d, fm in rows[:20]:
+        feats = dict(market="mid", mcap=d["mcap"], liquidity=d["liq"], age_h=d["age_h"], vol_h1=vol,
+                     buys_h1=d.get("buys_h1"), sells_h1=d.get("sells_h1"), chg_h1=d.get("chg_h1"),
+                     dex=d.get("dex"), buy_ratio=fm.get("buy_ratio"), unique_buyers_5m=fm.get("unique_buyers"))
+        sym = sanitize(fm.get("symbol") or m[:6])
+        decisions.append(dict(decision=dict(symbol=sym, address=m, action="ACTION", reason="mid market: young ≥$200k",
+                                            size_sol=size, priority=100, features=feats,
+                                            abc=dict(triggered=True, score=float(vol), strategy="Mid $200k+")),
+                              exec=None))
+    log("SCREEN", "MID", f"mid market: {len(cands)} in flow → {len(rows)} pass → {len(decisions)} candidates",
+        mode=s.mode, pubkey=s.pubkey)
+    positions = [dict(address=p["address"], severity=0) for p in s.positions]
+    return dict(decisions=decisions, portfolio=_portfolio(s), positions=positions, mode=s.mode)
+
+def _screen_for(sess: "UserSession"):
+    """Скан по рынку бота (cfg «market» читается на каждом тике — переключение на лету)."""
+    return lambda c: screen_mid(c, sess) if sess.bot.cfg.get("market") == "mid" else screen_once(c, sess)
+
 def screen_once(chain: str, s: UserSession | None = None) -> dict:
     s = s or ST                       # 会话（多用户：每 pubkey 自己的过滤器/持仓/风控）
     g = s.adapter_for(chain)          # 市场层共享（运营者 key），与会话无关
@@ -2765,7 +2842,7 @@ def _trade_tags(s: UserSession, by: str) -> dict:
                 risk_preset=(s.risk_prefs or {}).get("preset") or "house", by=by)
 
 def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = None,
-           lock=None, auto: bool = False) -> dict:
+           lock=None, auto: bool = False, market: str | None = None) -> dict:
     """lock — замок сессии, если вызывающий его НЕ держит (бот): сеть идёт без замка,
     под замком только запись позиции. Ручные эндпоинты держат замок сами (lock=None)."""
     s = s or ST
@@ -2777,6 +2854,8 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         raise HTTPException(409, rnote)
     g = s.adapter_for(chain)
     try:
+        if market == "mid":                      # рынок от $200k: только DexScreener — тот же
+            raise RuntimeError("mid market: DexScreener price source")   # источник, что у watcher
         info = g.token_info(address)
         sec  = g.token_security(address)         # 已归一化安全快照（建仓基线，逃生 diff 用）
     except Exception as e:
@@ -2802,6 +2881,8 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
                  top10=sec.get("top10", 0.0))
     symbol = sanitize(info.get("symbol", ""))
     try:
+        if market == "mid":
+            raise RuntimeError("mid: entry from DexScreener")
         entry_price = g.token_price(address)         # 建仓价（逃生监控算涨跌基准）
     except Exception:
         try:                                         # без цены входа стоп слепой → DexScreener
@@ -2869,7 +2950,7 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
 
     with (lock if lock is not None else contextlib.nullcontext()):
         res = _buy_commit(s, chain, address, size_sol, symbol, entry, entry_price,
-                          filled, status_msg, auto=auto)
+                          filled, status_msg, auto=auto, market=market)
         if auto:                     # позиция бота: стопы watcher'а живут и после остановки бота
             for x in s.positions:
                 if x["address"] == address and not x.get("self_custody"):
@@ -2878,7 +2959,7 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
 
 def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbol: str,
                 entry: dict, entry_price: float, filled: bool, status_msg: str,
-                auto: bool = False) -> dict:
+                auto: bool = False, market: str | None = None) -> dict:
     """Запись позиции после исполнения (под замком сессии). auto — вход бота (метка by)."""
     sim = None
     if SIM_COSTS and not (filled and s.mode == "LIVE") and entry_price > 0:
@@ -2929,7 +3010,7 @@ def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbo
                             entry_price=entry_price,
                             cur_price=(sim["mid"] if sim else entry_price),
                             sim_fixed_sol=(sim["fixed_sol"] if sim else 0.0), sim_entry=sim,
-                            opened_ts=time.time(), entry_attrib=attrib,
+                            opened_ts=time.time(), entry_attrib=attrib, market=market or "fresh",
                             entry_liq=float(attrib.get("liquidity", 0.0) or 0.0),   # базовая ликвидность для escape-диффа
                             live=bool(filled and s.mode == "LIVE"),
                             **_trade_tags(s, "bot" if auto else "manual")))
@@ -3155,7 +3236,7 @@ async def _lifespan(_app: FastAPI):
     _auto = os.getenv("BOT_AUTOSTART", "").strip().lower()
     if _auto in ("n1", "n2", "n3"):
         ST.bot.cfg["mode"] = _auto
-        ST.bot.start("sol", screen_fn=lambda c: screen_once(c, ST),
+        ST.bot.start("sol", screen_fn=_screen_for(ST),
                      buy_fn=_bot_buy_fn(ST), sell_fn=_bot_sell_fn(ST),
                      positions_fn=lambda: ST.positions, risk_cfg=CFG, lock=ST.lock,
                      halted_fn=lambda: ST.risk.halted_now(CFG["daily_loss_cap_sol"], _fuses_on(ST)),
@@ -3789,6 +3870,7 @@ def api_review_learning(a: LearnIn, x_wallet: str | None = WalletHeader,
 
 class BotConfigIn(BaseModel):
     mode: str | None = None              # n1 | n2
+    market: str | None = None            # mid (от $200k, моложе суток) | fresh (свежие pump.fun, GMGN)
     max_new_per_tick: int | None = None
     poll_s: float | None = None
     escape_severity_exit: int | None = None
@@ -4066,8 +4148,9 @@ def _bot_buy_fn(sess: UserSession):
         if mode != "n3":                           # n1/n2: не меньше минимума (фикс-издержки)
             size_sol = max(size_sol, min(CFG["bot_min_per_trade_sol"], cap))
         size_sol = round(size_sol, 4)
+        mid = sess.bot.cfg.get("market") == "mid"
         # протухшие рыночные данные (GMGN в бане/кулдауне) → не входим по старой цене/метрикам
-        age = MK.trending_age(chain)
+        age = None if mid else MK.trending_age(chain)
         if age is not None and age > BOT_MAX_DATA_AGE_S:
             msg = f"stale market data {age:.0f}s > {BOT_MAX_DATA_AGE_S:.0f}s"
             log("BUY_BLOCK", address[:8], msg, mode=sess.mode, pubkey=sess.pubkey)
@@ -4078,7 +4161,7 @@ def _bot_buy_fn(sess: UserSession):
             log("BUY_BLOCK", address[:8], rb, mode=sess.mode, pubkey=sess.pubkey)
             raise HTTPException(409, rb)
         # авто-Verify: red flag → входа нет (bot.stats считает как blocked, не error)
-        if BOT_VERIFY and chain == "sol":
+        if BOT_VERIFY and chain == "sol" and not mid:   # mid: детекторы на GMGN не дёргаем (баны)
             flag = preentry_red_flags(address)
             if flag:
                 log("BUY_BLOCK", address[:8], f"auto-verify: {flag}", mode=sess.mode,
@@ -4090,7 +4173,8 @@ def _bot_buy_fn(sess: UserSession):
             return dict(ok=True, proposed=True)
         if mode == "n3":            # сеть/подтверждение — без замка (его ждут стопы watcher'а)
             return _n3_execute(sess, "buy", chain, address, size_sol=size_sol, lock=sess.lock)
-        return do_buy(chain, address, size_sol, sess, lock=sess.lock, auto=True)
+        return do_buy(chain, address, size_sol, sess, lock=sess.lock, auto=True,
+                      **({"market": "mid"} if mid else {}))
     return fn
 
 def _bot_sell_fn(sess: UserSession):
@@ -4144,7 +4228,7 @@ def _start_user_bot(sess: "UserSession", ch: str) -> bool:
     # 把会话绑进回调：机器人跑在该用户的 过滤器/持仓/风控 上（tick 内部会拿 sess.lock）
     return sess.bot.start(
         ch,
-        screen_fn=lambda c: screen_once(c, sess),
+        screen_fn=_screen_for(sess),
         buy_fn=_bot_buy_fn(sess),
         sell_fn=_bot_sell_fn(sess),
         positions_fn=lambda: sess.positions, risk_cfg=sess.risk_cfg, lock=sess.lock,
@@ -4203,6 +4287,8 @@ def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader, x_auth: 
         raise HTTPException(400, "mode: n1 | n2 | n3")
     if "poll_s" in patch:                          # 0/минус = busy-loop по GMGN (бан IP)
         patch["poll_s"] = max(5.0, float(patch["poll_s"]))
+    if "market" in patch and patch["market"] not in ("mid", "fresh"):
+        raise HTTPException(400, "market: mid | fresh")
     if "max_dump_pct" in patch:
         patch["max_dump_pct"] = max(0.0, min(100.0, float(patch["max_dump_pct"])))
     if "max_new_per_tick" in patch:

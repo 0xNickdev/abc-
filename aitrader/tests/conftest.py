@@ -1,4 +1,8 @@
 """Общие фикстуры: тесты не ходят в сеть к внешним детекторам (тест может переопределить)."""
+import os
+
+os.environ.setdefault("ABC_BOT_MARKET", "fresh")     # старые тесты — про скан свежих pump.fun; mid — свои тесты
+
 import pytest
 
 import rugcheck

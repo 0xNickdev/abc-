@@ -43,6 +43,11 @@ CFG = {
     # если топ-10 держателей, продав разом, обвалят цену сильнее порога (%). Стоп −20% исполнялся
     # на −40…−100%: дамп — одна tx, цена перепрыгивает стоп. 0 = выкл; токены без полной истории проходят.
     "max_dump_pct": float(os.getenv("ABC_BOT_MAX_DUMP_PCT", "50") or 0),
+    # Рынок бота (16.10, юзер: «переводи»): "mid" — токены от $200k моложе суток (как HOTBOT;
+    # симуляция 15–16.10: +0.6…+3.9%/сделку против −14…−20% у свежих pump.fun), "fresh" — старый
+    # скан свежих токенов через GMGN. Выходы mid — как в симуляции: +30% / −20% / 4 ч.
+    "market": os.getenv("ABC_BOT_MARKET", "mid").strip().lower() or "mid",
+    "mid_tp": 0.30, "mid_sl": 0.20, "mid_max_hold_s": 4 * 3600,
     "max_sm_confluence": int(os.getenv("ABC_BOT_MAX_SM", "8") or 0),
 }
 
@@ -109,6 +114,16 @@ def decide_exit(pos: dict, severity, risk_cfg: dict, bot_cfg: dict | None = None
     ladder = risk_cfg.get("tp_ladder", []) or []
     taken = pos.get("tp_taken", []) or []
 
+    if pos.get("market") == "mid":                  # рынок от $200k: выходы как в симуляции
+        tp, sl = float(bc.get("mid_tp", 0.30)), float(bc.get("mid_sl", 0.20))
+        if pnl <= -sl:
+            return ExitDecision("SELL", 1.0, f"Mid stop PnL {pnl:+.0%} ≤ -{sl:.0%}")
+        if pnl >= tp:
+            return ExitDecision("SELL", 1.0, f"Mid take-profit PnL {pnl:+.0%} ≥ +{tp:.0%}")
+        held = time.time() - float(pos.get("opened_ts") or time.time())
+        if held >= float(bc.get("mid_max_hold_s", 14400)):
+            return ExitDecision("SELL", 1.0, f"Mid time exit after {held / 3600:.1f}h, PnL {pnl:+.0%}")
+        return ExitDecision("HOLD", 0.0, "")
     if pnl <= -hard_stop:
         return ExitDecision("SELL", 1.0, f"Hard stop PnL {pnl:+.0%} ≤ -{hard_stop:.0%}")
     if severity is not None and float(severity) >= bc["escape_severity_exit"]:
