@@ -86,3 +86,16 @@ def test_market_switch_validation(tmp_path, monkeypatch):
     assert c.post("/api/bot/config", json={"market": "weird"}, headers={"X-Wallet": pk}).status_code == 400
     r = c.post("/api/bot/config", json={"market": "mid"}, headers={"X-Wallet": pk})
     assert r.status_code == 200 and appmod.get_session(pk).bot.cfg["market"] == "mid"
+
+
+def test_paper_house_loss_does_not_drain_real_money_pot(tmp_path, monkeypatch):
+    """16.10: бумажные потери house-бота копились в общем недельном котле и блокировали ботов юзеров."""
+    from test_app import _mu_client
+    _mu_client(tmp_path, monkeypatch)
+    s = appmod.ST
+    monkeypatch.setattr(s, "mode", "SHADOW")
+    monkeypatch.setattr(appmod.WEEK_BUDGET, "loss", 0.0)
+    s.positions[:] = [dict(symbol="L", address="LossTok", size_sol=0.3, pnl=-0.5, entry_price=1.0,
+                           cur_price=0.5, chain="sol", entry={}, cycles=0)]
+    appmod.do_sell("LossTok", 1.0, "test", s)
+    assert appmod.WEEK_BUDGET.loss == 0.0

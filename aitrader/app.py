@@ -3046,7 +3046,7 @@ def save_risk_state():
                     and (x.mode == "LIVE" or any(p.get("live") for p in x.positions))}
         _atomic_write(OUT_DIR / "risk_state.json", json.dumps(dict(
             day=r._day, realized_loss_today=r.realized_loss_today, consec_losses=r.consec_losses,
-            halted=r.halted, week=WEEK_BUDGET._week, week_loss=WEEK_BUDGET.loss,
+            halted=r.halted, week=WEEK_BUDGET._week, week_loss=WEEK_BUDGET.loss, week_pot_v2=True,
             recent_exits=exits[-1000:], sessions=wallets_)))
     except Exception:
         pass
@@ -3085,8 +3085,9 @@ def load_risk_state():
         r.realized_loss_today = float(d.get("realized_loss_today") or 0.0)
         r.consec_losses = int(d.get("consec_losses") or 0)
         r.halted = bool(d.get("halted"))
-    if d.get("week") == WEEK_BUDGET._week:
+    if d.get("week") == WEEK_BUDGET._week and d.get("week_pot_v2"):
         WEEK_BUDGET.loss = float(d.get("week_loss") or 0.0)
+    # без метки v2 в котле лежали бумажные потери house-бота — реальных сделок не было: обнуляем
     for pk, addr, ts, pnl in d.get("recent_exits") or []:
         _RECENT_EXITS[(pk, addr)] = (float(ts), float(pnl))
     _SAVED_WALLET_RISK.update(d.get("sessions") or {})
@@ -3162,8 +3163,8 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         elif pnl < 0:
             s.risk.consec_losses += 1
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * p["size_sol"], 4)
-            if s.pubkey == DEFAULT_PUBKEY or p.get("live"):   # house-бот + подтверждённые реальные сделки
-                WEEK_BUDGET.add(abs(pnl) * p["size_sol"])
+            if p.get("live"):                         # котёл — только реальные деньги (16.10: бумажные
+                WEEK_BUDGET.add(abs(pnl) * p["size_sol"])   # потери house-бота блокировали ботов юзеров)
         else:
             s.risk.consec_losses = 0
         # Кулдаун перезахода для БОТА: без него после стопа токен всё ещё в трендинге
@@ -3182,8 +3183,8 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
     else:
         if pnl < 0:                                  # 分批离场若为亏损也按比例入账当日亏损
             s.risk.realized_loss_today = round(s.risk.realized_loss_today + abs(pnl) * sold_sol, 4)
-            if s.pubkey == DEFAULT_PUBKEY or p.get("live"):
-                WEEK_BUDGET.add(abs(pnl) * sold_sol)    # недельный котёл: house + реальные сделки
+            if p.get("live"):
+                WEEK_BUDGET.add(abs(pnl) * sold_sol)    # недельный котёл: только реальные сделки
         p["size_sol"] = round(p["size_sol"] - sold_sol, 6)
         log("SELL", p["symbol"], f"{s.mode} partial {pct}% PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac,
