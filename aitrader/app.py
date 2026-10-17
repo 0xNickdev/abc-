@@ -65,6 +65,7 @@ import learn  # самообучение: все кандидаты скана +
 import notify  # Telegram-алерты оператору (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)
 import pumpcurve  # цена pump.fun из bonding curve по RPC (fallback для свежих токенов)
 import pumpflow  # свой поток сделок pump.fun/PumpSwap из Yellowstone (замена скана GMGN)
+import rugmodel  # модель рагов рынка от $200k (models/rug_mid.pkl)
 import review  # офлайн review-loop: эдж кошельков/KOL + предложения по конфигу (обучение на своих данных)
 import rugcheck  # он-чейн риск холдеров (бандлеры/инсайдеры/danger) — белый лейбл, без бренда
 import sessionwallet  # N3: session-кошелёк с ограниченным балансом (этап 7)
@@ -2431,6 +2432,7 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
     cands = [m for m in cands if m not in held][:120]
     info = _mid_dex(cands)
     rows = []
+    rug_cut = 0
     for m in cands:
         d = info.get(m)
         if not d or d["mcap"] < MID_MIN_MCAP or d["liq"] < MID_MIN_LIQ:
@@ -2444,19 +2446,27 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
         ratio = (px[0] * rate / d["price"]) if px and d["price"] > 0 else 0
         if not 0.7 <= ratio <= 1.43:
             continue                                   # поток и Dex не сходятся — цене не верим
+        # модель рагов (17.10): отсекаем 30% самых рискованных — раги у молодых 4.6% → 0.2%
+        rug = rugmodel.score(d, pumpflow.FLOW.entry_snapshot(m) or {})
+        thr = rugmodel.threshold()
+        if rug is not None and thr is not None and rug >= thr:
+            rug_cut += 1
+            continue
+        fm = dict(fm, rug_p=rug)
         rows.append((d.get("vol_h1") or 0, m, d, fm))
     rows.sort(key=lambda r: -r[0])                     # активнее за час — первым
     size = position_size()
     for vol, m, d, fm in rows[:20]:
         feats = dict(market="mid", mcap=d["mcap"], liquidity=d["liq"], age_h=d["age_h"], vol_h1=vol,
                      buys_h1=d.get("buys_h1"), sells_h1=d.get("sells_h1"), chg_h1=d.get("chg_h1"),
-                     dex=d.get("dex"), buy_ratio=fm.get("buy_ratio"), unique_buyers_5m=fm.get("unique_buyers"))
+                     dex=d.get("dex"), buy_ratio=fm.get("buy_ratio"), unique_buyers_5m=fm.get("unique_buyers"),
+                     rug_p=fm.get("rug_p"))
         sym = sanitize(fm.get("symbol") or m[:6])
         decisions.append(dict(decision=dict(symbol=sym, address=m, action="ACTION", reason="mid market: young ≥$200k",
                                             size_sol=size, priority=100, features=feats,
                                             abc=dict(triggered=True, score=float(vol), strategy="Mid $200k+")),
                               exec=None))
-    log("SCREEN", "MID", f"mid market: {len(cands)} in flow → {len(rows)} pass → {len(decisions)} candidates",
+    log("SCREEN", "MID", f"mid market: {len(cands)} in flow → {len(rows)} pass (rug model cut {rug_cut}) → {len(decisions)} candidates",
         mode=s.mode, pubkey=s.pubkey)
     positions = [dict(address=p["address"], severity=0) for p in s.positions]
     return dict(decisions=decisions, portfolio=_portfolio(s), positions=positions, mode=s.mode)

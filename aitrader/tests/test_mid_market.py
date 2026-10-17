@@ -34,6 +34,9 @@ class FakeFlow:
     def price(self, m):
         return (self.px[m], time.time()) if m in self.px else None
 
+    def entry_snapshot(self, m):
+        return {}
+
     def metrics(self, m, w=300):
         return dict(symbol=m[:4], pool_canonical=(m != "Foreign"), buy_ratio=0.6, unique_buyers=10)
 
@@ -49,6 +52,8 @@ def mid(monkeypatch):
     monkeypatch.setattr(appmod, "_mid_dex", lambda ms: {m: dex[m] for m in ms if m in dex})
     import venues
     monkeypatch.setattr(venues.WATCH, "mints", lambda: [])
+    monkeypatch.setattr(appmod.rugmodel, "score", lambda d, f: 0.0)
+    monkeypatch.setattr(appmod.rugmodel, "threshold", lambda: 0.5)
     return appmod.ST
 
 
@@ -99,3 +104,16 @@ def test_paper_house_loss_does_not_drain_real_money_pot(tmp_path, monkeypatch):
                            cur_price=0.5, chain="sol", entry={}, cycles=0)]
     appmod.do_sell("LossTok", 1.0, "test", s)
     assert appmod.WEEK_BUDGET.loss == 0.0
+
+
+def test_rug_model_cuts_risky(mid, monkeypatch):
+    monkeypatch.setattr(mid, "positions", [])
+    monkeypatch.setattr(appmod.rugmodel, "score", lambda d, f: 0.9)
+    assert appmod.screen_mid("sol", mid)["decisions"] == []
+
+
+def test_real_rug_model_loads_and_scores():
+    import rugmodel
+    rugmodel.load()
+    p = rugmodel.score(dict(mcap=500_000, liq=50_000, age_h=5, vol_h1=10_000), {"5m": dict(b=50, s=40, uniq=30)})
+    assert p is not None and 0.0 <= p <= 1.0 and rugmodel.threshold() > 0
