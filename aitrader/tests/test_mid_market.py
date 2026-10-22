@@ -44,12 +44,12 @@ class FakeFlow:
 @pytest.fixture
 def mid(monkeypatch):
     monkeypatch.setattr(appmod.pumpcurve, "sol_usd", lambda: 100.0)
-    flow = FakeFlow({"Good": 1e-6, "Old": 1e-6, "Thin": 1e-6, "Foreign": 1e-6, "Off": 1e-6, "Small": 1e-6})
+    flow = FakeFlow({"Huge": 1e-6, "Good": 1e-6, "Old": 1e-6, "Thin": 1e-6, "Foreign": 1e-6, "Off": 1e-6, "Small": 1e-6})
     monkeypatch.setattr(appmod.pumpflow, "FLOW", flow)
-    base = dict(price=1e-4, mcap=500_000, liq=50_000, age_h=5.0, vol_h1=1000)
+    base = dict(price=1e-4, mcap=1_500_000, liq=50_000, age_h=5.0, vol_h1=1000)
     base = dict(base, sym="Good")
     dex = {"Good": base, "Old": dict(base, age_h=30), "Thin": dict(base, liq=5_000), "Foreign": base,
-           "Off": dict(base, price=1e-3), "Small": dict(base, mcap=100_000)}
+           "Off": dict(base, price=1e-3), "Small": dict(base, mcap=100_000), "Huge": dict(base, mcap=9_000_000)}
     monkeypatch.setattr(appmod, "_mid_dex", lambda ms: {m: dex[m] for m in ms if m in dex})
     import venues
     monkeypatch.setattr(venues.WATCH, "mints", lambda: [])

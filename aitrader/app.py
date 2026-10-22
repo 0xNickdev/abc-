@@ -2406,7 +2406,8 @@ def _mid_dex(mints: list[str]) -> dict:
                 _MID_DEX.pop(k, None)
     return {m: _MID_DEX[m][1] for m in mints if _MID_DEX.get(m, (0, None))[1]}
 
-MID_MIN_MCAP = float(os.getenv("ABC_MID_MIN_MCAP", "350000") or 350000)   # юзер 22.10: бот — от $350k
+MID_MIN_MCAP = float(os.getenv("ABC_MID_MIN_MCAP", "800000") or 800000)   # юзер 22.10: бот — $800k…$5M,
+MID_MAX_MCAP = float(os.getenv("ABC_MID_MAX_MCAP", "5000000") or 5000000)  # моложе суток (как HOTBOT)
 MID_MIN_LIQ = 15000.0
 MID_MAX_AGE_H = 24.0
 
@@ -2468,7 +2469,7 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
     rug_cut = 0
     for m in cands:
         d = info.get(m)
-        if not d or d["mcap"] < MID_MIN_MCAP or d["liq"] < MID_MIN_LIQ:
+        if not d or d["mcap"] < MID_MIN_MCAP or d["mcap"] > MID_MAX_MCAP or d["liq"] < MID_MIN_LIQ:
             continue
         if d.get("age_h") is None or d["age_h"] >= MID_MAX_AGE_H:
             continue
