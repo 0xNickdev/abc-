@@ -213,6 +213,29 @@ class Recorder:
                 self.stats["mid_recorded"] += 1
         return n
 
+    # ── копи-тест: зайти следом за кошельком из списка (22.10) ──
+    def copy_scan(self) -> int:
+        """Покупки кошельков из wallets.json, увиденные потоком → образец src="copy" (вход через
+        ~3 с после их сделки, разметка как у всех). Проверяем: стоит ли копировать и кого."""
+        ev = getattr(self.flow, "copy_events", None)
+        if not ev:
+            return 0
+        try:
+            import wallets
+            names = wallets.TRACKED
+        except Exception:
+            names = {}
+        n = 0
+        while ev:
+            mint, user, ts = ev.popleft()
+            if time.time() - ts > 30:
+                continue                              # устарело — честного «следом» уже нет
+            name = (names.get(user) or {}).get("name", user[:6])
+            if self._add(mint, "copy", dict(wallet=user, name=name), None, extra=dict(wallet=user, wname=name)):
+                n += 1
+                self.stats["copy_recorded"] = self.stats.get("copy_recorded", 0) + 1
+        return n
+
     # ── разметка ──
     def label_tick(self, now: float | None = None) -> int:
         now = now or time.time()
@@ -310,6 +333,7 @@ class Recorder:
         while not self._stop.wait(TICK_S):
             try:
                 self.mid_scan()
+                self.copy_scan()
                 self.label_tick()
                 k += 1
                 if k % 20 == 0:          # ~раз в минуту

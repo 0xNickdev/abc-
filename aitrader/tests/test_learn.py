@@ -189,3 +189,13 @@ class TestMidMarket:
             assert [v["mint"] for v in r.pending.values()] == ["Newpump"]
         finally:
             learn.MID_MAX_PER_SCAN = keep
+
+
+def test_copy_events_become_samples(tmp_path):
+    import collections
+    r, f = rec(tmp_path)
+    f.px["Cpump"] = 1.0
+    f.copy_events = collections.deque([("Cpump", "W1", __import__("time").time()), ("Old", "W2", 0.0)])
+    assert r.copy_scan() == 1
+    s = next(iter(r.pending.values()))
+    assert s["src"] == "copy" and s["wallet"] == "W1" and not f.copy_events

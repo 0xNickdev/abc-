@@ -504,6 +504,7 @@ class PumpFlow:
         self._creators: dict[str, list] = {}       # создатель → судьбы прошлых токенов
         self._wallets: dict[str, list] = {}        # кошелёк → сводка прибыли (про-трейдеры)
         self._watch: set[str] = set()              # токены вне pump.fun под наблюдением (venues.py)
+        self.copy_events: collections.deque = collections.deque(maxlen=5000)   # (mint, кошелёк, ts)
         self._creators_saved = time.time()
         self.stats = dict(state="off", gaps=0, tx=0, trades=0, amm_trades=0, creates=0, completes=0, rejects=0,
                           dropped=0, unmapped_pool=0, non_sol=0, verify_fail=0, lag_ms=None)
@@ -736,10 +737,11 @@ class PumpFlow:
         except (OSError, ValueError):
             self._wallets = {}
 
-    @staticmethod
-    def _track(mf: MintFlow, user: str, is_buy: bool, tokens: int, tracked: dict):
+    def _track(self, mf: MintFlow, user: str, is_buy: bool, tokens: int, tracked: dict):
         if user in tracked:
             mf.tracked[user] = mf.tracked.get(user, 0) + (tokens if is_buy else -tokens)
+            if is_buy:      # копи-тест (22.10): покупка кошелька из списка → образец «зайти следом»
+                self.copy_events.append((mf.mint, user, time.time()))
 
     def _gc(self, now: float):
         self._last_gc = now
