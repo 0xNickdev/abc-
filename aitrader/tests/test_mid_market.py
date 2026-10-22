@@ -47,6 +47,7 @@ def mid(monkeypatch):
     flow = FakeFlow({"Good": 1e-6, "Old": 1e-6, "Thin": 1e-6, "Foreign": 1e-6, "Off": 1e-6, "Small": 1e-6})
     monkeypatch.setattr(appmod.pumpflow, "FLOW", flow)
     base = dict(price=1e-4, mcap=500_000, liq=50_000, age_h=5.0, vol_h1=1000)
+    base = dict(base, sym="Good")
     dex = {"Good": base, "Old": dict(base, age_h=30), "Thin": dict(base, liq=5_000), "Foreign": base,
            "Off": dict(base, price=1e-3), "Small": dict(base, mcap=100_000)}
     monkeypatch.setattr(appmod, "_mid_dex", lambda ms: {m: dex[m] for m in ms if m in dex})
@@ -117,3 +118,12 @@ def test_real_rug_model_loads_and_scores():
     rugmodel.load()
     p = rugmodel.score(dict(mcap=500_000, liq=50_000, age_h=5, vol_h1=10_000), {"5m": dict(b=50, s=40, uniq=30)})
     assert p is not None and 0.0 <= p <= 1.0 and rugmodel.threshold() > 0
+
+
+def test_rugged_symbol_and_copycat_filters(mid, monkeypatch, tmp_path):
+    monkeypatch.setattr(mid, "positions", [])
+    monkeypatch.setattr(appmod, "OUT_DIR", tmp_path)
+    monkeypatch.setattr(appmod, "_RUG_SYMS", {"good": __import__("time").time()})
+    assert appmod.screen_mid("sol", mid)["decisions"] == []          # тикер Good уже сливался
+    appmod._RUG_SYMS.clear(); appmod._RUG_SYMS["other"] = 0.0
+    assert [d["decision"]["address"] for d in appmod.screen_mid("sol", mid)["decisions"]] == ["Good"]

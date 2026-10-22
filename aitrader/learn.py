@@ -370,7 +370,8 @@ def dex_info(mints: list[str]) -> dict:
             if m in out and out[m]["liq"] >= liq:
                 continue
             vol, tx, ch = p.get("volume") or {}, p.get("txns") or {}, p.get("priceChange") or {}
-            out[m] = dict(dex=p.get("dexId"), price=float(p.get("priceUsd") or 0), liq=liq,
+            out[m] = dict(dex=p.get("dexId"), sym=str((p.get("baseToken") or {}).get("symbol") or "")[:24],
+                          price=float(p.get("priceUsd") or 0), liq=liq,
                           mcap=float(p.get("marketCap") or p.get("fdv") or 0),
                           vol_h1=float(vol.get("h1") or 0), vol_h24=float(vol.get("h24") or 0),
                           buys_h1=int((tx.get("h1") or {}).get("buys") or 0), sells_h1=int((tx.get("h1") or {}).get("sells") or 0),

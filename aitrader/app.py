@@ -2410,6 +2410,39 @@ MID_MIN_MCAP = float(os.getenv("ABC_MID_MIN_MCAP", "350000") or 350000)   # юз
 MID_MIN_LIQ = 15000.0
 MID_MAX_AGE_H = 24.0
 
+# 22.10 разбор: 36 рагов mid (−10.5 SOL при +4.08 без них) — копии чужих тикеров (HELL ×3,
+# USDF/NODF/ECTF/Kimchi/NTDA ×2), каждый со свежего кошелька-создателя → история деплоера не ловит.
+# Тикер, который уже сливался, не покупаем RUG_SYM_DAYS дней; в одном скане из одноимённых — только
+# самый ликвидный (остальные — копии).
+RUG_SYM_DAYS = 14
+_RUG_SYMS: dict[str, float] = {}
+_RUG_SYMS_BOOT = ["usdf", "roadster", "boardcat", "ftr", "cbucks", "xto", "nodf", "ntda", "chamba", "prime", "索拉纳",
+                  "uer", "sarp", "usdr", "ectf", "glow", "mega", "naff", "moonoween", "xstok", "rhea", "hell", "iof",
+                  "soulja", "udtf", "kimchi", "ponyx", "aodf", "glitch"]
+
+def _rug_syms() -> dict:
+    if not _RUG_SYMS:
+        try:
+            _RUG_SYMS.update(json.loads((OUT_DIR / "rugged_symbols.json").read_text()))
+        except Exception:
+            now = time.time()
+            _RUG_SYMS.update({k: now for k in _RUG_SYMS_BOOT})
+    return _RUG_SYMS
+
+def _note_rugged_symbol(sym: str):
+    k = (sym or "").strip().lower()
+    if not k:
+        return
+    _rug_syms()[k] = time.time()
+    try:
+        _atomic_write(OUT_DIR / "rugged_symbols.json", json.dumps(_RUG_SYMS, ensure_ascii=False))
+    except Exception:
+        pass
+
+def _rugged_symbol(sym: str) -> bool:
+    t = _rug_syms().get((sym or "").strip().lower())
+    return bool(t) and time.time() - t < RUG_SYM_DAYS * 86400
+
 def screen_mid(chain: str, s: UserSession | None = None) -> dict:
     """Рынок от $200k (16.10): кандидаты из своего потока (PumpSwap + Raydium/Meteora из venues),
     сверка DexScreener; моложе суток, ликвидность ≥ $15k, цена потока ≈ Dex, пул не чужой.
@@ -2453,7 +2486,16 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
             rug_cut += 1
             continue
         fm = dict(fm, rug_p=rug)
+        if _rugged_symbol(d.get("sym") or fm.get("symbol")):
+            rug_cut += 1
+            continue                                   # тикер уже сливался — вероятно, конвейер копий
         rows.append((d.get("vol_h1") or 0, m, d, fm))
+    best: dict[str, float] = {}                        # одноимённые в скане: оставить самый ликвидный
+    for _, m, d, _ in rows:
+        k = (d.get("sym") or "").lower()
+        if k:
+            best[k] = max(best.get(k, 0), d["liq"])
+    rows = [r for r in rows if not (r[2].get("sym") and r[2]["liq"] < best.get(r[2]["sym"].lower(), 0))]
     rows.sort(key=lambda r: -r[0])                     # активнее за час — первым
     size = position_size()
     for vol, m, d, fm in rows[:20]:
@@ -3181,6 +3223,8 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         # и всё ещё «триггерит» → бот перекупает тот же CA каждый тик (6 входов в MERT
         # за 11 минут на одном дампе). Ручных покупок не касается.
         _RECENT_EXITS[(s.pubkey, p["address"])] = (time.time(), pnl)   # wall: переживает рестарт
+        if p.get("market") == "mid" and pnl <= -0.6:
+            _note_rugged_symbol(p.get("symbol"))            # раг → тикер в чёрный список (копии)
         if len(_RECENT_EXITS) > 2000:
             _RECENT_EXITS.pop(next(iter(_RECENT_EXITS)))
         log("SELL", p["symbol"], f"{s.mode} closed PnL {pnl:+.1%}{tag}",
