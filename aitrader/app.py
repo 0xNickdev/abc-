@@ -3263,6 +3263,7 @@ async def _lifespan(_app: FastAPI):
     # прогрев выжимки журнала в фоне: первый посетитель календаря не ждёт минуты после деплоя
     threading.Thread(target=lambda: backtest.collect(LOG_PATH), daemon=True).start()
     threading.Thread(target=_health_loop, daemon=True).start()
+    _unmonitor_once()                     # одноразовое снятие зомби-позиций оператором (файл в /data)
     learn.REC.start()                     # самообучение: вернуть неразмеченные образцы после рестарта
     import venues
     venues.WATCH.start()                  # Raydium/Meteora/Orca от $200k → подписка стрима по токенам
@@ -4245,6 +4246,29 @@ def _start_user_bot(sess: "UserSession", ch: str) -> bool:
         positions_fn=lambda: sess.positions, risk_cfg=sess.risk_cfg, lock=sess.lock,
         halted_fn=lambda: sess.risk.halted_now(sess.risk_cfg()["daily_loss_cap_sol"], _fuses_on(sess)),
         max_positions_fn=lambda: _max_positions(sess))
+
+def _unmonitor_once():
+    """OUT_DIR/unmonitor_once.json = {"pubkey": "local", "addresses": [...]}: при старте снять эти
+    позиции с учёта (без продажи и без записи в результаты), затем удалить файл. Для зомби-позиций,
+    у которых много дней нет цены (22.10: B&M 19 дней), когда оператор не может нажать Remove."""
+    f = OUT_DIR / "unmonitor_once.json"
+    if not f.exists():
+        return
+    try:
+        d = json.loads(f.read_text())
+        sess = get_session(d.get("pubkey") or DEFAULT_PUBKEY)
+        for a in d.get("addresses") or []:
+            try:
+                with sess.lock:
+                    do_unmonitor(a, sess)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        f.unlink()
+    except OSError:
+        pass
 
 def resume_user_bots() -> int:
     """После рестарта: поднять ботов юзеров, у которых он был включён. Настройки — как были."""

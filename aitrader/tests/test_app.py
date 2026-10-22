@@ -2265,3 +2265,11 @@ class TestUserBotSurvivesRestart:
         c.post("/api/bot/stop", headers=h)
         monkeypatch.setattr(appmod, "SESSIONS", {})
         assert appmod.resume_user_bots() == 0
+
+
+def test_unmonitor_once_file(tmp_path, monkeypatch):
+    c = _mu_client(tmp_path, monkeypatch)
+    appmod.ST.positions[:] = [dict(symbol="Z", address="ZombieAddr", size_sol=0.1, pnl=-0.04, chain="sol", entry={})]
+    (tmp_path / "unmonitor_once.json").write_text('{"pubkey": "local", "addresses": ["ZombieAddr"]}')
+    appmod._unmonitor_once()
+    assert appmod.ST.positions == [] and not (tmp_path / "unmonitor_once.json").exists()
