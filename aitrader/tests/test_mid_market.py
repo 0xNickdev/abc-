@@ -114,6 +114,7 @@ def mid(monkeypatch):
     monkeypatch.setattr(appmod.rugmodel, "score", lambda d, f: 0.0)
     monkeypatch.setattr(appmod.rugmodel, "threshold", lambda: 0.5)
     monkeypatch.setattr(appmod, "MID_ENTRY_DELAY_S", 0)
+    monkeypatch.setattr(appmod.agents, "provider", lambda: None)   # без реальных LLM-вызовов в тестах
     return appmod.ST
 
 

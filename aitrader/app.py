@@ -51,6 +51,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import agents  # команда агентов (бык/медведь/риск) поверх правил mid — тень или вето
 import argus  # Telegram-бот аналитики коллов (ачивки, сигналы, отчёт по контракту)
 import backtest  # 纸面/SHADOW 回测复盘（已实现 PnL/胜率/R）
 import bot  # 自主执行回路（量化机器人，纸面优先）
@@ -2559,10 +2560,6 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
         if _brand_ticker(d.get("sym") or fm.get("symbol"), fm.get("name")):
             hot_cut["brand"] = hot_cut.get("brand", 0) + 1
             continue
-        first = _MID_FIRST.setdefault(m, now)
-        if now - first < MID_ENTRY_DELAY_S:
-            hot_cut["delay"] = hot_cut.get("delay", 0) + 1
-            continue
         fund = None
         try:                                           # инсайдеры/бандлы по источнику SOL (только при полной истории)
             import funding
@@ -2578,6 +2575,21 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
             k = why.split()[0]
             hot_cut[k] = hot_cut.get(k, 0) + 1
             continue
+        # команда агентов (агенты разбирают токен, пока идёт задержка входа — к входу вердикт готов)
+        agents.TEAM.request(m, d, snap, fund, rug, ctx=dict(stage="rules_pass"))
+        first = _MID_FIRST.setdefault(m, now)
+        if now - first < MID_ENTRY_DELAY_S:
+            hot_cut["delay"] = hot_cut.get("delay", 0) + 1
+            continue
+        av = agents.TEAM.verdict(m)
+        if agents.TEAM.mode() == "veto" and agents.TEAM.enabled():
+            if av is None:
+                hot_cut["agents_wait"] = hot_cut.get("agents_wait", 0) + 1
+                continue                               # вердикта ещё нет — ждём следующий скан
+            if av["decision"] != "buy":
+                hot_cut["agents_skip"] = hot_cut.get("agents_skip", 0) + 1
+                continue
+        fm = dict(fm, agent=av)
         rows.append((d.get("vol_h1") or 0, m, d, fm))
     best: dict[str, float] = {}                        # одноимённые в скане: оставить самый ликвидный
     for _, m, d, _ in rows:
@@ -2592,6 +2604,10 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
                      buys_h1=d.get("buys_h1"), sells_h1=d.get("sells_h1"), chg_h1=d.get("chg_h1"),
                      dex=d.get("dex"), buy_ratio=fm.get("buy_ratio"), unique_buyers_5m=fm.get("unique_buyers"),
                      rug_p=fm.get("rug_p"))
+        av = fm.get("agent")
+        if av:                                         # вердикт агентов — в признаки сделки (тень → сверка с исходом)
+            feats.update(agent_decision=av["decision"], agent_conf=av["confidence"], agent_risk=av["risk"],
+                         agent_bull=av["bull"]["score"], agent_bear=av["bear"]["score"])
         sym = sanitize(fm.get("symbol") or m[:6])
         decisions.append(dict(decision=dict(symbol=sym, address=m, action="ACTION", reason="mid market: HOTBOT rules",
                                             size_sol=size, priority=100, features=feats,
@@ -3576,6 +3592,7 @@ def api_status(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHea
                 argus=ARGUS.snapshot(),
                 learn=learn.REC.snapshot(),
                 funding=__import__("funding").FUND.snapshot(),
+                agents=agents.TEAM.snapshot(),
                 venues=__import__("venues").WATCH.snapshot(),
                 health=health_snapshot(),
                 trending_cmd=MK.get_trending_cmd(MK.chain))

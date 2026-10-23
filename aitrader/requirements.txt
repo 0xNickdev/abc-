@@ -10,3 +10,4 @@ protobuf>=7.35.1
 pillow>=10.1
 scikit-learn==1.9.1
 numpy
+anthropic>=2.2  # команда агентов (agents.py) и LLM-судья на Claude
