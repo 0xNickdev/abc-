@@ -18,14 +18,14 @@ import time
 
 GECKO = "https://api.geckoterminal.com/api/v2/networks/solana"
 DEXES = ("raydium", "raydium-clmm", "raydium-launchlab", "meteora", "meteora-damm-v2", "meteora-dbc",
-         "orca", "letsbonk-fun")
+         "orca", "letsbonk-fun", "stonkfun")
 # 16.10 живая проверка: «топ по объёму 24ч» площадки — это старые крупные токены (2022–2024),
 # фильтр «≤ 7 дней» их честно отсекал → 2 токена в списке. Берём то, где живут молодые $200k+:
 # новые пулы и трендовые по всей сети (не pump) + свежие лаунчпады по объёму.
 LISTS = ([f"/new_pools?page={p}" for p in range(1, 9)]
          + [f"/trending_pools?page={p}&duration={d}" for d in ("1h", "6h", "24h") for p in (1, 2, 3)]
          + [f"/dexes/{d}/pools?page={p}&sort=h24_volume_usd_desc"
-            for d in ("raydium-launchlab", "letsbonk-fun", "meteora-dbc") for p in (1, 2)])
+            for d in ("raydium-launchlab", "letsbonk-fun", "meteora-dbc", "stonkfun") for p in (1, 2)])
 SKIP_DEX = {"pumpswap", "pump-fun"}            # pump.fun/PumpSwap видит сам поток
 PACE_S = 3.0
 REFRESH_S = 300
