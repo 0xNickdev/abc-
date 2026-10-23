@@ -2467,6 +2467,7 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
     info = _mid_dex(cands)
     rows = []
     rug_cut = 0
+    flow_warm = pumpflow.FLOW.snapshot().get("uptime_s") or 0
     for m in cands:
         d = info.get(m)
         if not d or d["mcap"] < MID_MIN_MCAP or d["mcap"] > MID_MAX_MCAP or d["liq"] < MID_MIN_LIQ:
@@ -2480,8 +2481,13 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
         ratio = (px[0] * rate / d["price"]) if px and d["price"] > 0 else 0
         if not 0.7 <= ratio <= 1.43:
             continue                                   # поток и Dex не сходятся — цене не верим
+        # 23.10: сразу после рестарта поток пуст → признаки модели пустые → раги проходили (KFC −99%,
+        # SHAVCOIN −56% в первую минуту). Без живых данных потока по токену — не входим.
+        snap = pumpflow.FLOW.entry_snapshot(m) or {}
+        if flow_warm < 600 or not ((snap.get("5m") or {}).get("b")):
+            continue
         # модель рагов (17.10): отсекаем 30% самых рискованных — раги у молодых 4.6% → 0.2%
-        rug = rugmodel.score(d, pumpflow.FLOW.entry_snapshot(m) or {})
+        rug = rugmodel.score(d, snap)
         thr = rugmodel.threshold()
         if rug is not None and thr is not None and rug >= thr:
             rug_cut += 1

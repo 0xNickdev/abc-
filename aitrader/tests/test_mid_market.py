@@ -35,7 +35,10 @@ class FakeFlow:
         return (self.px[m], time.time()) if m in self.px else None
 
     def entry_snapshot(self, m):
-        return {}
+        return {"5m": dict(b=10, s=5)}
+
+    def snapshot(self):
+        return dict(uptime_s=getattr(self, "up", 3600))
 
     def metrics(self, m, w=300):
         return dict(symbol=m[:4], pool_canonical=(m != "Foreign"), buy_ratio=0.6, unique_buyers=10)
@@ -127,3 +130,9 @@ def test_rugged_symbol_and_copycat_filters(mid, monkeypatch, tmp_path):
     assert appmod.screen_mid("sol", mid)["decisions"] == []          # тикер Good уже сливался
     appmod._RUG_SYMS.clear(); appmod._RUG_SYMS["other"] = 0.0
     assert [d["decision"]["address"] for d in appmod.screen_mid("sol", mid)["decisions"]] == ["Good"]
+
+
+def test_no_buys_right_after_restart(mid, monkeypatch):
+    monkeypatch.setattr(mid, "positions", [])
+    appmod.pumpflow.FLOW.up = 30
+    assert appmod.screen_mid("sol", mid)["decisions"] == []
