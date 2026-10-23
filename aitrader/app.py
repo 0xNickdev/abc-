@@ -2406,10 +2406,10 @@ def _mid_dex(mints: list[str]) -> dict:
                 _MID_DEX.pop(k, None)
     return {m: _MID_DEX[m][1] for m in mints if _MID_DEX.get(m, (0, None))[1]}
 
-MID_MIN_MCAP = float(os.getenv("ABC_MID_MIN_MCAP", "800000") or 800000)   # юзер 22.10: бот — $800k…$5M,
-MID_MAX_MCAP = float(os.getenv("ABC_MID_MAX_MCAP", "5000000") or 5000000)  # моложе суток (как HOTBOT)
+MID_MIN_MCAP = float(os.getenv("ABC_MID_MIN_MCAP", "500000") or 500000)   # юзер 23.10: бот — $500k…$5M,
+MID_MAX_MCAP = float(os.getenv("ABC_MID_MAX_MCAP", "5000000") or 5000000)  # моложе 3 суток
 MID_MIN_LIQ = 15000.0
-MID_MAX_AGE_H = 24.0
+MID_MAX_AGE_H = float(os.getenv("ABC_MID_MAX_AGE_H", "72") or 72)   # 23.10: 24 ч давали 0 сделок за 17 ч
 
 # 22.10 разбор: 36 рагов mid (−10.5 SOL при +4.08 без них) — копии чужих тикеров (HELL ×3,
 # USDF/NODF/ECTF/Kimchi/NTDA ×2), каждый со свежего кошелька-создателя → история деплоера не ловит.

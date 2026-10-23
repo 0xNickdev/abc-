@@ -48,7 +48,7 @@ def mid(monkeypatch):
     monkeypatch.setattr(appmod.pumpflow, "FLOW", flow)
     base = dict(price=1e-4, mcap=1_500_000, liq=50_000, age_h=5.0, vol_h1=1000)
     base = dict(base, sym="Good")
-    dex = {"Good": base, "Old": dict(base, age_h=30), "Thin": dict(base, liq=5_000), "Foreign": base,
+    dex = {"Good": base, "Old": dict(base, age_h=100), "Thin": dict(base, liq=5_000), "Foreign": base,
            "Off": dict(base, price=1e-3), "Small": dict(base, mcap=100_000), "Huge": dict(base, mcap=9_000_000)}
     monkeypatch.setattr(appmod, "_mid_dex", lambda ms: {m: dex[m] for m in ms if m in dex})
     import venues
