@@ -2444,6 +2444,61 @@ def _rugged_symbol(sym: str) -> bool:
     t = _rug_syms().get((sym or "").strip().lower())
     return bool(t) and time.time() - t < RUG_SYM_DAYS * 86400
 
+# Фильтры HOTBOT (юзер 23.10: «берём их фильтры») — жёсткие правила поверх модели рагов.
+# Признак None (нет полной истории токена / Dex не дал) → правило не применяется, а не режет всё.
+HOT = dict(chg_h1_min=5.0, chg_h1_max=500.0, buyers_h1_min=50, buy_sell_min=1.2, dd_max=50.0, crash_1m_max=30.0,
+           launch_x10s_max=3.0, dev_max=10.0, insiders_max=10.0, snipers_max=10.0, holders_min=100, dev_rugs_max=0)
+# 23.10 разбор: бренд-тикеры (YouTube −93%, ELON −92%, Robinhood −82%, McRib/McNugget −27%) — разгон и слив
+# за 5–15 мин. Короткие — точное совпадение тикера, длинные — вхождение.
+BRAND_EXACT = {"elon", "musk", "trump", "melania", "barron", "kfc", "x", "ai", "gpt", "grok", "meta", "apple", "tesla",
+               "btc", "eth", "sol", "usdt", "usdc", "doge", "pepe", "nike", "pope", "kanye", "ye", "cz", "saylor"}
+BRAND_SUB = ("youtube", "robinhood", "mcrib", "mcnugget", "mcdonald", "claude", "openai", "chatgpt", "anthropic",
+             "trump", "elon", "spacex", "nvidia", "google", "amazon", "starbucks", "netflix", "tiktok", "binance",
+             "coinbase", "blackrock", "microsoft", "disney", "walmart", "cocacola", "pepsi", "burgerking", "wendys",
+             "taylorswift", "mrbeast", "kardashian", "obama", "biden", "putin", "zelensky")
+# 23.10: входить не раньше чем через N секунд после первого появления токена в диапазоне капы —
+# брендовые раги разгоняются и сливаются за 5–15 мин
+MID_ENTRY_DELAY_S = float(os.getenv("ABC_MID_ENTRY_DELAY_S", "1800") or 0)
+_MID_FIRST: dict[str, float] = {}
+
+def _brand_ticker(sym: str | None, name: str | None = None) -> bool:
+    for raw in (sym, name):
+        k = "".join(ch for ch in (raw or "").lower() if ch.isalnum())
+        if k and (k in BRAND_EXACT or any(b in k for b in BRAND_SUB)):
+            return True
+    return False
+
+def _hotbot_rules(d: dict, snap: dict, fund: dict | None = None, uniq_h1: int | None = None) -> str | None:
+    """Причина отказа по правилам HOTBOT или None (прошёл). d — DexScreener, snap — entry_snapshot потока."""
+    h, f = HOT, fund or {}
+    def num(v):
+        try:
+            return None if v is None else float(v)
+        except (TypeError, ValueError):
+            return None
+    chg = num(d.get("chg_h1"))
+    if chg is not None and not h["chg_h1_min"] <= chg <= h["chg_h1_max"]:
+        return f"chg_h1 {chg:+.0f}%"
+    buyers = uniq_h1 if uniq_h1 is not None else d.get("buys_h1")
+    if buyers is not None and buyers < h["buyers_h1_min"]:
+        return f"buyers_h1 {buyers}"
+    b, sl = d.get("buys_h1"), d.get("sells_h1")
+    if b is not None and sl and b / sl < h["buy_sell_min"]:
+        return f"buy/sell {b / sl:.2f}"
+    checks = (("dd_from_high_pct", ">=", h["dd_max"]), ("crash_1m_max_pct", ">=", h["crash_1m_max"]),
+              ("launch_x10s", ">=", h["launch_x10s_max"]), ("dev_supply_pct", ">=", h["dev_max"]),
+              ("launch_bundle_pct", ">=", h["insiders_max"]), ("sniper_supply_pct", ">=", h["snipers_max"]),
+              ("holders_obs", "<", h["holders_min"]), ("dev_prev_rugs", ">", h["dev_rugs_max"]))
+    for k, op, lim in checks:
+        v = num(snap.get(k))
+        if v is not None and (v >= lim if op == ">=" else v < lim if op == "<" else v > lim):
+            return f"{k} {v:g}"
+    for k in ("insiders_pct", "bundle_pct"):
+        v = num(f.get(k))
+        if v is not None and v >= h["insiders_max"]:
+            return f"{k} {v:g}"
+    return None
+
 def screen_mid(chain: str, s: UserSession | None = None) -> dict:
     """Рынок от $200k (16.10): кандидаты из своего потока (PumpSwap + Raydium/Meteora из venues),
     сверка DexScreener; моложе суток, ликвидность ≥ $15k, цена потока ≈ Dex, пул не чужой.
@@ -2467,6 +2522,11 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
     info = _mid_dex(cands)
     rows = []
     rug_cut = 0
+    hot_cut: dict[str, int] = {}
+    now = time.time()
+    if len(_MID_FIRST) > 20000:
+        for k in [k for k, t in _MID_FIRST.items() if now - t > MID_MAX_AGE_H * 3600]:
+            _MID_FIRST.pop(k, None)
     flow_warm = pumpflow.FLOW.snapshot().get("uptime_s") or 0
     for m in cands:
         d = info.get(m)
@@ -2496,6 +2556,28 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
         if _rugged_symbol(d.get("sym") or fm.get("symbol")):
             rug_cut += 1
             continue                                   # тикер уже сливался — вероятно, конвейер копий
+        if _brand_ticker(d.get("sym") or fm.get("symbol"), fm.get("name")):
+            hot_cut["brand"] = hot_cut.get("brand", 0) + 1
+            continue
+        first = _MID_FIRST.setdefault(m, now)
+        if now - first < MID_ENTRY_DELAY_S:
+            hot_cut["delay"] = hot_cut.get("delay", 0) + 1
+            continue
+        fund = None
+        try:                                           # инсайдеры/бандлы по источнику SOL (только при полной истории)
+            import funding
+            hold, creator = pumpflow.FLOW.top_holders(m) if hasattr(pumpflow.FLOW, "top_holders") else ([], "")
+            if hold:
+                funding.FUND.request([w for w, _ in hold] + ([creator] if creator else []), 1)
+                fund = funding.FUND.features(hold, creator)
+        except Exception:
+            fund = None
+        h1 = pumpflow.FLOW.metrics(m, 3600) or {}
+        why = _hotbot_rules(d, snap, fund, h1.get("unique_buyers") if h1.get("full") else None)
+        if why:
+            k = why.split()[0]
+            hot_cut[k] = hot_cut.get(k, 0) + 1
+            continue
         rows.append((d.get("vol_h1") or 0, m, d, fm))
     best: dict[str, float] = {}                        # одноимённые в скане: оставить самый ликвидный
     for _, m, d, _ in rows:
@@ -2511,11 +2593,12 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
                      dex=d.get("dex"), buy_ratio=fm.get("buy_ratio"), unique_buyers_5m=fm.get("unique_buyers"),
                      rug_p=fm.get("rug_p"))
         sym = sanitize(fm.get("symbol") or m[:6])
-        decisions.append(dict(decision=dict(symbol=sym, address=m, action="ACTION", reason="mid market: young ≥$200k",
+        decisions.append(dict(decision=dict(symbol=sym, address=m, action="ACTION", reason="mid market: HOTBOT rules",
                                             size_sol=size, priority=100, features=feats,
                                             abc=dict(triggered=True, score=float(vol), strategy="Mid $200k+")),
                               exec=None))
-    log("SCREEN", "MID", f"mid market: {len(cands)} in flow → {len(rows)} pass (rug model cut {rug_cut}) → {len(decisions)} candidates",
+    hot = ", ".join(f"{k} {v}" for k, v in sorted(hot_cut.items(), key=lambda kv: -kv[1])) or "0"
+    log("SCREEN", "MID", f"mid market: {len(cands)} in flow → {len(rows)} pass (rug model cut {rug_cut}; HOTBOT cut {hot}) → {len(decisions)} candidates",
         mode=s.mode, pubkey=s.pubkey)
     positions = [dict(address=p["address"], severity=0) for p in s.positions]
     return dict(decisions=decisions, portfolio=_portfolio(s), positions=positions, mode=s.mode)

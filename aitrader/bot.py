@@ -45,9 +45,11 @@ CFG = {
     "max_dump_pct": float(os.getenv("ABC_BOT_MAX_DUMP_PCT", "50") or 0),
     # Рынок бота (16.10, юзер: «переводи»): "mid" — токены от $200k моложе суток (как HOTBOT;
     # симуляция 15–16.10: +0.6…+3.9%/сделку против −14…−20% у свежих pump.fun), "fresh" — старый
-    # скан свежих токенов через GMGN. Выходы mid — как в симуляции: +30% / −20% / 4 ч.
+    # скан свежих токенов через GMGN. Выходы mid (23.10, как HOTBOT): на +100% — продать 50% на откате
+    # 15% от пика, остаток — трейлинг-стоп; до первой фиксации — стоп −20% и выход по времени 4 ч.
     "market": os.getenv("ABC_BOT_MARKET", "mid").strip().lower() or "mid",
-    "mid_tp": 0.30, "mid_sl": 0.20, "mid_max_hold_s": 4 * 3600,
+    "mid_sl": 0.20, "mid_max_hold_s": 4 * 3600,
+    "mid_tp1": 1.00, "mid_tp1_frac": 0.50, "mid_tp1_pullback": 0.15, "mid_trail": 0.25,
     "max_sm_confluence": int(os.getenv("ABC_BOT_MAX_SM", "8") or 0),
 }
 
@@ -114,14 +116,23 @@ def decide_exit(pos: dict, severity, risk_cfg: dict, bot_cfg: dict | None = None
     ladder = risk_cfg.get("tp_ladder", []) or []
     taken = pos.get("tp_taken", []) or []
 
-    if pos.get("market") == "mid":                  # рынок от $200k: выходы как в симуляции
-        tp, sl = float(bc.get("mid_tp", 0.30)), float(bc.get("mid_sl", 0.20))
+    if pos.get("market") == "mid":                  # рынок бота: выходы HOTBOT
+        sl = float(bc.get("mid_sl", 0.20))
+        drawdown = 1.0 - (1.0 + pnl) / (1.0 + peak) if peak > -1.0 else 0.0
+        if 0 in taken:                              # половина зафиксирована — остаток на трейлинге
+            trail_m = float(bc.get("mid_trail", 0.25))
+            if drawdown >= trail_m:
+                return ExitDecision("SELL", 1.0, f"Mid trailing stop: peak {peak:+.0%}, drawdown {drawdown:.0%} ≥ {trail_m:.0%}")
+            return ExitDecision("HOLD", 0.0, "")
         if pnl <= -sl:
             return ExitDecision("SELL", 1.0, f"Mid stop PnL {pnl:+.0%} ≤ -{sl:.0%}")
-        if pnl >= tp:
-            return ExitDecision("SELL", 1.0, f"Mid take-profit PnL {pnl:+.0%} ≥ +{tp:.0%}")
+        tp1, pb = float(bc.get("mid_tp1", 1.0)), float(bc.get("mid_tp1_pullback", 0.15))
+        if peak >= tp1 and drawdown >= pb:
+            frac = float(bc.get("mid_tp1_frac", 0.5))
+            return ExitDecision("SELL", frac, f"Mid TP1: peak {peak:+.0%} ≥ +{tp1:.0%}, pullback {drawdown:.0%} — take {frac:.0%}",
+                                rung=0)
         held = time.time() - float(pos.get("opened_ts") or time.time())
-        if held >= float(bc.get("mid_max_hold_s", 14400)):
+        if held >= float(bc.get("mid_max_hold_s", 14400)) and peak < tp1:
             return ExitDecision("SELL", 1.0, f"Mid time exit after {held / 3600:.1f}h, PnL {pnl:+.0%}")
         return ExitDecision("HOLD", 0.0, "")
     if pnl <= -hard_stop:

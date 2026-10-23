@@ -775,7 +775,8 @@ class PumpFlow:
     def _dump(self, mf: MintFlow) -> dict:
         """«Ёмкость дампа»: насколько обвалится цена, если продадут дев / снайперы / топ-10
         держателей разом. Честно только при полной истории (видели создание); иначе None."""
-        keys = ("dump_dev_pct", "dump_snipers_pct", "dump_top10_pct", "top10_supply_pct", "top1_supply_pct")
+        keys = ("dump_dev_pct", "dump_snipers_pct", "dump_top10_pct", "top10_supply_pct", "top1_supply_pct",
+                "sniper_supply_pct")
         if not mf.create_slot or mf.reserve_tok <= 0:
             return dict.fromkeys(keys)
         supply = PUMP_SUPPLY * 10 ** TOKEN_DECIMALS
@@ -788,7 +789,8 @@ class PumpFlow:
                     dump_snipers_pct=round(100 * self.dump_impact(R, snip), 1),
                     dump_top10_pct=round(100 * self.dump_impact(R, top10), 1),
                     top10_supply_pct=round(100 * top10 / supply, 2),
-                    top1_supply_pct=round(100 * (top[0] if top else 0) / supply, 2))
+                    top1_supply_pct=round(100 * (top[0] if top else 0) / supply, 2),
+                    sniper_supply_pct=round(100 * snip / supply, 2))
 
     # ── история деплоеров (своя база: создатель → судьбы его прошлых токенов) ──
     def _remember_creator(self, mf: MintFlow):
@@ -988,7 +990,7 @@ class PumpFlow:
                                    "dev_hold_share", "dev_last_sell_ago_s", "dev_supply_pct", "dev_supply_peak_pct",
                                    "tracked_in", "last_trade_ago_s", "price_sol", "mcap_sol", "liq_sol", "dump_dev_pct",
                                    "dump_snipers_pct", "dump_top10_pct", "top10_supply_pct", "top1_supply_pct",
-                                   "crash_1m_max_pct", "dd_from_high_pct", "launch_x10s", "top25_basis_pct",
+                                   "sniper_supply_pct", "crash_1m_max_pct", "dd_from_high_pct", "launch_x10s", "top25_basis_pct",
                                    "top25_profit_x", "dev_prev_tokens", "dev_prev_migrated", "dev_prev_rugs",
                                    "dev_prev_best_mcap_sol", "dev_migration_rate", "holders_obs", "wash_share_5m",
                                    "top3_trader_share_5m", "lp_mc_ratio", "turnover_1h", "pool_canonical", "pool_count",
