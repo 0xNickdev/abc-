@@ -350,12 +350,15 @@ _AMM_B = _b58dec(AMM_PROGRAM)
 
 
 # ── состояние по токену ──────────────────────────────────────────────────────
+SHOCK_RECORD = 0.08     # продажа, уронившая цену ≥8% или забравшая ≥8% SOL пула, — в shocks токена
+
+
 class MintFlow:
     __slots__ = ("mint", "name", "symbol", "creator", "created_ts", "create_slot", "first_seen",
                  "last_ts", "buckets", "recent", "users", "tracked", "dev_buy_sol", "dev_sell_sol",
                  "dev_sells", "dev_tok_in", "dev_tok_out", "dev_first_sell", "dev_last_sell", "dev_rebuy_sol",
                  "dev_rebuys", "dev_rebuy_delay", "bal", "reserve_tok", "pool_px", "cost", "candles", "ticks60", "peak_px",
-                 "create_wall", "launch_px", "launch_max10", "rpnl", "slot_buyers", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue")
+                 "create_wall", "launch_px", "launch_max10", "rpnl", "slot_buyers", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue", "shocks")
 
     def __init__(self, mint: str, now: float):
         self.mint = mint
@@ -394,6 +397,7 @@ class MintFlow:
         self.real_sol = 0
         self.complete = False
         self.venue = "curve"
+        self.shocks: collections.deque = collections.deque(maxlen=8)   # (ts, падение цены, доля SOL пула) — крупные продажи
 
     def add(self, now: float, slot: int, is_buy: bool, lamports: int, tokens: int, user: str):
         """Учёт сделки. Для продажи из позиции с известной себестоимостью → (pnl_лампорты, закрыта)."""
@@ -490,6 +494,10 @@ class MintFlow:
 
 class PumpFlow:
     def __init__(self):
+        # монитор позиций (24.10): по токенам из watch каждая сделка будит on_watch(mint) — стоп
+        # проверяется по цене потока за ~секунду, а не по DexScreener с опозданием 30–60 с
+        self.watch: set[str] = set()
+        self.on_watch = None
         self._lock = threading.Lock()
         self._m: dict[str, MintFlow] = {}
         self._pools: dict[str, tuple[str, str]] = {}
@@ -630,6 +638,19 @@ class PumpFlow:
         mf.create_wall = now
         self.stats["creates"] += 1
 
+    def _after_trade(self, mf: MintFlow, old_px: float, is_buy: bool, lam: int, pool_sol: int, now: float):
+        """Крупная продажа одной транзакцией → в shocks; токен под наблюдением → будим монитор."""
+        if not is_buy and old_px > 0 and mf.price_sol > 0:
+            drop = 1 - mf.price_sol / old_px
+            share = lam / (pool_sol + lam) if pool_sol > 0 else 0.0
+            if drop >= SHOCK_RECORD or share >= SHOCK_RECORD:
+                mf.shocks.append((now, round(drop, 4), round(share, 4)))
+        if mf.mint in self.watch and self.on_watch:
+            try:
+                self.on_watch(mf.mint)
+            except Exception:
+                pass
+
     def _on_trade(self, d, keyset, slot, now, tracked):
         if _b58dec(d["mint"]) not in keyset:
             self.stats["verify_fail"] += 1
@@ -638,6 +659,7 @@ class PumpFlow:
             self.stats["non_sol"] += 1              # кривая с не-SOL котировкой (vsol=0) — не наш рынок
             return
         mf = self._get(d["mint"], now)
+        old_px = mf.price_sol
         if not mf.creator and d.get("creator"):
             mf.creator = d["creator"]
         if d["vtok"] > 0:
@@ -649,6 +671,7 @@ class PumpFlow:
         self._ledger(d["user"], mf.add(now, slot, d["is_buy"], d["sol"], d["tokens"], d["user"]), d["sol"], now)
         self._track(mf, d["user"], d["is_buy"], d["tokens"], tracked)
         self.stats["trades"] += 1
+        self._after_trade(mf, old_px, d["is_buy"], d["sol"], d["real_sol"], now)
 
     def _on_amm(self, d, slot, now, tracked):
         pair = self._pools.get(d["pool"])
@@ -665,6 +688,7 @@ class PumpFlow:
         if lam <= 0:
             return
         mf = self._get(mint, now)
+        old_px = mf.price_sol
         dec = (d.get("decs") or {}).get(mint)
         if dec is not None:
             self._dec[mint] = dec
@@ -686,6 +710,7 @@ class PumpFlow:
         self._ledger(d["user"], mf.add(now, slot, is_buy, lam, tok, d["user"]), lam, now)
         self._track(mf, d["user"], is_buy, tok, tracked)
         self.stats["amm_trades"] += 1
+        self._after_trade(mf, old_px, is_buy, lam, r_sol, now)
 
     # ── про-трейдеры: реальная прибыль каждого кошелька по нашему потоку ──
     def _ledger(self, user: str, realized, lamports: int, now: float):
@@ -967,6 +992,33 @@ class PumpFlow:
         """(цена в SOL, время последней сделки) — дёшево, для разметки исходов."""
         mf = self._m.get(mint)
         return (mf.price_sol, mf.last_ts) if mf and mf.price_sol > 0 else None
+
+    def shock_since(self, mint: str, since_ts: float) -> tuple | None:
+        """Самая сильная крупная продажа после since_ts: (ts, падение цены, доля SOL пула) или None."""
+        with self._lock:
+            mf = self._m.get(mint)
+            rows = [r for r in mf.shocks if r[0] >= since_ts] if mf else []
+        return max(rows, key=lambda r: (r[1], r[2])) if rows else None
+
+    def dead_stats(self, mint: str, window_s: float = 1800) -> dict | None:
+        """«Мёртвый» токен: оборот за окно / капа и размах цены по минутным свечам. None —
+        окно видели не целиком (рестарт потока) или нет цены."""
+        now = time.time()
+        with self._lock:
+            mf = self._m.get(mint)
+            if not mf or mf.price_sol <= 0:
+                return None
+            if self._started_at and now - self._started_at < window_s:
+                return None
+            lo = now - window_s
+            vol = sum(b[3] + b[4] for b in mf.buckets if b[0] + BUCKET_S > lo) / 1e9
+            cs = [c for c in mf.candles if c[0] >= lo]
+            mcap = mf.price_sol * PUMP_SUPPLY
+        if not cs:                                   # ни одной сделки за окно — точно мёртвый
+            return dict(turnover=0.0, range=0.0, trades_window=0)
+        hi, low = max(c[2] for c in cs), min(c[3] for c in cs)
+        return dict(turnover=round(vol / mcap, 5) if mcap > 0 else None,
+                    range=round(hi / low - 1, 4) if low > 0 else None, trades_window=len(cs))
 
     def top_holders(self, mint: str, n: int = 15) -> tuple[list, str]:
         """[(кошелёк, % саплая)] крупнейших держателей по нашим балансам + создатель.

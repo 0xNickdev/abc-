@@ -28,6 +28,7 @@ import bot as botmod
 import dexadapter
 import geyser
 import pumpcurve
+import pumpflow
 import wallets
 
 # Smart-Exit Mirror: выходим, когда сливают смарт-кошельки, ради которых входили.
@@ -84,10 +85,15 @@ class PositionWatcher:
     # ── lifecycle ──────────────────────────────────────────────────────────
     def start(self):
         geyser.FEED._on_update = lambda mint: self._kick.set()   # событие кривой → цена сейчас
+        pumpflow.FLOW.on_watch = self._flow_kick                 # сделка по нашей позиции в потоке → проверка сейчас
         geyser.FEED.start()
         threading.Thread(target=self._loop, daemon=True).start()
         if WS_ENABLED and ws_url():
             threading.Thread(target=self._ws_loop, daemon=True).start()
+
+    def _flow_kick(self, mint: str):
+        self.stats["flow_kicks"] = self.stats.get("flow_kicks", 0) + 1
+        self._kick.set()
 
     def stop(self):
         self._stop.set()
@@ -131,13 +137,18 @@ class PositionWatcher:
         if not pairs:
             return
         mints = sorted({p["address"] for _, p in pairs})
+        pumpflow.FLOW.watch = set(mints)
+        # 0) Свой поток (24.10): цена главного пула по каждой сделке — без задержки DexScreener.
+        #    PnL считаем относительно цены потока при входе (entry_flow_sol), источники не смешиваем.
+        fpx = {m: v[0] for m in mints if (v := pumpflow.FLOW.price(m)) and v[0] > 0}
+        anchored = {m for m in fpx if all(p.get("entry_flow_sol") for _, p in pairs if p["address"] == m)}
         # 1) Geyser (Shyft gRPC): токены на bonding curve — цена из резервов, обновление за
         #    десятки мс, без RPC-кредитов Helius. Авторитетный источник для кривой.
         geyser.FEED.set_mints(mints)
         prices = {m: v for m, v in geyser.FEED.prices_usd(mints).items() if m not in self._curve_bad}
         src = {m: "geyser" for m in prices}
         # 2) DexScreener — для мигрировавших (AMM) и всего, чего нет в Geyser
-        rest = [m for m in mints if m not in prices]
+        rest = [m for m in mints if m not in prices and m not in anchored]
         if rest:
             try:
                 dx = dexadapter.spot_prices(rest)
@@ -162,7 +173,7 @@ class PositionWatcher:
             except Exception:
                 pass
         self._sanity_check_curve(pairs, prices, src)
-        if not prices:
+        if not prices and not fpx:
             return                                  # оба источника легли — ждём следующего круга
         self.stats["polls"] += 1
         fetched_at = time.monotonic()
@@ -170,6 +181,20 @@ class PositionWatcher:
         for sess, p in pairs:
             px = float(prices.get(p["address"]) or 0.0)
             ep = float(p.get("entry_price", 0.0) or 0.0)
+            fp = fpx.get(p["address"])
+            if fp and ep > 0 and src.get(p["address"]) != "geyser":
+                ef = float(p.get("entry_flow_sol") or 0)
+                if not ef:
+                    # якорь: у новой позиции — текущая цена потока (вход только что), у старой —
+                    # подгоняем под текущий PnL по DexScreener, чтобы не обнулить его
+                    young = p.get("opened_ts") and time.time() - float(p["opened_ts"]) < REBASE_WINDOW_S
+                    if young or px <= 0:
+                        ef = fp
+                    else:
+                        ef = fp / (px / ep)
+                    p["entry_flow_sol"] = ef
+                px = ep * fp / ef
+                src[p["address"]] = "flow"
             if px <= 0 or ep <= 0:
                 continue
             with sess.lock:
@@ -218,6 +243,9 @@ class PositionWatcher:
                 if not auto:
                     continue
                 p.setdefault("tp_taken", [])
+                if p.get("market") == "mid":         # признаки выхода по потоку: крупный слив, мёртвый токен
+                    p["flow_shock"] = pumpflow.FLOW.shock_since(p["address"], float(p.get("opened_ts") or 0))
+                    p["flow_dead"] = pumpflow.FLOW.dead_stats(p["address"])
                 ed = botmod.decide_exit(p, None, rc, sess.bot.cfg)
                 if ed.action != "SELL":
                     continue

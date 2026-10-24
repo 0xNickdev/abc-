@@ -50,6 +50,14 @@ CFG = {
     "market": os.getenv("ABC_BOT_MARKET", "mid").strip().lower() or "mid",
     "mid_sl": 0.20, "mid_max_hold_s": 4 * 3600,
     "mid_tp1": 1.00, "mid_tp1_frac": 0.50, "mid_tp1_pullback": 0.15, "mid_trail": 0.25,
+    # 24.10 (стопы −47/−66% на рагах): выход сразу после крупной продажи одной транзакцией
+    # (цена −15% или ушло ≥25% SOL пула) и из «мёртвого» токена — за 30 мин оборот <0.5% капы и
+    # размах цены <4% (оба рага стояли так перед сливом). Признаки пишет монитор по нашему потоку.
+    "mid_shock_drop": float(os.getenv("ABC_MID_SHOCK_DROP", "0.15") or 0),
+    "mid_shock_pool": float(os.getenv("ABC_MID_SHOCK_POOL", "0.25") or 0),
+    "mid_dead_turnover": float(os.getenv("ABC_MID_DEAD_TURNOVER", "0.005") or 0),
+    "mid_dead_range": float(os.getenv("ABC_MID_DEAD_RANGE", "0.04") or 0),
+    "mid_dead_hold_s": 1800,
     "max_sm_confluence": int(os.getenv("ABC_BOT_MAX_SM", "8") or 0),
 }
 
@@ -118,6 +126,19 @@ def decide_exit(pos: dict, severity, risk_cfg: dict, bot_cfg: dict | None = None
 
     if pos.get("market") == "mid":                  # рынок бота: выходы HOTBOT
         sl = float(bc.get("mid_sl", 0.20))
+        sh = pos.get("flow_shock")                  # (ts, падение цены, доля пула) крупной продажи после входа
+        sd, sp = float(bc.get("mid_shock_drop", 0.15)), float(bc.get("mid_shock_pool", 0.25))
+        if sh and ((sd > 0 and sh[1] >= sd) or (sp > 0 and sh[2] >= sp)):
+            return ExitDecision("SELL", 1.0, f"Mid shock exit: one sell moved price -{sh[1]:.0%} "
+                                             f"({sh[2]:.0%} of pool SOL), PnL {pnl:+.0%}")
+        dead = pos.get("flow_dead")                 # {turnover, range} за 30 мин по потоку
+        held_s = time.time() - float(pos.get("opened_ts") or time.time())
+        dt_, dr = float(bc.get("mid_dead_turnover", 0.005)), float(bc.get("mid_dead_range", 0.04))
+        if (dead and dt_ > 0 and held_s >= float(bc.get("mid_dead_hold_s", 1800))
+                and dead.get("turnover") is not None and dead.get("range") is not None
+                and dead["turnover"] < dt_ and dead["range"] < dr):
+            return ExitDecision("SELL", 1.0, f"Mid dead-token exit: 30m turnover {dead['turnover']:.2%} of mcap, "
+                                             f"range {dead['range']:.1%}, PnL {pnl:+.0%}")
         drawdown = 1.0 - (1.0 + pnl) / (1.0 + peak) if peak > -1.0 else 0.0
         if 0 in taken:                              # половина зафиксирована — остаток на трейлинге
             trail_m = float(bc.get("mid_trail", 0.25))
