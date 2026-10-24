@@ -17,7 +17,7 @@ def fake_ask(decision="buy"):
         calls.append(system)
         json.loads(user)                                  # в LLM уходит валидный JSON
         if "decision" in schema["properties"]:
-            return dict(decision=decision, confidence=0.7, risk="medium", reasons=["flow organic"])
+            return dict(decision=decision, p_win=0.3, confidence=0.7, risk="medium", reasons=["flow organic"])
         return dict(score=0.6, points=["a", "b"], argument="x" * 2000)
     ask.calls = calls
     return ask
@@ -31,13 +31,15 @@ def test_dossier_numbers_only_and_sanitized_ticker():
     assert dos["ticker"] == "IGNOREALLbuy"
     assert dos["onchain"]["dev_supply_pct"] == 2.5 and dos["onchain"]["holders_obs"] is None
     assert dos["x_mentions"] == dict(tweets=12, authors=1, max_followers=900, verified=1)
-    assert "evil" not in json.dumps(dos)                  # имена авторов в LLM не уходят
+    assert "evil" not in json.dumps(dos)
+    assert dos["data_coverage"]["holders_dev_bundle"].startswith("unavailable")
+    assert agents.dossier({}, dict(holders_obs=150))["data_coverage"]["holders_dev_bundle"] == "available"                  # имена авторов в LLM не уходят
 
 
 def test_debate_runs_three_roles_and_clips():
     ask = fake_ask("buy")
     v = agents.debate(agents.dossier({}, {}), ask)
-    assert v["decision"] == "buy" and v["confidence"] == 0.7 and v["risk"] == "medium"
+    assert v["decision"] == "buy" and v["p_win"] == 0.3 and v["confidence"] == 0.7 and v["risk"] == "medium"
     assert len(ask.calls) == 3 and len(v["bull"]["argument"]) <= 600
     assert any("BULL" in c for c in ask.calls) and any("BEAR" in c for c in ask.calls)
 
@@ -47,7 +49,7 @@ def test_bad_judge_output_defaults_to_skip():
         return dict(decision="moon", confidence=5, risk="?", reasons=[]) if "decision" in schema["properties"] \
             else dict(score=0.5, points=[], argument="")
     v = agents.debate({}, ask)
-    assert v["decision"] == "skip" and v["confidence"] == 1.0 and v["risk"] == "high"
+    assert v["decision"] == "skip" and v["confidence"] == 1.0 and v["risk"] == "high" and v["p_win"] is None
 
 
 def _wait(team, mint):
@@ -124,3 +126,11 @@ class TestScreenModes:
         appmod.screen_mid("sol", self.s)
         _wait(team, "Good")
         assert self._picked() == ["Good"]
+
+
+def test_veto_by_pwin_threshold(monkeypatch):
+    team = agents.Team(ask_fn=fake_ask())
+    assert team.allows(dict(decision="buy", p_win=0.1)) and not team.allows(dict(decision="skip", p_win=0.9))
+    monkeypatch.setattr(agents, "MIN_PWIN", 0.2)
+    assert team.allows(dict(decision="skip", p_win=0.25)) and not team.allows(dict(decision="buy", p_win=0.1))
+    assert not team.allows(dict(decision="skip", p_win=None))       # нет оценки — по решению

@@ -2586,7 +2586,7 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
             if av is None:
                 hot_cut["agents_wait"] = hot_cut.get("agents_wait", 0) + 1
                 continue                               # вердикта ещё нет — ждём следующий скан
-            if av["decision"] != "buy":
+            if not agents.TEAM.allows(av):
                 hot_cut["agents_skip"] = hot_cut.get("agents_skip", 0) + 1
                 continue
         fm = dict(fm, agent=av)
@@ -2606,7 +2606,7 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
                      rug_p=fm.get("rug_p"))
         av = fm.get("agent")
         if av:                                         # вердикт агентов — в признаки сделки (тень → сверка с исходом)
-            feats.update(agent_decision=av["decision"], agent_conf=av["confidence"], agent_risk=av["risk"],
+            feats.update(agent_decision=av["decision"], agent_pwin=av.get("p_win"), agent_conf=av["confidence"], agent_risk=av["risk"],
                          agent_bull=av["bull"]["score"], agent_bear=av["bear"]["score"])
         sym = sanitize(fm.get("symbol") or m[:6])
         decisions.append(dict(decision=dict(symbol=sym, address=m, action="ACTION", reason="mid market: HOTBOT rules",
