@@ -350,6 +350,7 @@ _AMM_B = _b58dec(AMM_PROGRAM)
 
 
 # ── состояние по токену ──────────────────────────────────────────────────────
+CANDLES_MAX = 61        # минутные свечи токена (час + запас)
 SHOCK_RECORD = 0.08     # продажа, уронившая цену ≥8% или забравшая ≥8% SOL пула, — в shocks токена
 
 
@@ -385,7 +386,7 @@ class MintFlow:
         self.cost: dict[str, int] = {}              # кошелёк → потраченные лампорты на текущие токены (средняя цена)
         self.rpnl: dict[str, int] = {}              # кошелёк → реализованный PnL по этому токену, лампорты
         self.slot_buyers: dict[int, set] = {}      # слот запуска → покупатели (бандлы Jito: много кошельков в одном слоте)
-        self.candles: collections.deque = collections.deque(maxlen=61)   # [t0, open, high, low, close, max_drop_60s]
+        self.candles: collections.deque = collections.deque(maxlen=CANDLES_MAX)   # [t0, open, high, low, close, max_drop_60s]
         self.ticks60: collections.deque = collections.deque()             # (ts, цена) за последние 60 с
         self.peak_px = 0.0
         self.create_wall = 0.0                      # когда МЫ увидели создание (для «первых 10 секунд»)
@@ -999,6 +1000,28 @@ class PumpFlow:
             mf = self._m.get(mint)
             rows = [r for r in mf.shocks if r[0] >= since_ts] if mf else []
         return max(rows, key=lambda r: (r[1], r[2])) if rows else None
+
+    def change_pct(self, mint: str, window_s: float = 3600) -> float | None:
+        """Изменение цены за окно в % по минутным свечам потока (вместо DexScreener chg_h1).
+        None — поток моложе окна или история свечей окно не покрывает."""
+        now = time.time()
+        with self._lock:
+            mf = self._m.get(mint)
+            if not mf or mf.price_sol <= 0:
+                return None
+            if self._started_at and now - self._started_at < window_s:
+                return None
+            lo = now - window_s
+            cs = list(mf.candles)
+            px = mf.price_sol
+        before = [c for c in cs if c[0] <= lo]
+        if before:
+            base = before[-1][4]                     # цена на начало окна = закрытие последней свечи до него
+        elif cs and len(cs) < CANDLES_MAX:
+            base = cs[0][1]                          # токен начал торговаться внутри окна — от первой цены
+        else:
+            return None                              # 61 свеча не дотягивает до начала окна
+        return round(100 * (px / base - 1), 2) if base > 0 else None
 
     def dead_stats(self, mint: str, window_s: float = 1800) -> dict | None:
         """«Мёртвый» токен: оборот за окно / капа и размах цены по минутным свечам. None —

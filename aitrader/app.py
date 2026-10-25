@@ -2422,6 +2422,45 @@ def _trending_window_s(cmd: str) -> int:
 
 _MID_DEX: dict = {}          # mint → (ts, dex-инфо): DexScreener не чаще раза в минуту на токен
 
+def _flow_market(mint: str, rate: float) -> dict | None:
+    """Рыночные данные токена из СВОЕГО потока (25.10, юзер: «делаем свой поток») — без задержки
+    DexScreener (30–60 с): цена, капа, ликвидность пула, объём/покупки/продажи и рост за час.
+    Часовые поля — только если поток видел весь час (иначе None → остаются значения Dex).
+    Возраст и тикер сюда не входят: их задержка не важна, берём из DexScreener."""
+    px = pumpflow.FLOW.price(mint)
+    if not px or px[0] <= 0 or rate <= 0:
+        return None
+    m1 = pumpflow.FLOW.metrics(mint, 3600) or {}
+    out = dict(price=px[0] * rate, liq=2.0 * float(m1.get("liq_sol") or 0) * rate, src="flow")
+    if mint.endswith("pump"):                       # pump-токены: саплай ровно 1 млрд
+        out["mcap"] = px[0] * pumpflow.PUMP_SUPPLY * rate
+        if m1.get("venue") == "amm":
+            out["dex"] = "pumpswap"
+    if m1.get("full"):
+        out.update(vol_h1=(float(m1.get("buy_vol_sol") or 0) + float(m1.get("sell_vol_sol") or 0)) * rate,
+                   buys_h1=m1.get("buys"), sells_h1=m1.get("sells"))
+        ch = pumpflow.FLOW.change_pct(mint, 3600)
+        if ch is not None:
+            out["chg_h1"] = ch
+    if not out["liq"]:
+        out.pop("liq")                              # пул потока неизвестен — оставим Dex
+    return out
+
+
+def _mid_market(m: str, dexd: dict | None, rate: float) -> dict | None:
+    """Данные кандидата: быстрые поля из потока поверх медленных (возраст, тикер, h6/h24) из Dex.
+    dex_price сохраняем для сверки «тот ли пул» в скане."""
+    fl = _flow_market(m, rate)
+    if not dexd and not fl:
+        return None
+    d = dict(dexd or {})
+    if dexd:
+        d["dex_price"] = dexd.get("price")
+    if fl:
+        d.update(fl)
+    return d if d.get("mcap") is not None and d.get("liq") is not None else None
+
+
 def _mid_dex(mints: list[str]) -> dict:
     now = time.time()
     need = [m for m in mints if now - _MID_DEX.get(m, (0, None))[0] > 60]
@@ -2570,7 +2609,8 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
             _MID_FIRST.pop(k, None)
     flow_warm = pumpflow.FLOW.snapshot().get("uptime_s") or 0
     for m in cands:
-        d = info.get(m)
+        dexd = info.get(m)
+        d = _mid_market(m, dexd, rate)
         if not d or d["mcap"] < MID_MIN_MCAP or d["mcap"] > MID_MAX_MCAP or d["liq"] < MID_MIN_LIQ:
             continue
         if d.get("age_h") is None or d["age_h"] >= MID_MAX_AGE_H:
@@ -2579,7 +2619,8 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
         if fm.get("pool_canonical") is False:
             continue                                   # торгуют в чужом пуле
         px = pumpflow.FLOW.price(m)
-        ratio = (px[0] * rate / d["price"]) if px and d["price"] > 0 else 0
+        dpx = float(d.get("dex_price") or 0)          # сверка «тот ли пул» с DexScreener (поток ≈ Dex)
+        ratio = (px[0] * rate / dpx) if px and dpx > 0 else 0
         if not 0.7 <= ratio <= 1.43:
             continue                                   # поток и Dex не сходятся — цене не верим
         # 23.10: сразу после рестарта поток пуст → признаки модели пустые → раги проходили (KFC −99%,
@@ -2588,7 +2629,7 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
         if flow_warm < 600 or not ((snap.get("5m") or {}).get("b")):
             continue
         # модель рагов (17.10): отсекаем 30% самых рискованных — раги у молодых 4.6% → 0.2%
-        rug = rugmodel.score(d, snap)
+        rug = rugmodel.score(dexd or d, snap)          # модель обучена на полях DexScreener — им и кормим
         thr = rugmodel.threshold()
         if rug is not None and thr is not None and rug >= thr:
             rug_cut += 1
@@ -3062,18 +3103,28 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         # sol: базовые данные из бесплатного DexScreener, security-снапшот нейтральный
         # (escape-дифф начнёт работать с первого живого чтения в мониторинге).
         pr = {}
-        if chain == "sol":
-            try:
-                pr = dexadapter.spot_pair(address)
-            except Exception:
-                pr = {}
-        if not pr:
-            log("BUY_FAIL", address[:8], f"token data unavailable: {e}")
-            raise HTTPException(502, f"Token data unavailable (market feed rate-limited): {e}")
-        info = dict(symbol=(pr.get("baseToken") or {}).get("symbol", address[:6]),
-                    price=_f(pr.get("priceUsd")))
-        mkt_liq = _f((pr.get("liquidity") or {}).get("usd"))
-        mkt_dex = pr.get("dexId")
+        # 25.10: мид-рынок покупает по цене СВОЕГО потока (DexScreener отстаёт на 30–60 с — на бумаге
+        # это была покупка по устаревшей цене). Тикер — из кэша скана; DexScreener — только запасной.
+        fl = _flow_market(address, pumpcurve.sol_usd()) if market == "mid" and chain == "sol" else None
+        if fl:
+            cached = (_MID_DEX.get(address) or (0, None))[1] or {}
+            info = dict(symbol=cached.get("sym") or (pumpflow.FLOW.metrics(address, 60) or {}).get("symbol")
+                        or address[:6], price=fl["price"])
+            mkt_liq = float(fl.get("liq") or cached.get("liq") or 0)
+            mkt_dex = fl.get("dex") or cached.get("dex")
+        else:
+            if chain == "sol":
+                try:
+                    pr = dexadapter.spot_pair(address)
+                except Exception:
+                    pr = {}
+            if not pr:
+                log("BUY_FAIL", address[:8], f"token data unavailable: {e}")
+                raise HTTPException(502, f"Token data unavailable (market feed rate-limited): {e}")
+            info = dict(symbol=(pr.get("baseToken") or {}).get("symbol", address[:6]),
+                        price=_f(pr.get("priceUsd")))
+            mkt_liq = _f((pr.get("liquidity") or {}).get("usd"))
+            mkt_dex = pr.get("dexId")
         sec = {}
     entry = dict(honeypot=sec.get("honeypot", False),
                  renounced_mint=sec.get("renounced_mint", False),
@@ -3082,9 +3133,12 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
                  top10=sec.get("top10", 0.0))
     symbol = sanitize(info.get("symbol", ""))
     try:
-        if market == "mid":
+        if market == "mid" and info.get("price"):
+            entry_price = _f(info["price"])          # мид: цена потока (или Dex-пары, если потока нет)
+        elif market == "mid":
             raise RuntimeError("mid: entry from DexScreener")
-        entry_price = g.token_price(address)         # 建仓价（逃生监控算涨跌基准）
+        else:
+            entry_price = g.token_price(address)     # 建仓价（逃生监控算涨跌基准）
     except Exception:
         try:                                         # без цены входа стоп слепой → DexScreener
             entry_price = dexadapter.spot_price(address) if chain == "sol" else 0.0
