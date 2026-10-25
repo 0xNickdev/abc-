@@ -209,3 +209,12 @@ def test_brand_ticker_cut_in_screen(mid, monkeypatch):
     monkeypatch.setattr(appmod, "_mid_dex", lambda ms: {"Good": dict(price=1e-4, mcap=1_500_000, liq=50_000,
                                                                       age_h=5.0, vol_h1=1000, sym="YouTube")})
     assert appmod.screen_mid("sol", mid)["decisions"] == []
+
+
+def test_hotbot_liquidity_and_turnover_floor():
+    base = dict(chg_h1=40, buys_h1=200, sells_h1=100)
+    assert appmod._hotbot_rules(base, dict(lp_mc_ratio=0.03)).startswith("lp_mc")
+    assert appmod._hotbot_rules(base, dict(lp_mc_ratio=0.08)) is None
+    assert appmod._hotbot_rules(base, dict(turnover_1h=0.004)).startswith("turnover")
+    assert appmod._hotbot_rules(base, dict(turnover_1h=0.02)) is None
+    assert appmod._hotbot_rules(base, {}) is None                 # нет данных — не режем

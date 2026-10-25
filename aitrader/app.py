@@ -2448,7 +2448,11 @@ def _rugged_symbol(sym: str) -> bool:
 # Фильтры HOTBOT (юзер 23.10: «берём их фильтры») — жёсткие правила поверх модели рагов.
 # Признак None (нет полной истории токена / Dex не дал) → правило не применяется, а не режет всё.
 HOT = dict(chg_h1_min=5.0, chg_h1_max=500.0, buyers_h1_min=50, buy_sell_min=1.2, dd_max=50.0, crash_1m_max=30.0,
-           launch_x10s_max=3.0, dev_max=10.0, insiders_max=10.0, snipers_max=10.0, holders_min=100, dev_rugs_max=0)
+           launch_x10s_max=3.0, dev_max=10.0, insiders_max=10.0, snipers_max=10.0, holders_min=100, dev_rugs_max=0,
+           # 25.10: раги/мёртвые токены проходили — у них тонкий пул к капе и почти нет оборота.
+           # Отсекаем худшую четверть по ликвидности и совсем стоячую торговлю (пороги в env).
+           lp_mc_min=float(os.getenv("ABC_HOT_LP_MC_MIN", "0.05") or 0),
+           turnover_1h_min=float(os.getenv("ABC_HOT_TURNOVER_MIN", "0.01") or 0))
 # 23.10 разбор: бренд-тикеры (YouTube −93%, ELON −92%, Robinhood −82%, McRib/McNugget −27%) — разгон и слив
 # за 5–15 мин. Короткие — точное совпадение тикера, длинные — вхождение.
 BRAND_EXACT = {"elon", "musk", "trump", "melania", "barron", "kfc", "x", "ai", "gpt", "grok", "meta", "apple", "tesla",
@@ -2498,6 +2502,12 @@ def _hotbot_rules(d: dict, snap: dict, fund: dict | None = None, uniq_h1: int | 
         v = num(f.get(k))
         if v is not None and v >= h["insiders_max"]:
             return f"{k} {v:g}"
+    lp = num(snap.get("lp_mc_ratio"))
+    if lp is not None and h["lp_mc_min"] > 0 and lp < h["lp_mc_min"]:
+        return f"lp_mc {lp:g}"
+    tv = num(snap.get("turnover_1h"))
+    if tv is not None and h["turnover_1h_min"] > 0 and tv < h["turnover_1h_min"]:
+        return f"turnover {tv:g}"
     return None
 
 def screen_mid(chain: str, s: UserSession | None = None) -> dict:
@@ -3912,11 +3922,14 @@ def api_backtest(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthH
     # передаём актуальный путь журнала (backtest.py по умолчанию смотрит в HERE/outputs,
     # а с ABC_DATA_DIR журнал лежит на подключённом диске — иначе бэктест «видит» 0)
     return backtest.summary(path=LOG_PATH, trig=strategy.get(sess.strategy_id)["trigger"],
-                            hard_stop_pct=CFG["hard_stop_pct"])   # тот же стоп, что у бота (env)
+                            hard_stop_pct=CFG["hard_stop_pct"], since=MEASURE_SINCE or None)   # тот же стоп, что у бота (env)
 
 # Публичный журнал (бета) начинается с этой даты (UTC, ISO-префикс): прошлые месяцы не показываем
 # тестерам. Данные не удаляются — оператор видит всё через full=1 (legacy-терминал).
 RESULTS_SINCE = os.getenv("ABC_RESULTS_SINCE", "2026-10-10").strip()
+# Контрольный замер (юзер 25.10): PnL/статистика считаются только с этой даты (UTC ISO).
+# История в журнале сохраняется — это лишь точка отсчёта на дашборде. Пусто = весь журнал.
+MEASURE_SINCE = os.getenv("ABC_MEASURE_SINCE", "").strip()
 
 @app.get("/api/pnl/calendar")
 def api_pnl_calendar(month: str = "", scope: str = "house", full: int = 0,
@@ -3935,6 +3948,8 @@ def api_pnl_calendar(month: str = "", scope: str = "house", full: int = 0,
     # календарь, юзер 10.10 с подключённым кошельком не видел сделок бота вовсе);
     # scope=me — только сделки своего кошелька.
     since = "" if (full and _is_admin(sess, x_auth)) else RESULTS_SINCE
+    if MEASURE_SINCE:                                 # контрольный замер перекрывает начало окна
+        since = max(since, MEASURE_SINCE[:10])
     return pnl_calendar(sess.pubkey if scope == "me" else DEFAULT_PUBKEY, m, since)
 
 # ── Ночной review-loop: отчёт (read-only) + форс-прогон + применение одного предложения ──

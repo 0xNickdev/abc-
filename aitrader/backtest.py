@@ -321,15 +321,18 @@ def _paper_feats(feats: list[dict], trig: dict | None = None) -> dict:
 
 
 def summary(path: pathlib.Path | str | None = None, trig: dict | None = None,
-            hard_stop_pct: float | None = None) -> dict:
+            hard_stop_pct: float | None = None, since: str | None = None) -> dict:
     # Потоково (hot + архивы): не материализуем журнал списком dict'ов — на
     # многомесячном журнале это гигабайты RSS при каждом вызове эндпоинта.
     c = collect(path)
+    # Контрольный замер: реализованный PnL считаем только по продажам с even since (UTC ISO-
+    # префикс). История журнала не меняется — ограничиваем лишь окно метрик.
+    sells = [r for r in c["sells"] if not since or (r.get("ts") or "") >= since]
     return dict(
         strategy=strategy.NAME, version=strategy.VERSION,
-        records=c["records"],
+        records=c["records"], measure_since=since or None,
         funnel=dict(by_action=c["actions"], rejects_by_gate=c["gates"], total=c["records"]),
-        realized=realized(c["sells"], hard_stop_pct),
+        realized=realized(sells, hard_stop_pct),
         paper=dict(_paper_feats(c["feats"], trig),
                    note="model estimate from entry score, NOT realized results; "
                         "cannot go negative by construction — do not use for go/no-go"),
