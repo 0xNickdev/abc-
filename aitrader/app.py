@@ -2480,6 +2480,9 @@ MID_MIN_MCAP = float(os.getenv("ABC_MID_MIN_MCAP", "500000") or 500000)   # юз
 MID_MAX_MCAP = float(os.getenv("ABC_MID_MAX_MCAP", "5000000") or 5000000)  # моложе 3 суток
 MID_MIN_LIQ = 15000.0
 MID_MAX_AGE_H = float(os.getenv("ABC_MID_MAX_AGE_H", "72") or 72)   # 23.10: 24 ч давали 0 сделок за 17 ч
+# 25.10 (юзер): размер сделки мид-рынка. 0 = по формуле риска position_size(); итог всё равно
+# зажимается потолком бота ABC_BOT_MAX_TRADE_SOL.
+MID_SIZE_SOL = float(os.getenv("ABC_MID_SIZE_SOL", "0") or 0)
 
 # 22.10 разбор: 36 рагов mid (−10.5 SOL при +4.08 без них) — копии чужих тикеров (HELL ×3,
 # USDF/NODF/ECTF/Kimchi/NTDA ×2), каждый со свежего кошелька-создателя → история деплоера не ловит.
@@ -2679,7 +2682,7 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
             best[k] = max(best.get(k, 0), d["liq"])
     rows = [r for r in rows if not (r[2].get("sym") and r[2]["liq"] < best.get(r[2]["sym"].lower(), 0))]
     rows.sort(key=lambda r: -r[0])                     # активнее за час — первым
-    size = position_size()
+    size = MID_SIZE_SOL if MID_SIZE_SOL > 0 else position_size()
     for vol, m, d, fm in rows[:20]:
         feats = dict(market="mid", mcap=d["mcap"], liquidity=d["liq"], age_h=d["age_h"], vol_h1=vol,
                      buys_h1=d.get("buys_h1"), sells_h1=d.get("sells_h1"), chg_h1=d.get("chg_h1"),
