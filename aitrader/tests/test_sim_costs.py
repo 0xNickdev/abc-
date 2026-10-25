@@ -102,7 +102,8 @@ def test_reclaim_endpoints_need_wallet_and_signature(tmp_path, monkeypatch):
 # ── 25.10: мид-покупки передают пул/площадку; якорь потока хранит издержки входа ──
 def test_venue_fee_by_dex_id():
     a = "Tok1111111111111111111111111111111111111pump"
-    assert appmod._sim_venue_fee(a, 10_000, "pumpswap") == appmod.SIM_FEE_AMM     # мигрировал, пул мал
+    assert appmod._sim_venue_fee(a, 10_000, "pumpswap") == appmod.SIM_FEE_AMM     # без цены — плоская AMM
+    assert appmod._sim_venue_fee(a, 10_000, "raydium", 0.001) == appmod.SIM_FEE_AMM
     assert appmod._sim_venue_fee(a, 10_000, "pumpfun") == appmod.SIM_FEE_CURVE
     assert appmod._sim_venue_fee(a, 10_000) == appmod.SIM_FEE_CURVE              # без dexId — старое правило
 
@@ -110,10 +111,10 @@ def test_venue_fee_by_dex_id():
 def test_sim_entry_uses_pool(monkeypatch):
     monkeypatch.setattr(appmod.pumpcurve, "sol_usd", lambda: 200.0)
     a = "Tok1111111111111111111111111111111111111pump"
-    eff, _, sim = appmod.sim_entry(a, 1.0, 0.3, 40_000, "pumpswap")
+    eff, _, sim = appmod.sim_entry(a, 1.0, 0.3, 40_000, "raydium")
     # 0.3% площадка + 2*0.3*200/40000=0.3% сдвиг + 1.5% проскальзывание
     assert sim["fee"] == 0.003 and sim["impact"] == 0.003 and abs(eff - 1.021) < 1e-9
-    assert sim["liq"] == 40_000 and sim["dex"] == "pumpswap"
+    assert sim["liq"] == 40_000 and sim["dex"] == "raydium"
 
 
 def test_mid_buy_passes_dex_pool(tmp_path, monkeypatch):
@@ -128,7 +129,8 @@ def test_mid_buy_passes_dex_pool(tmp_path, monkeypatch):
     monkeypatch.setattr(appmod.dexadapter, "spot_price", lambda a: 0.002)
     appmod.do_buy("sol", "MidTok2222pump", 0.3, s, market="mid")
     p = next(p for p in s.positions if p["address"] == "MidTok2222pump")
-    assert p["sim_entry"]["fee"] == appmod.SIM_FEE_AMM and p["sim_entry"]["impact"] < 0.01
+    # $0.002 × 1 млрд / $200 = 10 000 SOL капы → ступень PumpSwap 0.95%
+    assert p["sim_entry"]["fee"] == 0.0095 and p["sim_entry"]["impact"] < 0.01
     assert p["entry_liq"] == 40000
 
 
@@ -149,3 +151,15 @@ def test_flow_anchor_keeps_entry_costs(monkeypatch):
     monkeypatch.setattr(pumpflow, "FLOW", f)
     w.PositionWatcher(lambda: [sess], dict(hard_stop_pct=0.5), lambda s_: (lambda *a, **k: None)).poll_once()
     assert p["pnl"] == pytest.approx(0.002 / 0.00204 - 1, abs=1e-4)          # ≈ −2%, а не 0
+
+
+def test_pumpswap_fee_tiers_by_mcap_in_sol(monkeypatch):
+    monkeypatch.setattr(appmod.pumpcurve, "sol_usd", lambda: 100.0)
+    a = "Tok1111111111111111111111111111111111111pump"
+    # $100k капы при SOL=$100 → 1000 SOL → 1.20%; $1M → 10 000 SOL → 0.95%; $300k → 3000 SOL → 1.10%
+    assert appmod._sim_venue_fee(a, 30_000, "pumpswap", 100_000 / 1e9) == 0.0120
+    assert appmod._sim_venue_fee(a, 30_000, "pumpswap", 1_000_000 / 1e9) == 0.0095
+    assert appmod._sim_venue_fee(a, 30_000, "pumpswap", 300_000 / 1e9) == 0.0110
+    p = dict(address=a, entry_liq=30_000, sim_entry=dict(fee=0.011, dex="pumpswap"), sim_fixed_sol=0.0)
+    net, _ = appmod.sim_exit(p, 0.0, 1.0, 0.3, "x")            # выход — та же ступень 1.1%
+    assert net < -0.011

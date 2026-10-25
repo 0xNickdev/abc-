@@ -438,7 +438,7 @@ SIM_FEE_AMM = float(os.getenv("ABC_SIM_FEE_AMM", "0.003") or 0.003)         # Pu
 SIM_SLIP = float(os.getenv("ABC_SIM_SLIP", "0.015") or 0.015)               # латентность/движение
 SIM_SLIP_STOP = float(os.getenv("ABC_SIM_SLIP_STOP", "0.05") or 0.05)       # стоп на падающем рынке
 SIM_TX_FEE_SOL = float(os.getenv("ABC_SIM_TX_FEE_SOL", "0.00025") or 0.00025)  # priority (≤200k lam) + base
-SIM_ATA_RENT_SOL = 0.00204                                                   # рента токен-аккаунта
+SIM_ATA_RENT_SOL = 0.00148844                                                # рента токен-аккаунта
 # 11.10: рента ATA возвращается при закрытии пустого токен-аккаунта (N3 — сам после полной
 # продажи, Phantom — кнопкой Reclaim). Бумага зеркалит LIVE: при полном закрытии рента в плюс,
 # минус комиссия tx закрытия. ABC_SIM_RENT_REFUND=0 — считать ренту безвозвратной (как раньше).
@@ -447,12 +447,34 @@ SIM_CLOSE_TX_FEE_SOL = 0.000005
 _SOL_USD_FALLBACK = 150.0
 
 
-def _sim_venue_fee(address: str, liq_usd: float, dex: str | None = None) -> float:
+# 25.10: PumpSwap (канонический пул мигрировавшего pump-токена) с 01.09.2025 берёт динамическую
+# комиссию по капе токена В SOL (pump-public-docs FEE_PROGRAM_README + fees.png): LP 0.20% +
+# протокол 0.05% + остальное автору. (порог капы SOL, комиссия на сторону)
+# (нижняя граница капы в SOL, комиссия на сторону); выше 14 740 SOL — по таблице не проверено, держим 0.95%
+PUMPSWAP_FEE_TIERS = ((420, 0.0120), (1470, 0.0115), (2460, 0.0110), (3440, 0.0105), (4420, 0.0100),
+                      (9820, 0.0095))
+
+
+def _pumpswap_fee(mcap_sol: float) -> float:
+    fee = PUMPSWAP_FEE_TIERS[0][1]
+    for lo, f in PUMPSWAP_FEE_TIERS:
+        if mcap_sol >= lo:
+            fee = f
+    return fee
+
+
+def _sim_venue_fee(address: str, liq_usd: float, dex: str | None = None, px_usd: float = 0.0) -> float:
     # 25.10: площадку знаем из DexScreener (dexId) — кривая pump.fun только для "pumpfun";
     # мигрировавшие токены (pumpswap/raydium/meteora) с маленьким пулом раньше ошибочно
     # платили комиссию кривой 1.25% вместо AMM. Без dexId — старое правило.
     if dex:
-        return SIM_FEE_CURVE if str(dex).lower().replace("-", "").replace("_", "") in ("pumpfun", "pump") else SIM_FEE_AMM
+        d = str(dex).lower().replace("-", "").replace("_", "")
+        if d in ("pumpfun", "pump"):
+            return SIM_FEE_CURVE
+        if d == "pumpswap" and str(address).endswith("pump") and px_usd > 0:
+            rate = pumpcurve.sol_usd() or _SOL_USD_FALLBACK
+            return _pumpswap_fee(px_usd * 1e9 / rate)            # pump-токен: саплай 1 млрд
+        return SIM_FEE_AMM
     return SIM_FEE_CURVE if str(address).endswith("pump") and liq_usd < 30000 else SIM_FEE_AMM
 
 
@@ -468,7 +490,7 @@ def _sim_impact(size_sol: float, liq_usd: float) -> float:
 def sim_entry(address: str, px: float, size_sol: float, liq_usd: float,
               dex: str | None = None) -> tuple[float, float, dict]:
     """(эффективная цена входа, фиксированные издержки SOL, разбивка)."""
-    fee = _sim_venue_fee(address, liq_usd, dex)
+    fee = _sim_venue_fee(address, liq_usd, dex, px)
     imp = _sim_impact(size_sol, liq_usd)
     eff = px * (1.0 + fee + imp + SIM_SLIP)
     fixed = SIM_TX_FEE_SOL + SIM_ATA_RENT_SOL
@@ -481,7 +503,9 @@ def sim_exit(p: dict, pnl_mark: float, frac: float, sold_sol: float, reason: str
     liq = float(p.get("entry_liq", 0.0) or 0.0)
     stopish = any(k in (reason or "") for k in ("Hard stop", "Escape", "SMART-EXIT", "DEAD", "stop"))
     slip = SIM_SLIP_STOP if stopish else SIM_SLIP
-    fee = _sim_venue_fee(p.get("address", ""), liq, (p.get("sim_entry") or {}).get("dex"))
+    se = p.get("sim_entry") or {}
+    # комиссия выхода — та же ступень, что на входе (капа за время сделки меняется мало)
+    fee = float(se["fee"]) if se.get("dex") and se.get("fee") is not None else _sim_venue_fee(p.get("address", ""), liq)
     imp = _sim_impact(sold_sol * (1.0 + max(pnl_mark, -0.99)), liq)
     gross_back = (1.0 + pnl_mark) * (1.0 - fee - imp - slip)          # что вернётся на 1 SOL вложений
     fixed = SIM_TX_FEE_SOL + float(p.get("sim_fixed_sol", 0.0) or 0.0) * frac   # своя tx + доля входных
