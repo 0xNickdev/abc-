@@ -1,6 +1,8 @@
 """24.10: стопы −47/−66% на рагах. Цена позиций — из своего потока (реакция на каждую сделку),
 выход после крупной продажи одной транзакцией и из «мёртвого» токена."""
 import threading
+
+import pytest
 import time
 import types
 
@@ -53,6 +55,10 @@ class TestFlowSignals:
 
 
 class TestMidFlowExits:
+    @pytest.fixture(autouse=True)
+    def _no_breakeven(self, monkeypatch):           # здесь проверяем другие выходы, не тайм-стоп
+        monkeypatch.setitem(bot.CFG, "mid_breakeven_min", 0)
+
     def pos(self, **kw):
         return dict(dict(market="mid", pnl=-0.05, peak_pnl=0.02, opened_ts=time.time() - 3600, tp_taken=[]), **kw)
 
@@ -116,3 +122,19 @@ class TestWatcherFlowPrice:
         pw, f, mf = self.setup(monkeypatch, p, 1e-5, 0.0022)     # по Dex +10%
         pw.poll_once()
         assert abs(p["pnl"] - 0.10) < 1e-9 and abs(p["entry_flow_sol"] - 1e-5 / 1.1) < 1e-15
+
+
+class TestBreakevenExit:
+    def pos(self, **kw):
+        return dict(dict(market="mid", pnl=0.02, peak_pnl=0.05, opened_ts=time.time() - 700, tp_taken=[]), **kw)
+
+    rc = dict(hard_stop_pct=0.5, trailing_pct=0.25, tp_ladder=[])
+
+    def test_breakeven_fires_when_flat(self):
+        assert "breakeven" in bot.decide_exit(self.pos(), None, self.rc).reason
+        young = self.pos(opened_ts=time.time() - 120)                 # держим <10 мин
+        assert bot.decide_exit(young, None, self.rc).action == "HOLD"
+        moved = self.pos(pnl=0.2, peak_pnl=0.2)                       # поехал +20% → не трогаем
+        assert bot.decide_exit(moved, None, self.rc).action == "HOLD"
+        half = self.pos(tp_taken=[0], peak_pnl=1.3, pnl=0.9)          # уже зафиксировали ½ на 2×
+        assert bot.decide_exit(half, None, self.rc).action == "HOLD"

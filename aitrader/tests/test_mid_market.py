@@ -9,6 +9,10 @@ import bot
 
 
 class TestMidExits:
+    @pytest.fixture(autouse=True)
+    def _no_breakeven(self, monkeypatch):           # здесь проверяем другие выходы, не тайм-стоп
+        monkeypatch.setitem(bot.CFG, "mid_breakeven_min", 0)
+
     def pos(self, pnl, age_s=60, peak=None, taken=()):
         return dict(market="mid", pnl=pnl, peak_pnl=max(pnl, 0) if peak is None else peak,
                     opened_ts=time.time() - age_s, tp_taken=list(taken))

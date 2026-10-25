@@ -52,7 +52,7 @@ _JUDGE_SCHEMA = {
 
 _COMMON = (
     "You are part of a Solana memecoin trading team. The token already passed hard screening rules "
-    "(market cap $500k-5M, under 72h old, momentum, holder safety). Typical failure: a fast rug or "
+    "(market cap and age window, momentum, holder safety; see market in the dossier). Typical failure: a fast rug or "
     "dump within 5-15 minutes after entry, often on copycat or celebrity/brand tickers launched from "
     "fresh wallets. You get ONE token dossier as JSON: numbers only plus a sanitized ticker. Missing "
     "values are null = unknown, not zero. Holder, dev-supply, bundle and funding data exist only when "

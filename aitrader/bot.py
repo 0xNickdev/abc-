@@ -58,6 +58,10 @@ CFG = {
     "mid_dead_turnover": float(os.getenv("ABC_MID_DEAD_TURNOVER", "0.005") or 0),
     "mid_dead_range": float(os.getenv("ABC_MID_DEAD_RANGE", "0.04") or 0),
     "mid_dead_hold_s": 1800,
+    # ранний рынок (25.10, рецепт HOTBOT clip): не вырос за N мин → выходим у безубытка,
+    # не досиживаем мёртвый коин до 4ч. peak_pnl < порога за время = «не поехал».
+    "mid_breakeven_min": float(os.getenv("ABC_MID_BREAKEVEN_MIN", "10") or 0),
+    "mid_breakeven_rise": float(os.getenv("ABC_MID_BREAKEVEN_RISE", "0.12") or 0),
     "max_sm_confluence": int(os.getenv("ABC_BOT_MAX_SM", "8") or 0),
 }
 
@@ -133,6 +137,10 @@ def decide_exit(pos: dict, severity, risk_cfg: dict, bot_cfg: dict | None = None
                                              f"({sh[2]:.0%} of pool SOL), PnL {pnl:+.0%}")
         dead = pos.get("flow_dead")                 # {turnover, range} за 30 мин по потоку
         held_s = time.time() - float(pos.get("opened_ts") or time.time())
+        bmin = float(bc.get("mid_breakeven_min", 0))
+        if bmin > 0 and held_s >= bmin * 60 and 0 not in taken and peak < float(bc.get("mid_breakeven_rise", 0.12)):
+            return ExitDecision("SELL", 1.0, f"Mid breakeven exit: no +{float(bc.get('mid_breakeven_rise',0.12)):.0%} "
+                                             f"in {bmin:.0f}m (peak {peak:+.0%}), PnL {pnl:+.0%}")
         dt_, dr = float(bc.get("mid_dead_turnover", 0.005)), float(bc.get("mid_dead_range", 0.04))
         if (dead and dt_ > 0 and held_s >= float(bc.get("mid_dead_hold_s", 1800))
                 and dead.get("turnover") is not None and dead.get("range") is not None
