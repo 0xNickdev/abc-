@@ -1,6 +1,7 @@
 """Модель издержек бумажной торговли: вход дороже рынка, выход дешевле, фикс-издержки (priority/base
 fee, рента ATA), стопы проскальзывают сильнее; календарь не вычитает процент повторно."""
 import datetime
+import time
 
 import pytest
 from test_app import _mu_client
@@ -96,3 +97,55 @@ def test_reclaim_endpoints_need_wallet_and_signature(tmp_path, monkeypatch):
     r = c.get("/api/wallet/rent", headers=h).json()
     assert r == dict(accounts=3, reclaim_sol=0.006118)
     assert c.post("/api/tx/reclaim").status_code == 400
+
+
+# ── 25.10: мид-покупки передают пул/площадку; якорь потока хранит издержки входа ──
+def test_venue_fee_by_dex_id():
+    a = "Tok1111111111111111111111111111111111111pump"
+    assert appmod._sim_venue_fee(a, 10_000, "pumpswap") == appmod.SIM_FEE_AMM     # мигрировал, пул мал
+    assert appmod._sim_venue_fee(a, 10_000, "pumpfun") == appmod.SIM_FEE_CURVE
+    assert appmod._sim_venue_fee(a, 10_000) == appmod.SIM_FEE_CURVE              # без dexId — старое правило
+
+
+def test_sim_entry_uses_pool(monkeypatch):
+    monkeypatch.setattr(appmod.pumpcurve, "sol_usd", lambda: 200.0)
+    a = "Tok1111111111111111111111111111111111111pump"
+    eff, _, sim = appmod.sim_entry(a, 1.0, 0.3, 40_000, "pumpswap")
+    # 0.3% площадка + 2*0.3*200/40000=0.3% сдвиг + 1.5% проскальзывание
+    assert sim["fee"] == 0.003 and sim["impact"] == 0.003 and abs(eff - 1.021) < 1e-9
+    assert sim["liq"] == 40_000 and sim["dex"] == "pumpswap"
+
+
+def test_mid_buy_passes_dex_pool(tmp_path, monkeypatch):
+    from test_app import _mu_client
+    _mu_client(tmp_path, monkeypatch)
+    s = appmod.ST
+    monkeypatch.setattr(s, "positions", [])
+    monkeypatch.setattr(appmod.pumpcurve, "sol_usd", lambda: 200.0)
+    monkeypatch.setattr(appmod.dexadapter, "spot_pair",
+                        lambda a: dict(baseToken=dict(symbol="M"), priceUsd="0.002", dexId="pumpswap",
+                                       liquidity=dict(usd=40000)))
+    monkeypatch.setattr(appmod.dexadapter, "spot_price", lambda a: 0.002)
+    appmod.do_buy("sol", "MidTok2222pump", 0.3, s, market="mid")
+    p = next(p for p in s.positions if p["address"] == "MidTok2222pump")
+    assert p["sim_entry"]["fee"] == appmod.SIM_FEE_AMM and p["sim_entry"]["impact"] < 0.01
+    assert p["entry_liq"] == 40000
+
+
+def test_flow_anchor_keeps_entry_costs(monkeypatch):
+    import threading, types
+    import bot, pumpflow, watcher as w
+    MINT = "Anc1111111111111111111111111111111111111pump"
+    p = dict(address=MINT, entry_price=0.00204, chain="sol", market="mid", auto=True,
+             opened_ts=time.time() - 5, sim_entry=dict(mid=0.002))           # заплатили 2% на входе
+    sess = types.SimpleNamespace(positions=[p], lock=threading.Lock(),
+                                 bot=types.SimpleNamespace(enabled=True, cfg=dict(bot.CFG)))
+    monkeypatch.setattr(w.geyser.FEED, "set_mints", lambda m: None)
+    monkeypatch.setattr(w.geyser.FEED, "prices_usd", lambda m: {})
+    monkeypatch.setattr(w.pumpcurve, "usd_prices", lambda m: {})
+    monkeypatch.setattr(w.dexadapter, "spot_prices", lambda m: {MINT: 0.002})
+    f = pumpflow.PumpFlow()
+    f._get(MINT, time.time()).price_sol = 1e-5
+    monkeypatch.setattr(pumpflow, "FLOW", f)
+    w.PositionWatcher(lambda: [sess], dict(hard_stop_pct=0.5), lambda s_: (lambda *a, **k: None)).poll_once()
+    assert p["pnl"] == pytest.approx(0.002 / 0.00204 - 1, abs=1e-4)          # ≈ −2%, а не 0

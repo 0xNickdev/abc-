@@ -188,8 +188,11 @@ class PositionWatcher:
                     # якорь: у новой позиции — текущая цена потока (вход только что), у старой —
                     # подгоняем под текущий PnL по DexScreener, чтобы не обнулить его
                     young = p.get("opened_ts") and time.time() - float(p["opened_ts"]) < REBASE_WINDOW_S
+                    mid_px = float((p.get("sim_entry") or {}).get("mid") or 0)
                     if young or px <= 0:
-                        ef = fp
+                        # 25.10: вход платил издержки (entry_price > рыночной mid) — якорь так, чтобы
+                        # PnL стартовал с −издержек, а не с нуля (иначе результат приукрашен)
+                        ef = fp * (ep / mid_px) if mid_px > 0 else fp
                     else:
                         ef = fp / (px / ep)
                     p["entry_flow_sol"] = ef

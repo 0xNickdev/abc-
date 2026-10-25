@@ -447,8 +447,12 @@ SIM_CLOSE_TX_FEE_SOL = 0.000005
 _SOL_USD_FALLBACK = 150.0
 
 
-def _sim_venue_fee(address: str, liq_usd: float) -> float:
-    # pump-токен без заметной ликвидности пула — ещё на кривой (там комиссия выше)
+def _sim_venue_fee(address: str, liq_usd: float, dex: str | None = None) -> float:
+    # 25.10: площадку знаем из DexScreener (dexId) — кривая pump.fun только для "pumpfun";
+    # мигрировавшие токены (pumpswap/raydium/meteora) с маленьким пулом раньше ошибочно
+    # платили комиссию кривой 1.25% вместо AMM. Без dexId — старое правило.
+    if dex:
+        return SIM_FEE_CURVE if str(dex).lower().replace("-", "").replace("_", "") in ("pumpfun", "pump") else SIM_FEE_AMM
     return SIM_FEE_CURVE if str(address).endswith("pump") and liq_usd < 30000 else SIM_FEE_AMM
 
 
@@ -461,13 +465,15 @@ def _sim_impact(size_sol: float, liq_usd: float) -> float:
     return min(0.5, 2.0 * size_sol * rate / liq_usd)
 
 
-def sim_entry(address: str, px: float, size_sol: float, liq_usd: float) -> tuple[float, float, dict]:
+def sim_entry(address: str, px: float, size_sol: float, liq_usd: float,
+              dex: str | None = None) -> tuple[float, float, dict]:
     """(эффективная цена входа, фиксированные издержки SOL, разбивка)."""
-    fee = _sim_venue_fee(address, liq_usd)
+    fee = _sim_venue_fee(address, liq_usd, dex)
     imp = _sim_impact(size_sol, liq_usd)
     eff = px * (1.0 + fee + imp + SIM_SLIP)
     fixed = SIM_TX_FEE_SOL + SIM_ATA_RENT_SOL
-    return eff, fixed, dict(fee=round(fee, 4), impact=round(imp, 4), slip=SIM_SLIP, fixed_sol=fixed)
+    return eff, fixed, dict(fee=round(fee, 4), impact=round(imp, 4), slip=SIM_SLIP, fixed_sol=fixed,
+                            liq=round(liq_usd, 2), dex=dex)
 
 
 def sim_exit(p: dict, pnl_mark: float, frac: float, sold_sol: float, reason: str) -> tuple[float, float]:
@@ -475,7 +481,7 @@ def sim_exit(p: dict, pnl_mark: float, frac: float, sold_sol: float, reason: str
     liq = float(p.get("entry_liq", 0.0) or 0.0)
     stopish = any(k in (reason or "") for k in ("Hard stop", "Escape", "SMART-EXIT", "DEAD", "stop"))
     slip = SIM_SLIP_STOP if stopish else SIM_SLIP
-    fee = _sim_venue_fee(p.get("address", ""), liq)
+    fee = _sim_venue_fee(p.get("address", ""), liq, (p.get("sim_entry") or {}).get("dex"))
     imp = _sim_impact(sold_sol * (1.0 + max(pnl_mark, -0.99)), liq)
     gross_back = (1.0 + pnl_mark) * (1.0 - fee - imp - slip)          # что вернётся на 1 SOL вложений
     fixed = SIM_TX_FEE_SOL + float(p.get("sim_fixed_sol", 0.0) or 0.0) * frac   # своя tx + доля входных
@@ -3021,6 +3027,7 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         log("BUY_BLOCK", address[:8], rnote, mode=s.mode)
         raise HTTPException(409, rnote)
     g = s.adapter_for(chain)
+    mkt_liq, mkt_dex = 0.0, None                 # пул/площадка из пары DexScreener (для издержек)
     try:
         if market == "mid":                      # рынок от $200k: только DexScreener — тот же
             raise RuntimeError("mid market: DexScreener price source")   # источник, что у watcher
@@ -3041,6 +3048,8 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
             raise HTTPException(502, f"Token data unavailable (market feed rate-limited): {e}")
         info = dict(symbol=(pr.get("baseToken") or {}).get("symbol", address[:6]),
                     price=_f(pr.get("priceUsd")))
+        mkt_liq = _f((pr.get("liquidity") or {}).get("usd"))
+        mkt_dex = pr.get("dexId")
         sec = {}
     entry = dict(honeypot=sec.get("honeypot", False),
                  renounced_mint=sec.get("renounced_mint", False),
@@ -3118,7 +3127,7 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
 
     with (lock if lock is not None else contextlib.nullcontext()):
         res = _buy_commit(s, chain, address, size_sol, symbol, entry, entry_price,
-                          filled, status_msg, auto=auto, market=market)
+                          filled, status_msg, auto=auto, market=market, mkt_liq=mkt_liq, mkt_dex=mkt_dex)
         if auto:                     # позиция бота: стопы watcher'а живут и после остановки бота
             for x in s.positions:
                 if x["address"] == address and not x.get("self_custody"):
@@ -3127,13 +3136,15 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
 
 def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbol: str,
                 entry: dict, entry_price: float, filled: bool, status_msg: str,
-                auto: bool = False, market: str | None = None) -> dict:
-    """Запись позиции после исполнения (под замком сессии). auto — вход бота (метка by)."""
+                auto: bool = False, market: str | None = None,
+                mkt_liq: float = 0.0, mkt_dex: str | None = None) -> dict:
+    """Запись позиции после исполнения (под замком сессии). auto — вход бота (метка by).
+    mkt_liq/mkt_dex — пул и площадка из пары DexScreener (издержки бумаги для мид-рынка)."""
     sim = None
     if SIM_COSTS and not (filled and s.mode == "LIVE") and entry_price > 0:
-        liq = float((_attrib_for(address) or {}).get("liquidity", 0.0) or 0.0)
+        liq = float((_attrib_for(address) or {}).get("liquidity", 0.0) or 0.0) or mkt_liq
         entry_price_mid = entry_price
-        entry_price, sim_fixed, sim = sim_entry(address, entry_price, size_sol, liq)
+        entry_price, sim_fixed, sim = sim_entry(address, entry_price, size_sol, liq, mkt_dex)
         sim.update(mid=entry_price_mid)
     # Докупка того же токена = усреднение в ОДНУ позицию (средневзвешенный вход, суммарный
     # размер), а не вторая запись: карточка в UI одна на адрес, и трейдер ждёт среднюю.
@@ -3179,7 +3190,7 @@ def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbo
                             cur_price=(sim["mid"] if sim else entry_price),
                             sim_fixed_sol=(sim["fixed_sol"] if sim else 0.0), sim_entry=sim,
                             opened_ts=time.time(), entry_attrib=attrib, market=market or "fresh",
-                            entry_liq=float(attrib.get("liquidity", 0.0) or 0.0),   # базовая ликвидность для escape-диффа
+                            entry_liq=float(attrib.get("liquidity", 0.0) or 0.0) or mkt_liq,   # базовая ликвидность (escape-дифф, издержки выхода)
                             live=bool(filled and s.mode == "LIVE"),
                             **_trade_tags(s, "bot" if auto else "manual")))
     s.save_positions()
