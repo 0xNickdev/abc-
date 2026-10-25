@@ -222,3 +222,15 @@ def test_hotbot_liquidity_and_turnover_floor():
     assert appmod._hotbot_rules(base, dict(turnover_1h=0.004)).startswith("turnover")
     assert appmod._hotbot_rules(base, dict(turnover_1h=0.02)) is None
     assert appmod._hotbot_rules(base, {}) is None                 # нет данных — не режем
+
+
+def test_hotbot_flow_demand_entry():
+    """Вход с перевесом (датасет 12–25.10): спрос за 5 мин + молодость; антисигналы не трогаем."""
+    ok = dict(chg_h1=40, buys_h1=200, sells_h1=100)
+    strong = {"5m": dict(uniq=20, br=0.75, net=3.0), "age_s": 3600}
+    assert appmod._hotbot_rules(ok, strong) is None
+    assert appmod._hotbot_rules(ok, dict(strong, **{"5m": dict(uniq=5, br=0.75, net=3.0)})).startswith("uniq5m")
+    assert appmod._hotbot_rules(ok, dict(strong, **{"5m": dict(uniq=20, br=0.5, net=3.0)})).startswith("br5m")
+    assert appmod._hotbot_rules(ok, dict(strong, **{"5m": dict(uniq=20, br=0.75, net=0.2)})).startswith("net5m")
+    assert appmod._hotbot_rules(ok, dict(strong, age_s=40000)).startswith("age_s")
+    assert appmod._hotbot_rules(ok, {}) is None                   # нет данных потока — не режем

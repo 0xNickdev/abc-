@@ -2524,7 +2524,14 @@ HOT = dict(chg_h1_min=5.0, chg_h1_max=500.0, buyers_h1_min=50, buy_sell_min=1.2,
            # 25.10: раги/мёртвые токены проходили — у них тонкий пул к капе и почти нет оборота.
            # Отсекаем худшую четверть по ликвидности и совсем стоячую торговлю (пороги в env).
            lp_mc_min=float(os.getenv("ABC_HOT_LP_MC_MIN", "0.05") or 0),
-           turnover_1h_min=float(os.getenv("ABC_HOT_TURNOVER_MIN", "0.01") or 0))
+           turnover_1h_min=float(os.getenv("ABC_HOT_TURNOVER_MIN", "0.01") or 0),
+           # 25.10: ВХОД С ПЕРЕВЕСОМ по датасету 12–25.10 (137к кандидатов, out-of-sample 80% win,
+           # +9.7% после издержек): живой спрос за 5 мин + молодой токен. Про-трейдеры/отслеж.
+           # кошельки оказались АНТИсигналом — их не используем. Пороги в env.
+           flow_uniq5m_min=float(os.getenv("ABC_HOT_UNIQ5M_MIN", "12") or 0),
+           flow_br5m_min=float(os.getenv("ABC_HOT_BR5M_MIN", "0.68") or 0),
+           flow_net5m_min=float(os.getenv("ABC_HOT_NET5M_MIN", "1.5") or 0),
+           flow_age_max_s=float(os.getenv("ABC_HOT_AGE_MAX_S", "28800") or 0))
 # 23.10 разбор: бренд-тикеры (YouTube −93%, ELON −92%, Robinhood −82%, McRib/McNugget −27%) — разгон и слив
 # за 5–15 мин. Короткие — точное совпадение тикера, длинные — вхождение.
 BRAND_EXACT = {"elon", "musk", "trump", "melania", "barron", "kfc", "x", "ai", "gpt", "grok", "meta", "apple", "tesla",
@@ -2574,6 +2581,18 @@ def _hotbot_rules(d: dict, snap: dict, fund: dict | None = None, uniq_h1: int | 
         v = num(f.get(k))
         if v is not None and v >= h["insiders_max"]:
             return f"{k} {v:g}"
+    # вход с перевесом (live-спрос за 5 мин + молодость) — главный фильтр входа
+    w5 = snap.get("5m") or {}
+    uniq, br, net = num(w5.get("uniq")), num(w5.get("br")), num(w5.get("net"))
+    if uniq is not None and h["flow_uniq5m_min"] > 0 and uniq < h["flow_uniq5m_min"]:
+        return f"uniq5m {uniq:g}"
+    if br is not None and h["flow_br5m_min"] > 0 and br < h["flow_br5m_min"]:
+        return f"br5m {br:g}"
+    if net is not None and h["flow_net5m_min"] > 0 and net < h["flow_net5m_min"]:
+        return f"net5m {net:g}"
+    age = num(snap.get("age_s"))
+    if age is not None and h["flow_age_max_s"] > 0 and age > h["flow_age_max_s"]:
+        return f"age_s {age:g}"
     lp = num(snap.get("lp_mc_ratio"))
     if lp is not None and h["lp_mc_min"] > 0 and lp < h["lp_mc_min"]:
         return f"lp_mc {lp:g}"
