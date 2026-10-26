@@ -2519,7 +2519,12 @@ def _rugged_symbol(sym: str) -> bool:
 
 # Фильтры HOTBOT (юзер 23.10: «берём их фильтры») — жёсткие правила поверх модели рагов.
 # Признак None (нет полной истории токена / Dex не дал) → правило не применяется, а не режет всё.
-HOT = dict(chg_h1_min=5.0, chg_h1_max=500.0, buyers_h1_min=50, buy_sell_min=1.2, dd_max=50.0, crash_1m_max=30.0,
+# chg_h1 (рост за час) — правило HOTBOT, но в датасете перевеса (12–25.10) его НЕТ: наш сигнал —
+# спрос за 5 мин (uniq/br/net), а не час. Нижний порог по умолчанию снят (−1e9), чтобы не резать
+# токены с сильным 5-мин спросом, но ещё не +5% за час; верхний (анти-чейз) оставлен. env ABC_HOT_CHG_H1_MIN/MAX.
+HOT = dict(chg_h1_min=float(os.getenv("ABC_HOT_CHG_H1_MIN", "-1e9") or -1e9),
+           chg_h1_max=float(os.getenv("ABC_HOT_CHG_H1_MAX", "500") or 500),
+           buyers_h1_min=50, buy_sell_min=1.2, dd_max=50.0, crash_1m_max=30.0,
            launch_x10s_max=3.0, dev_max=10.0, insiders_max=10.0, snipers_max=10.0, holders_min=100, dev_rugs_max=0,
            # 25.10: раги/мёртвые токены проходили — у них тонкий пул к капе и почти нет оборота.
            # Отсекаем худшую четверть по ликвидности и совсем стоячую торговлю (пороги в env).

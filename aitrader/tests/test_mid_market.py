@@ -54,8 +54,7 @@ class TestHotbotRules:
         assert appmod._hotbot_rules({}, {}) is None                               # всё None — не режем
 
     @pytest.mark.parametrize("d,snap,fund,why", [
-        (dict(chg_h1=2), {}, None, "chg_h1"),
-        (dict(chg_h1=900), {}, None, "chg_h1"),
+        (dict(chg_h1=900), {}, None, "chg_h1"),       # верхний порог (анти-чейз); нижний снят
         (dict(buys_h1=30, sells_h1=10), {}, None, "buyers_h1"),
         (dict(buys_h1=110, sells_h1=100), {}, None, "buy/sell"),
         ({}, dict(dd_from_high_pct=55), None, "dd_from_high_pct"),
