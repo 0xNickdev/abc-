@@ -55,8 +55,6 @@ class TestHotbotRules:
 
     @pytest.mark.parametrize("d,snap,fund,why", [
         (dict(chg_h1=900), {}, None, "chg_h1"),       # верхний порог (анти-чейз); нижний снят
-        (dict(buys_h1=30, sells_h1=10), {}, None, "buyers_h1"),
-        (dict(buys_h1=110, sells_h1=100), {}, None, "buy/sell"),
         ({}, dict(dd_from_high_pct=55), None, "dd_from_high_pct"),
         ({}, dict(crash_1m_max_pct=35), None, "crash_1m_max_pct"),
         ({}, dict(launch_x10s=3.5), None, "launch_x10s"),
@@ -71,7 +69,12 @@ class TestHotbotRules:
     def test_each_rule_cuts(self, d, snap, fund, why):
         assert appmod._hotbot_rules(dict(self.base, **d), snap, fund).startswith(why)
 
-    def test_flow_unique_buyers_override_dex(self):
+    def test_buyers_h1_and_buy_sell_off_by_default(self):
+        assert appmod._hotbot_rules(dict(self.base, buys_h1=30, sells_h1=10), {}, None) is None   # выключены
+        assert appmod._hotbot_rules(dict(self.base, buys_h1=110, sells_h1=100), {}, None) is None
+
+    def test_buyers_h1_override_when_enabled(self, monkeypatch):
+        monkeypatch.setitem(appmod.HOT, "buyers_h1_min", 50)
         assert appmod._hotbot_rules(self.base, {}, None, uniq_h1=20).startswith("buyers_h1")
         assert appmod._hotbot_rules(dict(self.base, buys_h1=60, sells_h1=10), {}, None, uniq_h1=80) is None
 

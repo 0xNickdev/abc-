@@ -2524,7 +2524,11 @@ def _rugged_symbol(sym: str) -> bool:
 # токены с сильным 5-мин спросом, но ещё не +5% за час; верхний (анти-чейз) оставлен. env ABC_HOT_CHG_H1_MIN/MAX.
 HOT = dict(chg_h1_min=float(os.getenv("ABC_HOT_CHG_H1_MIN", "-1e9") or -1e9),
            chg_h1_max=float(os.getenv("ABC_HOT_CHG_H1_MAX", "500") or 500),
-           buyers_h1_min=50, buy_sell_min=1.2, dd_max=50.0,
+           # buyers_h1/buy_sell — медленные правила HOTBOT из DexScreener, перекрыты проверенным
+           # 5-мин фильтром спроса (uniq5m/br5m/net5m). Выключены по умолч. (0), env вернёт.
+           buyers_h1_min=float(os.getenv("ABC_HOT_BUYERS_H1_MIN", "0") or 0),
+           buy_sell_min=float(os.getenv("ABC_HOT_BUY_SELL_MIN", "0") or 0),
+           dd_max=50.0,
            # 26.10: обвал за 1 мин — лучший предиктор рага в когорте входа (датасет 12–26.10):
            # у рагов медиана ~42%, у не-рагов ~19%. Порог 20% режет долю рагов 30%→12%, сохраняя
            # 45% когорты и средний +16%. Был 30% — пропускал раги. env ABC_HOT_CRASH_1M_MAX.
