@@ -1110,6 +1110,29 @@ class PumpFlow:
         out.sort(key=lambda r: r[1])             # с меньших кап: целевой диапазон $200k+ первым,
         return out                               # гиганты на миллиарды не съедают лимит выборки
 
+    def curve_candidates(self, min_mcap_sol: float, max_mcap_sol: float, min_liq_sol: float,
+                         min_age_s: float = 300, max_age_s: float = 3600, active_s: float = 180) -> list[tuple]:
+        """Снайп на бондинг-кривой (до миграции): свежие pump-токены на кривой с капой в диапазоне,
+        живыми сделками и возрастом min..max. У них НЕТ пары на DexScreener — всё из потока.
+        min_age_s даёт времени накопиться 5-мин окну спроса (наш сигнал). → [(mint, mcap, liq)]."""
+        now = time.time()
+        out = []
+        with self._lock:
+            for mf in self._m.values():
+                if mf.venue != "curve" or not mf.mint.endswith("pump") or mf.price_sol <= 0 or mf.complete:
+                    continue
+                if now - mf.last_ts > active_s:
+                    continue
+                age = now - mf.created_ts if mf.created_ts else None
+                if age is None or not (min_age_s <= age <= max_age_s):
+                    continue
+                mcap = mf.price_sol * PUMP_SUPPLY
+                liq = self._liq_sol(mf, now)
+                if min_mcap_sol <= mcap <= max_mcap_sol and liq >= min_liq_sol:
+                    out.append((mf.mint, round(mcap, 1), liq))
+        out.sort(key=lambda r: r[1])
+        return out
+
     def hot(self, window_s: float = 300, n: int = 50, min_buyers: int = 5) -> list[dict]:
         """Самые денежные токены окна (по объёму покупок) — кандидаты для скана."""
         now = time.time()

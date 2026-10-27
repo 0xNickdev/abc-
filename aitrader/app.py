@@ -2432,6 +2432,9 @@ def _flow_market(mint: str, rate: float) -> dict | None:
         return None
     m1 = pumpflow.FLOW.metrics(mint, 3600) or {}
     out = dict(price=px[0] * rate, liq=2.0 * float(m1.get("liq_sol") or 0) * rate, src="flow")
+    age_s = m1.get("age_s")
+    if isinstance(age_s, (int, float)):
+        out["age_h"] = round(age_s / 3600, 3)
     if mint.endswith("pump"):                       # pump-токены: саплай ровно 1 млрд
         out["mcap"] = px[0] * pumpflow.PUMP_SUPPLY * rate
         if m1.get("venue") == "amm":
@@ -2498,7 +2501,8 @@ def _markets() -> dict:
         mid=dict(min_mcap=MID_MIN_MCAP, max_mcap=MID_MAX_MCAP, min_liq=MID_MIN_LIQ, max_age_h=MID_MAX_AGE_H,
                  delay_s=MID_ENTRY_DELAY_S, size=MID_SIZE_SOL, label="mid", strat="Mid $200k+", tag="MID"),
         snipe=dict(min_mcap=SNIPE_MIN_MCAP, max_mcap=SNIPE_MAX_MCAP, min_liq=SNIPE_MIN_LIQ, max_age_h=SNIPE_MAX_AGE_H,
-                   delay_s=0.0, size=SNIPE_SIZE_SOL, label="snipe", strat="Snipe fresh", tag="SNIPE"))
+                   delay_s=0.0, size=SNIPE_SIZE_SOL, label="snipe", strat="Snipe fresh", tag="SNIPE",
+                   curve=True, curve_min_age_s=float(os.getenv("ABC_SNIPE_CURVE_MIN_AGE_S", "300") or 0)))
 
 # 22.10 разбор: 36 рагов mid (−10.5 SOL при +4.08 без них) — копии чужих тикеров (HELL ×3,
 # USDF/NODF/ECTF/Kimchi/NTDA ×2), каждый со свежего кошелька-создателя → история деплоера не ловит.
@@ -2641,6 +2645,10 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
     if chain != "sol" or rate <= 0:
         return dict(decisions=[], portfolio=_portfolio(s), positions=[], mode=s.mode)
     cands = [c[0] for c in pumpflow.FLOW.mid_candidates(MK["min_mcap"] / rate, (MK["min_liq"] / 2) / rate)]
+    if MK.get("curve"):                                # снайп: + свежие токены на бондинг-кривой (до миграции)
+        cands += [c[0] for c in pumpflow.FLOW.curve_candidates(
+            MK["min_mcap"] / rate, MK["max_mcap"] / rate, MK["min_liq"] / rate,
+            min_age_s=MK.get("curve_min_age_s", 300), max_age_s=MK["max_age_h"] * 3600)]
     try:
         import venues
         for m in venues.WATCH.mints():
@@ -2672,9 +2680,10 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
             continue                                   # торгуют в чужом пуле
         px = pumpflow.FLOW.price(m)
         dpx = float(d.get("dex_price") or 0)          # сверка «тот ли пул» с DexScreener (поток ≈ Dex)
-        ratio = (px[0] * rate / dpx) if px and dpx > 0 else 0
-        if not 0.7 <= ratio <= 1.43:
-            continue                                   # поток и Dex не сходятся — цене не верим
+        if dpx > 0:                                    # у кривой до миграции пары на Dex нет — сверять нечем
+            ratio = (px[0] * rate / dpx) if px else 0
+            if not 0.7 <= ratio <= 1.43:
+                continue                               # поток и Dex не сходятся — цене не верим
         # 23.10: сразу после рестарта поток пуст → признаки модели пустые → раги проходили (KFC −99%,
         # SHAVCOIN −56% в первую минуту). Без живых данных потока по токену — не входим.
         snap = pumpflow.FLOW.entry_snapshot(m) or {}

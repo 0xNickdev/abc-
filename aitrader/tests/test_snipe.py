@@ -45,3 +45,30 @@ def test_snipe_position_uses_mid_exits():
     rc = dict(hard_stop_pct=0.5, trailing_pct=0.25, tp_ladder=[])
     pos = dict(market="snipe", pnl=-0.25, peak_pnl=0.0, opened_ts=time.time() - 60, tp_taken=[])
     assert bot.decide_exit(pos, None, rc).reason.startswith("Mid stop")   # снайп = те же выходы
+
+
+def test_curve_candidates_fresh_only():
+    import pumpflow
+    f = pumpflow.PumpFlow()
+    now = time.time()
+    # свежий на кривой в диапазоне возраста/капы → кандидат
+    good = f._get("Crv1111111111111111111111111111111111111pump", now)
+    good.venue, good.price_sol, good.created_ts, good.last_ts = "curve", 5e-5, now - 600, now
+    good.real_sol = int(20e9)
+    # слишком молодой (<5 мин) — нет окна спроса
+    young = f._get("Crv2222222222222222222222222222222222222pump", now)
+    young.venue, young.price_sol, young.created_ts, young.last_ts = "curve", 5e-5, now - 60, now
+    young.real_sol = int(20e9)
+    # мигрировал (complete) — это уже mid, не кривая
+    mig = f._get("Crv3333333333333333333333333333333333333pump", now)
+    mig.venue, mig.price_sol, mig.created_ts, mig.last_ts, mig.complete = "curve", 5e-5, now - 600, now, True
+    out = [c[0] for c in f.curve_candidates(1, 1e12, 1, min_age_s=300, max_age_s=3600)]
+    assert "Crv1111111111111111111111111111111111111pump" in out
+    assert "Crv2222222222222222222222222222222222222pump" not in out
+    assert "Crv3333333333333333333333333333333333333pump" not in out
+
+
+def test_snipe_profile_has_curve():
+    mk = appmod._markets()["snipe"]
+    assert mk.get("curve") is True and mk["curve_min_age_s"] == 300
+    assert appmod._markets()["mid"].get("curve") is None   # mid кривую не трогает
