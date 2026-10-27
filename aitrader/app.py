@@ -2484,6 +2484,22 @@ MID_MAX_AGE_H = float(os.getenv("ABC_MID_MAX_AGE_H", "72") or 72)   # 23.10: 24 
 # зажимается потолком бота ABC_BOT_MAX_TRADE_SOL.
 MID_SIZE_SOL = float(os.getenv("ABC_MID_SIZE_SOL", "0") or 0)
 
+# Снайп (27.10, юзер): ранний рынок свежих токенов сразу после миграции — ниже капа, возраст
+# минуты, вход без задержки. Тот же проверенный фильтр спроса 5м + rug-щит, что и у mid.
+SNIPE_MIN_MCAP = float(os.getenv("ABC_SNIPE_MIN_MCAP", "30000") or 30000)
+SNIPE_MAX_MCAP = float(os.getenv("ABC_SNIPE_MAX_MCAP", "500000") or 500000)
+SNIPE_MIN_LIQ = float(os.getenv("ABC_SNIPE_MIN_LIQ", "8000") or 8000)
+SNIPE_MAX_AGE_H = float(os.getenv("ABC_SNIPE_MAX_AGE_H", "1") or 1)       # до часа от роду
+SNIPE_SIZE_SOL = float(os.getenv("ABC_SNIPE_SIZE_SOL", "0.3") or 0)
+
+def _markets() -> dict:
+    """Профили рынков для общего сканера. Читаются на каждом тике (переключение на лету)."""
+    return dict(
+        mid=dict(min_mcap=MID_MIN_MCAP, max_mcap=MID_MAX_MCAP, min_liq=MID_MIN_LIQ, max_age_h=MID_MAX_AGE_H,
+                 delay_s=MID_ENTRY_DELAY_S, size=MID_SIZE_SOL, label="mid", strat="Mid $200k+", tag="MID"),
+        snipe=dict(min_mcap=SNIPE_MIN_MCAP, max_mcap=SNIPE_MAX_MCAP, min_liq=SNIPE_MIN_LIQ, max_age_h=SNIPE_MAX_AGE_H,
+                   delay_s=0.0, size=SNIPE_SIZE_SOL, label="snipe", strat="Snipe fresh", tag="SNIPE"))
+
 # 22.10 разбор: 36 рагов mid (−10.5 SOL при +4.08 без них) — копии чужих тикеров (HELL ×3,
 # USDF/NODF/ECTF/Kimchi/NTDA ×2), каждый со свежего кошелька-создателя → история деплоера не ловит.
 # Тикер, который уже сливался, не покупаем RUG_SYM_DAYS дней; в одном скане из одноимённых — только
@@ -2614,16 +2630,17 @@ def _hotbot_rules(d: dict, snap: dict, fund: dict | None = None, uniq_h1: int | 
         return f"turnover {tv:g}"
     return None
 
-def screen_mid(chain: str, s: UserSession | None = None) -> dict:
-    """Рынок от $200k (16.10): кандидаты из своего потока (PumpSwap + Raydium/Meteora из venues),
-    сверка DexScreener; моложе суток, ликвидность ≥ $15k, цена потока ≈ Dex, пул не чужой.
-    Без GMGN (баны) и без LLM — правила как в симуляции. Мониторинг цен/выходы — watcher."""
+def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") -> dict:
+    """Общий сканер своего потока для рынков mid и snipe (профиль из _markets): кандидаты из
+    потока (PumpSwap + venues), сверка DexScreener, фильтр спроса 5м + rug-щит, цена потока ≈ Dex.
+    Без GMGN и LLM. Мониторинг/выходы — watcher. mkt задаёт капу/возраст/размер/задержку/метку."""
     s = s or ST
+    MK = _markets().get(mkt, _markets()["mid"])
     rate = pumpcurve.sol_usd()
     decisions = []
     if chain != "sol" or rate <= 0:
         return dict(decisions=[], portfolio=_portfolio(s), positions=[], mode=s.mode)
-    cands = [c[0] for c in pumpflow.FLOW.mid_candidates(MID_MIN_MCAP / rate, (MID_MIN_LIQ / 2) / rate)]
+    cands = [c[0] for c in pumpflow.FLOW.mid_candidates(MK["min_mcap"] / rate, (MK["min_liq"] / 2) / rate)]
     try:
         import venues
         for m in venues.WATCH.mints():
@@ -2646,9 +2663,9 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
     for m in cands:
         dexd = info.get(m)
         d = _mid_market(m, dexd, rate)
-        if not d or d["mcap"] < MID_MIN_MCAP or d["mcap"] > MID_MAX_MCAP or d["liq"] < MID_MIN_LIQ:
+        if not d or d["mcap"] < MK["min_mcap"] or d["mcap"] > MK["max_mcap"] or d["liq"] < MK["min_liq"]:
             continue
-        if d.get("age_h") is None or d["age_h"] >= MID_MAX_AGE_H:
+        if d.get("age_h") is None or d["age_h"] >= MK["max_age_h"]:
             continue
         fm = pumpflow.FLOW.metrics(m, 300) or {}
         if fm.get("pool_canonical") is False:
@@ -2694,7 +2711,7 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
         # команда агентов (агенты разбирают токен, пока идёт задержка входа — к входу вердикт готов)
         agents.TEAM.request(m, d, snap, fund, rug, ctx=dict(stage="rules_pass"))
         first = _MID_FIRST.setdefault(m, now)
-        if now - first < MID_ENTRY_DELAY_S:
+        if now - first < MK["delay_s"]:
             hot_cut["delay"] = hot_cut.get("delay", 0) + 1
             continue
         av = agents.TEAM.verdict(m)
@@ -2714,9 +2731,9 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
             best[k] = max(best.get(k, 0), d["liq"])
     rows = [r for r in rows if not (r[2].get("sym") and r[2]["liq"] < best.get(r[2]["sym"].lower(), 0))]
     rows.sort(key=lambda r: -r[0])                     # активнее за час — первым
-    size = MID_SIZE_SOL if MID_SIZE_SOL > 0 else position_size()
+    size = MK["size"] if MK["size"] > 0 else position_size()
     for vol, m, d, fm in rows[:20]:
-        feats = dict(market="mid", mcap=d["mcap"], liquidity=d["liq"], age_h=d["age_h"], vol_h1=vol,
+        feats = dict(market=MK["label"], mcap=d["mcap"], liquidity=d["liq"], age_h=d["age_h"], vol_h1=vol,
                      buys_h1=d.get("buys_h1"), sells_h1=d.get("sells_h1"), chg_h1=d.get("chg_h1"),
                      dex=d.get("dex"), buy_ratio=fm.get("buy_ratio"), unique_buyers_5m=fm.get("unique_buyers"),
                      rug_p=fm.get("rug_p"))
@@ -2725,19 +2742,31 @@ def screen_mid(chain: str, s: UserSession | None = None) -> dict:
             feats.update(agent_decision=av["decision"], agent_pwin=av.get("p_win"), agent_conf=av["confidence"], agent_risk=av["risk"],
                          agent_bull=av["bull"]["score"], agent_bear=av["bear"]["score"])
         sym = sanitize(fm.get("symbol") or m[:6])
-        decisions.append(dict(decision=dict(symbol=sym, address=m, action="ACTION", reason="mid market: HOTBOT rules",
+        decisions.append(dict(decision=dict(symbol=sym, address=m, action="ACTION", reason=f"{MK['label']} market: HOTBOT rules",
                                             size_sol=size, priority=100, features=feats,
-                                            abc=dict(triggered=True, score=float(vol), strategy="Mid $200k+")),
+                                            abc=dict(triggered=True, score=float(vol), strategy=MK["strat"])),
                               exec=None))
     hot = ", ".join(f"{k} {v}" for k, v in sorted(hot_cut.items(), key=lambda kv: -kv[1])) or "0"
-    log("SCREEN", "MID", f"mid market: {len(cands)} in flow → {len(rows)} pass (rug model cut {rug_cut}; HOTBOT cut {hot}) → {len(decisions)} candidates",
+    log("SCREEN", MK["tag"], f"{MK['label']} market: {len(cands)} in flow → {len(rows)} pass (rug model cut {rug_cut}; HOTBOT cut {hot}) → {len(decisions)} candidates",
         mode=s.mode, pubkey=s.pubkey)
     positions = [dict(address=p["address"], severity=0) for p in s.positions]
     return dict(decisions=decisions, portfolio=_portfolio(s), positions=positions, mode=s.mode)
 
+def screen_mid(chain: str, s: UserSession | None = None) -> dict:
+    return screen_market(chain, s, "mid")
+
+def screen_snipe(chain: str, s: UserSession | None = None) -> dict:
+    return screen_market(chain, s, "snipe")
+
 def _screen_for(sess: "UserSession"):
-    """Скан по рынку бота (cfg «market» читается на каждом тике — переключение на лету)."""
-    return lambda c: screen_mid(c, sess) if sess.bot.cfg.get("market") == "mid" else screen_once(c, sess)
+    """Скан по рынку бота (cfg «market» читается на каждом тике — переключение на лету):
+    mid / snipe идут через свой поток, всё прочее (fresh) — старый GMGN-скан."""
+    def run(c):
+        mkt = sess.bot.cfg.get("market")
+        if mkt in ("mid", "snipe"):
+            return screen_market(c, sess, mkt)
+        return screen_once(c, sess)
+    return run
 
 def screen_once(chain: str, s: UserSession | None = None) -> dict:
     s = s or ST                       # 会话（多用户：每 pubkey 自己的过滤器/持仓/风控）
@@ -3129,8 +3158,8 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
     g = s.adapter_for(chain)
     mkt_liq, mkt_dex = 0.0, None                 # пул/площадка из пары DexScreener (для издержек)
     try:
-        if market == "mid":                      # рынок от $200k: только DexScreener — тот же
-            raise RuntimeError("mid market: DexScreener price source")   # источник, что у watcher
+        if market in ("mid", "snipe"):           # свой поток: источник цены — как у watcher
+            raise RuntimeError("flow market: price from our stream")
         info = g.token_info(address)
         sec  = g.token_security(address)         # 已归一化安全快照（建仓基线，逃生 diff 用）
     except Exception as e:
@@ -3140,7 +3169,7 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         pr = {}
         # 25.10: мид-рынок покупает по цене СВОЕГО потока (DexScreener отстаёт на 30–60 с — на бумаге
         # это была покупка по устаревшей цене). Тикер — из кэша скана; DexScreener — только запасной.
-        fl = _flow_market(address, pumpcurve.sol_usd()) if market == "mid" and chain == "sol" else None
+        fl = _flow_market(address, pumpcurve.sol_usd()) if market in ("mid", "snipe") and chain == "sol" else None
         if fl:
             cached = (_MID_DEX.get(address) or (0, None))[1] or {}
             info = dict(symbol=cached.get("sym") or (pumpflow.FLOW.metrics(address, 60) or {}).get("symbol")
@@ -3168,10 +3197,10 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
                  top10=sec.get("top10", 0.0))
     symbol = sanitize(info.get("symbol", ""))
     try:
-        if market == "mid" and info.get("price"):
-            entry_price = _f(info["price"])          # мид: цена потока (или Dex-пары, если потока нет)
-        elif market == "mid":
-            raise RuntimeError("mid: entry from DexScreener")
+        if market in ("mid", "snipe") and info.get("price"):
+            entry_price = _f(info["price"])          # свой поток (или Dex-пара, если потока нет)
+        elif market in ("mid", "snipe"):
+            raise RuntimeError("flow market: entry from DexScreener")
         else:
             entry_price = g.token_price(address)     # 建仓价（逃生监控算涨跌基准）
     except Exception:
@@ -4450,9 +4479,10 @@ def _bot_buy_fn(sess: UserSession):
         if mode != "n3":                           # n1/n2: не меньше минимума (фикс-издержки)
             size_sol = max(size_sol, min(CFG["bot_min_per_trade_sol"], cap))
         size_sol = round(size_sol, 4)
-        mid = sess.bot.cfg.get("market") == "mid"
+        _mkt = sess.bot.cfg.get("market")
+        flow_mkt = _mkt in ("mid", "snipe")          # mid/snipe идут через свой поток, не GMGN
         # протухшие рыночные данные (GMGN в бане/кулдауне) → не входим по старой цене/метрикам
-        age = None if mid else MK.trending_age(chain)
+        age = None if flow_mkt else MK.trending_age(chain)
         if age is not None and age > BOT_MAX_DATA_AGE_S:
             msg = f"stale market data {age:.0f}s > {BOT_MAX_DATA_AGE_S:.0f}s"
             log("BUY_BLOCK", address[:8], msg, mode=sess.mode, pubkey=sess.pubkey)
@@ -4463,7 +4493,7 @@ def _bot_buy_fn(sess: UserSession):
             log("BUY_BLOCK", address[:8], rb, mode=sess.mode, pubkey=sess.pubkey)
             raise HTTPException(409, rb)
         # авто-Verify: red flag → входа нет (bot.stats считает как blocked, не error)
-        if BOT_VERIFY and chain == "sol" and not mid:   # mid: детекторы на GMGN не дёргаем (баны)
+        if BOT_VERIFY and chain == "sol" and not flow_mkt:   # mid/snipe: детекторы на GMGN не дёргаем (баны)
             flag = preentry_red_flags(address)
             if flag:
                 log("BUY_BLOCK", address[:8], f"auto-verify: {flag}", mode=sess.mode,
@@ -4476,7 +4506,7 @@ def _bot_buy_fn(sess: UserSession):
         if mode == "n3":            # сеть/подтверждение — без замка (его ждут стопы watcher'а)
             return _n3_execute(sess, "buy", chain, address, size_sol=size_sol, lock=sess.lock)
         return do_buy(chain, address, size_sol, sess, lock=sess.lock, auto=True,
-                      **({"market": "mid"} if mid else {}))
+                      **({"market": _mkt} if flow_mkt else {}))
     return fn
 
 def _bot_sell_fn(sess: UserSession):
@@ -4612,8 +4642,8 @@ def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader, x_auth: 
         raise HTTPException(400, "mode: n1 | n2 | n3")
     if "poll_s" in patch:                          # 0/минус = busy-loop по GMGN (бан IP)
         patch["poll_s"] = max(5.0, float(patch["poll_s"]))
-    if "market" in patch and patch["market"] not in ("mid", "fresh"):
-        raise HTTPException(400, "market: mid | fresh")
+    if "market" in patch and patch["market"] not in ("mid", "snipe", "fresh"):
+        raise HTTPException(400, "market: mid | snipe | fresh")
     if "max_dump_pct" in patch:
         patch["max_dump_pct"] = max(0.0, min(100.0, float(patch["max_dump_pct"])))
     if "max_new_per_tick" in patch:

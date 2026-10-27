@@ -128,7 +128,7 @@ def decide_exit(pos: dict, severity, risk_cfg: dict, bot_cfg: dict | None = None
     ladder = risk_cfg.get("tp_ladder", []) or []
     taken = pos.get("tp_taken", []) or []
 
-    if pos.get("market") == "mid":                  # рынок бота: выходы HOTBOT
+    if pos.get("market") in ("mid", "snipe"):       # рынок бота: выходы HOTBOT
         sl = float(bc.get("mid_sl", 0.20))
         sh = pos.get("flow_shock")                  # (ts, падение цены, доля пула) крупной продажи после входа
         sd, sp = float(bc.get("mid_shock_drop", 0.15)), float(bc.get("mid_shock_pool", 0.25))
