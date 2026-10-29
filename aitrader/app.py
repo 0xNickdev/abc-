@@ -2058,14 +2058,22 @@ def health_snapshot() -> dict:
     ws = (watcher.stats() or {}).get("ws_state")
     if ws == "dead":
         alerts.append("Real-time WS thread is dead (stops fall back to 2s polling)")
-    if bot_on and MK.is_live_adapter:
+    # mid/snipe идут через СВОЙ поток (pumpflow), GMGN не используют — возраст его данных
+    # к торговле не относится. Эти алерты только для старого рынка fresh (GMGN trending).
+    flow_mkt = (ST.bot.cfg.get("market") in ("mid", "snipe"))
+    if bot_on and MK.is_live_adapter and not flow_mkt:
         if age is None:
             if time.time() - _PROC_START > ALERT_STALE_MIN * 60:
                 alerts.append("No market data from GMGN since start: bot is not trading")
         elif age > ALERT_STALE_MIN * 60:
             alerts.append(f"Market data is {age / 60:.0f} min old: bot is not trading")
-        if idle > ALERT_IDLE_H * 3600:
-            alerts.append(f"Bot idle: no trades for {idle / 3600:.0f}h")
+    if bot_on and flow_mkt:
+        fl = (watcher.stats() or {}).get("flow") or {}
+        up = fl.get("uptime_s") or 0
+        if fl.get("state") != "on" or (up > 300 and not fl.get("trades") and not fl.get("amm_trades")):
+            alerts.append("Flow stream has no trades: bot is not trading")   # реальная проблема потока
+    if bot_on and MK.is_live_adapter and idle > ALERT_IDLE_H * 3600:
+        alerts.append(f"Bot idle: no trades for {idle / 3600:.0f}h (filters very selective)")
     return dict(gmgn=g, trending_age_s=(round(age) if age is not None else None),
                 last_trade_ago_s=round(idle), bot_enabled=bot_on,
                 telegram=notify.enabled(), alerts=alerts)

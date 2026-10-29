@@ -219,6 +219,18 @@ class TestHealth:
         h = appmod.health_snapshot()
         assert any("Market data is 60 min old" in a for a in h["alerts"])
 
+    def test_mid_market_ignores_gmgn_age(self, tmp_path, monkeypatch):
+        _mu_client(tmp_path, monkeypatch)
+        import time as _t
+        bot = types.SimpleNamespace(enabled=True, cfg={"poll_s": 20, "market": "mid"},
+                                    stats={"last_tick": _t.strftime("%Y-%m-%d %H:%M:%S")})
+        risk = types.SimpleNamespace(halted=False, consec_losses=0)
+        monkeypatch.setattr(appmod, "ST", types.SimpleNamespace(bot=bot, risk=risk, positions=[], mode="SHADOW"))
+        monkeypatch.setattr(appmod, "MK", types.SimpleNamespace(is_live_adapter=True, trending_age=lambda ch: 3600.0))
+        monkeypatch.setattr(appmod.watcher, "stats", lambda: {"flow": {"state": "on", "uptime_s": 9000, "trades": 100, "amm_trades": 200}})
+        h = appmod.health_snapshot()
+        assert not any("GMGN" in a or "Market data is" in a for a in h["alerts"])   # mid не зависит от GMGN
+
     def test_healthy_has_no_alerts(self, tmp_path, monkeypatch):
         _mu_client(tmp_path, monkeypatch)
         monkeypatch.setattr(gmgnguard, "GUARD", gmgnguard.Guard())
