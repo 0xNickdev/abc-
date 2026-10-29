@@ -138,3 +138,17 @@ class TestBreakevenExit:
         assert bot.decide_exit(moved, None, self.rc).action == "HOLD"
         half = self.pos(tp_taken=[0], peak_pnl=1.3, pnl=0.9)          # уже зафиксировали ½ на 2×
         assert bot.decide_exit(half, None, self.rc).action == "HOLD"
+
+
+def test_gc_keeps_held_positions():
+    """29.10: токен с открытой позицией (watch) не выкидывается GC — иначе цена теряется, стоп слепнет."""
+    import pumpflow
+    f = pumpflow.PumpFlow()
+    held = f._get("Held111111111111111111111111111111111111pump", time.time())
+    held.last_ts = time.time() - pumpflow.KEEP_S - 100          # давно без сделок
+    gone = f._get("Gone111111111111111111111111111111111111pump", time.time())
+    gone.last_ts = time.time() - pumpflow.KEEP_S - 100
+    f.watch = {"Held111111111111111111111111111111111111pump"}
+    f._gc(time.time())
+    assert "Held111111111111111111111111111111111111pump" in f._m   # держим — не удаляем
+    assert "Gone111111111111111111111111111111111111pump" not in f._m

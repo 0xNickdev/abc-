@@ -771,7 +771,9 @@ class PumpFlow:
 
     def _gc(self, now: float):
         self._last_gc = now
-        dead = [m for m, mf in self._m.items() if now - mf.last_ts > KEEP_S]
+        # не выкидываем токены, по которым у нас ОТКРЫТА позиция (self.watch): иначе теряем цену,
+        # позиция в мониторе зависает слепой (стоп/тейк не работают). Раг = сделка → поток оживёт.
+        dead = [m for m, mf in self._m.items() if now - mf.last_ts > KEEP_S and m not in self.watch]
         for m in dead:
             self._remember_creator(self._m[m])
             del self._m[m]
