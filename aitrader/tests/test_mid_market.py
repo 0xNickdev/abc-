@@ -121,6 +121,7 @@ def mid(monkeypatch):
     monkeypatch.setattr(appmod.rugmodel, "threshold", lambda: 0.5)
     monkeypatch.setattr(appmod, "MID_ENTRY_DELAY_S", 0)
     monkeypatch.setattr(appmod.agents, "provider", lambda: None)   # без реальных LLM-вызовов в тестах
+    monkeypatch.setattr(appmod.zooai, "MODE", "off")               # без реальных запросов к ZOOAI
     return appmod.ST
 
 

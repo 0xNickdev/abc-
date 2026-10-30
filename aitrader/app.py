@@ -52,6 +52,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 import agents  # команда агентов (бык/медведь/риск) поверх правил mid — тень или вето
+import zooai  # фильтр входа по модели ZOOAI (шансы роста/дев-дамп, отсев рагов)
 import argus  # Telegram-бот аналитики коллов (ачивки, сигналы, отчёт по контракту)
 import backtest  # 纸面/SHADOW 回测复盘（已实现 PnL/胜率/R）
 import bot  # 自主执行回路（量化机器人，纸面优先）
@@ -2725,6 +2726,15 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
             k = why.split()[0]
             hot_cut[k] = hot_cut.get(k, 0) + 1
             continue
+        # ZOOAI (30.10): калиброванные шансы/отсев рага ДО входа (AUC 0.89, модель юзера).
+        zv = zooai.check(m) if zooai.enabled() else None
+        if zooai.MODE == "gate":
+            zb = zooai.block_reason(zv)
+            if zb:
+                k = zb.split()[1] if len(zb.split()) > 1 else "zooai"
+                hot_cut["zooai_" + k] = hot_cut.get("zooai_" + k, 0) + 1
+                continue
+        fm = dict(fm, zooai=zv)
         # команда агентов (агенты разбирают токен, пока идёт задержка входа — к входу вердикт готов)
         agents.TEAM.request(m, d, snap, fund, rug, ctx=dict(stage="rules_pass"))
         first = _MID_FIRST.setdefault(m, now)
@@ -2754,6 +2764,10 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
                      buys_h1=d.get("buys_h1"), sells_h1=d.get("sells_h1"), chg_h1=d.get("chg_h1"),
                      dex=d.get("dex"), buy_ratio=fm.get("buy_ratio"), unique_buyers_5m=fm.get("unique_buyers"),
                      rug_p=fm.get("rug_p"))
+        zv = fm.get("zooai")
+        if zv:                                         # шансы ZOOAI — в признаки сделки (тень → сверка с исходом)
+            feats.update(zooai_run=zv.get("run"), zooai_vsavg=zv.get("vs_average"),
+                         zooai_devdumps=zv.get("dev_dumps"), zooai_verdict=zv.get("verdict"))
         av = fm.get("agent")
         if av:                                         # вердикт агентов — в признаки сделки (тень → сверка с исходом)
             feats.update(agent_decision=av["decision"], agent_pwin=av.get("p_win"), agent_conf=av["confidence"], agent_risk=av["risk"],
@@ -3773,6 +3787,7 @@ def api_status(x_wallet: str | None = WalletHeader, x_auth: str | None = AuthHea
                 learn=learn.REC.snapshot(),
                 funding=__import__("funding").FUND.snapshot(),
                 agents=agents.TEAM.snapshot(),
+                zooai=zooai.snapshot(),
                 venues=__import__("venues").WATCH.snapshot(),
                 health=health_snapshot(),
                 trending_cmd=MK.get_trending_cmd(MK.chain))
