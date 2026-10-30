@@ -2767,7 +2767,9 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
         zv = fm.get("zooai")
         if zv:                                         # шансы ZOOAI — в признаки сделки (тень → сверка с исходом)
             feats.update(zooai_run=zv.get("run"), zooai_vsavg=zv.get("vs_average"),
-                         zooai_devdumps=zv.get("dev_dumps"), zooai_verdict=zv.get("verdict"))
+                         zooai_devdumps=zv.get("dev_dumps"), zooai_verdict=zv.get("verdict"),
+                         zooai_cabal=zv.get("funder_cabal"), zooai_dumped48h=zv.get("dumped48h"),
+                         zooai_bundlers_held=zv.get("bundlers_held"), zooai_funder=zv.get("funder_label"))
         av = fm.get("agent")
         if av:                                         # вердикт агентов — в признаки сделки (тень → сверка с исходом)
             feats.update(agent_decision=av["decision"], agent_pwin=av.get("p_win"), agent_conf=av["confidence"], agent_risk=av["risk"],

@@ -18,6 +18,9 @@ MODE = os.getenv("ABC_ZOOAI", "gate").strip().lower()                 # off | sh
 MIN_RUN = float(os.getenv("ABC_ZOOAI_MIN_RUN", "0.03") or 0)          # ниже шанса роста — не входим
 MIN_VS_AVG = float(os.getenv("ABC_ZOOAI_MIN_VSAVG", "0") or 0)        # или: во сколько раз выше среднего
 MAX_DEVDUMPS = float(os.getenv("ABC_ZOOAI_MAX_DEVDUMPS", "0.6") or 0)  # выше шанса дев-дампа — режем
+# кабала/кошельки (facts+funding): финансёр-рагер, дев сливает серийно, бандлеры держат много
+MAX_DUMPED48H = int(os.getenv("ABC_ZOOAI_MAX_DUMPED48H", "3") or 0)   # дев слил столько своих запусков за 48ч
+MAX_BUNDLERS_HELD = float(os.getenv("ABC_ZOOAI_MAX_BUNDLERS_HELD", "30") or 0)  # % саплая у бандлеров сейчас
 TTL_S = float(os.getenv("ABC_ZOOAI_TTL_S", "600") or 600)
 TIMEOUT = float(os.getenv("ABC_ZOOAI_TIMEOUT", "6") or 6)
 
@@ -48,9 +51,16 @@ def check(mint: str) -> dict | None:
         r.raise_for_status()
         d = r.json() or {}
         odds = d.get("odds") or {}
+        fa, fu = d.get("facts") or {}, d.get("funding") or {}
+        # кабала: финансёр НЕ биржа и кормит других девов, которые сливают
+        cabal = bool(fu.get("funder") and not fu.get("funderIsHot")
+                     and (fu.get("otherCreators") or 0) > 0 and (fu.get("theirDumps48h") or 0) > 0)
         out = dict(verdict=d.get("verdict"), proceed=d.get("proceed"),
                    run=_fnum(odds.get("run")), vs_average=_fnum(odds.get("vsAverage")),
                    dev_dumps=_fnum(odds.get("devDumps")),
+                   dumped48h=fa.get("creatorDumped48h"), dump_min=fa.get("creatorMedianDumpMin"),
+                   bundlers_held=_fnum(fa.get("bundlersHeldPct")), funder_cabal=cabal,
+                   funder_label=fu.get("funderLabel"), other_dumpers=fu.get("theirDumps48h"),
                    reasons=[str(x)[:120] for x in (d.get("reasons") or [])][:4])
     except Exception:
         STATS["errors"] += 1
@@ -77,6 +87,17 @@ def block_reason(z: dict | None) -> str | None:
     if dd is not None and MAX_DEVDUMPS > 0 and dd > MAX_DEVDUMPS:
         STATS["dev_dump"] += 1
         return f"zooai devDumps {dd:.2f}"
+    if z.get("funder_cabal"):                                         # финансёр-рагер кормит сливщиков
+        STATS["cabal"] = STATS.get("cabal", 0) + 1
+        return "zooai cabal"
+    d48 = z.get("dumped48h")
+    if d48 is not None and MAX_DUMPED48H > 0 and d48 >= MAX_DUMPED48H:  # дев серийно сливает свои запуски
+        STATS["serial_dump"] = STATS.get("serial_dump", 0) + 1
+        return f"zooai dumped48h {d48}"
+    bh = z.get("bundlers_held")
+    if bh is not None and MAX_BUNDLERS_HELD > 0 and bh >= MAX_BUNDLERS_HELD:  # бандлеры держат крупную долю
+        STATS["bundle"] = STATS.get("bundle", 0) + 1
+        return f"zooai bundlers {bh:g}%"
     STATS["pass_"] += 1
     return None
 

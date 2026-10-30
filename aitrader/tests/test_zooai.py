@@ -48,3 +48,31 @@ def test_check_fail_open(monkeypatch):
     monkeypatch.setattr(httpx, "get", boom)
     monkeypatch.setattr(zooai, "_cache", {})
     assert zooai.check("Mint2") is None                                   # ошибка → None (не блокируем)
+
+
+def test_cabal_and_wallet_gates(monkeypatch):
+    monkeypatch.setattr(zooai, "MIN_RUN", 0)
+    monkeypatch.setattr(zooai, "MAX_DEVDUMPS", 0)
+    monkeypatch.setattr(zooai, "MAX_DUMPED48H", 3)
+    monkeypatch.setattr(zooai, "MAX_BUNDLERS_HELD", 30)
+    assert zooai.block_reason(dict(funder_cabal=True)) == "zooai cabal"
+    assert zooai.block_reason(dict(dumped48h=4)).startswith("zooai dumped48h")
+    assert zooai.block_reason(dict(dumped48h=1)) is None
+    assert zooai.block_reason(dict(bundlers_held=45)).startswith("zooai bundlers")
+    assert zooai.block_reason(dict(bundlers_held=10)) is None
+    assert zooai.block_reason(dict(funder_cabal=False, dumped48h=1, bundlers_held=10)) is None
+
+
+def test_check_extracts_cabal(monkeypatch):
+    import httpx
+    def fake_get(url, **kw):
+        class R:
+            def raise_for_status(self): pass
+            def json(self): return dict(verdict="avoid", proceed=False, odds={},
+                facts=dict(creatorDumped48h=5, bundlersHeldPct=40),
+                funding=dict(funder="W", funderIsHot=False, otherCreators=3, theirDumps48h=12, funderLabel=None))
+        return R()
+    monkeypatch.setattr(httpx, "get", fake_get)
+    monkeypatch.setattr(zooai, "_cache", {})
+    z = zooai.check("M")
+    assert z["funder_cabal"] is True and z["dumped48h"] == 5 and z["bundlers_held"] == 40.0
