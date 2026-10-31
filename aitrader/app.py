@@ -2562,7 +2562,8 @@ HOT = dict(chg_h1_min=float(os.getenv("ABC_HOT_CHG_H1_MIN", "-1e9") or -1e9),
            # у рагов медиана ~42%, у не-рагов ~19%. Порог 20% режет долю рагов 30%→12%, сохраняя
            # 45% когорты и средний +16%. Был 30% — пропускал раги. env ABC_HOT_CRASH_1M_MAX.
            crash_1m_max=float(os.getenv("ABC_HOT_CRASH_1M_MAX", "20") or 20),
-           launch_x10s_max=3.0, dev_max=10.0, insiders_max=10.0, snipers_max=10.0, holders_min=100, dev_rugs_max=0,
+           launch_x10s_max=float(os.getenv("ABC_HOT_LAUNCH_X10S_MAX", "3") or 0),
+           dev_max=10.0, insiders_max=10.0, snipers_max=10.0, holders_min=100, dev_rugs_max=0,
            # 25.10: раги/мёртвые токены проходили — у них тонкий пул к капе и почти нет оборота.
            # Отсекаем худшую четверть по ликвидности и совсем стоячую торговлю (пороги в env).
            lp_mc_min=float(os.getenv("ABC_HOT_LP_MC_MIN", "0.05") or 0),
