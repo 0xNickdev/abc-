@@ -2495,6 +2495,8 @@ MID_MAX_AGE_H = float(os.getenv("ABC_MID_MAX_AGE_H", "72") or 72)   # 23.10: 24 
 # 25.10 (юзер): размер сделки мид-рынка. 0 = по формуле риска position_size(); итог всё равно
 # зажимается потолком бота ABC_BOT_MAX_TRADE_SOL.
 MID_SIZE_SOL = float(os.getenv("ABC_MID_SIZE_SOL", "0") or 0)
+# +к порогу модели рагов: больше = режет МЕНЬШЕ (0 = как обучено). Вариант 2 (01.11): торговать чаще.
+RUG_THR_ADD = float(os.getenv("ABC_RUG_THR_ADD", "0") or 0)
 
 # Снайп (27.10, юзер): ранний рынок свежих токенов сразу после миграции — ниже капа, возраст
 # минуты, вход без задержки. Тот же проверенный фильтр спроса 5м + rug-щит, что и у mid.
@@ -2702,6 +2704,8 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
         # модель рагов (17.10): отсекаем 30% самых рискованных — раги у молодых 4.6% → 0.2%
         rug = rugmodel.score(dexd or d, snap)          # модель обучена на полях DexScreener — им и кормим
         thr = rugmodel.threshold()
+        if thr is not None:
+            thr += RUG_THR_ADD                        # ослабить/ужесточить модель рагов на входе (env)
         if rug is not None and thr is not None and rug >= thr:
             rug_cut += 1
             continue
