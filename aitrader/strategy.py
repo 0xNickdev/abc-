@@ -187,6 +187,10 @@ _DEGEN_PRESET = dict(PRESET, max_concurrent_positions=5, risk_per_trade=0.015,
 _MIGRATION_PRESET = dict(PRESET, max_concurrent_positions=3, hard_stop_pct=0.15, trailing_pct=0.25,
                          tp_ladder=[], kill_switch_consec_losses=4)
 
+# Breakout bot (11.11): вход на пробое тихого диапазона; выходы задаёт bot.plan_exit (план Clip + трейлинг 20%).
+_BREAKOUT_PRESET = dict(PRESET, max_concurrent_positions=3, hard_stop_pct=0.20, trailing_pct=0.20,
+                        tp_ladder=[], kill_switch_consec_losses=4)
+
 DEFAULT_STRATEGY = "abc_alpha_v1"
 STRATEGIES = {
     "abc_alpha_v1": _mk(
@@ -214,6 +218,13 @@ STRATEGIES = {
          "продажа сразу после миграции на PumpSwap; не дошёл — стоп 15% или выход через 20 мин. "
          "Проверка на истории 08.11 без фильтров — в минусе; обкатка только на бумаге."),
         TRIGGER, _MIGRATION_PRESET, PRESET_FILTERS, market="migration"),
+    "breakout_v1": _mk(
+        "breakout_v1", "Breakout bot", "1.0",
+        ("Тот же рынок и фильтры, что у mid, но вход не в моментум, а на пробое тихого диапазона "
+         "(10 минут, размах до 10%, ≥3 покупателя за минуту, живая торговля). Выход — план Clip: "
+         "после +30% трейлинг 10%, всё на 2×, по цене входа, если не вырос за 10 минут; общий трейлинг 20%. "
+         "Механика взята у HOTBOT; обкатка только на бумаге."),
+        TRIGGER, _BREAKOUT_PRESET, PRESET_FILTERS, market="breakout"),
 }
 
 # Публичные описания для беты: ЧТО делает стратегия и как выходит — без порогов входа
@@ -242,7 +253,18 @@ PUBLIC = {
                      "or after 20 minutes. Experimental: it lost money in our backtest."),
         activity="High", risk="High",
         exit_note="Sells everything when the token graduates to PumpSwap, on a 15% stop, "
-                  "after one large dump, or after 20 minutes. These exits are fixed."),
+                  "after one large dump, or after 20 minutes. These exits are fixed.",
+        exit_label="Graduation · −15% stop · 20 min"),
+    "breakout_v1": dict(
+        name="Breakout bot", tagline="Waits for a quiet range to break. Paper only.",
+        description=("Screens the same tokens as the main bot, but instead of buying into a run it waits "
+                     "for the price to go quiet and then break upward with fresh buyers. Cuts trades that "
+                     "do not move within 10 minutes. Experimental."),
+        activity="Low", risk="Medium",
+        exit_note="Trails 20% below the high. Once up 30% the trail tightens to 10%, and everything is sold "
+                  "at 2×. Sells at the buy price if the token is not up after 10 minutes, after one large "
+                  "dump, or when trading stops. These exits are fixed.",
+        exit_label="20% trail · 2× target · 10 min floor"),
 }
 
 def _public_exits(preset: dict) -> dict:

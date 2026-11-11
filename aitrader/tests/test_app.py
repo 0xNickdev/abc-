@@ -662,7 +662,7 @@ class TestBotAPI:
 class TestStrategyRegistry:
     def test_registry_has_three_named_strategies(self):
         import strategy as st
-        assert set(st.STRATEGIES) == {"abc_alpha_v1", "abc_sniper_v1", "abc_degen_v1", "migration_v1"}
+        assert set(st.STRATEGIES) == {"abc_alpha_v1", "abc_sniper_v1", "abc_degen_v1", "migration_v1", "breakout_v1"}
         assert st.get("nonsense")["id"] == st.DEFAULT_STRATEGY   # fallback, не KeyError
 
     def test_degen_triggers_where_alpha_does_not(self):
@@ -689,7 +689,7 @@ class TestStrategyAPI:
 
     def test_list_and_default_active(self, client):
         d = client.get("/api/strategies", headers=self.H_A).json()
-        assert d["active"] == "abc_alpha_v1" and len(d["strategies"]) == 4
+        assert d["active"] == "abc_alpha_v1" and len(d["strategies"]) == 5
 
     def test_select_isolated_and_persistent(self, client):
         r = client.post("/api/strategy/select", json={"id": "abc_degen_v1"}, headers=self.H_A)

@@ -2521,6 +2521,16 @@ def _bot_market(sess) -> str | None:
     """Рынок бота сессии: стратегия с собственным рынком (Migration bot) важнее настройки бота."""
     return strategy.get(getattr(sess, "strategy_id", "")).get("market") or sess.bot.cfg.get("market")
 
+# Breakout bot: числа — открытые дефолты HOTBOT (types/breakout.ts, entryActivity.ts); max_up — анти-чейз
+# (не догонять, если цена уже ушла выше пробитого максимума на столько %).
+BRK_MINUTES = int(os.getenv("ABC_BRK_MINUTES", "10") or 10)
+BRK_RANGE_PCT = float(os.getenv("ABC_BRK_RANGE_PCT", "10") or 10)
+BRK_BUYERS = int(os.getenv("ABC_BRK_BUYERS", "3") or 0)
+BRK_MAX_UP_PCT = float(os.getenv("ABC_BRK_MAX_UP_PCT", "8") or 0)
+BRK_LAST_SWAP_S = float(os.getenv("ABC_BRK_LAST_SWAP_S", "15") or 15)
+BRK_BUCKETS = int(os.getenv("ABC_BRK_BUCKETS", "9") or 0)
+BRK_ACTIVE_BUYERS = int(os.getenv("ABC_BRK_ACTIVE_BUYERS", "3") or 0)
+
 def _markets() -> dict:
     """Профили рынков для общего сканера. Читаются на каждом тике (переключение на лету)."""
     return dict(
@@ -2532,7 +2542,13 @@ def _markets() -> dict:
         migration=dict(min_mcap=0.0, max_mcap=1e12, min_liq=0.0, max_age_h=MIG_MAX_AGE_H, delay_s=0.0,
                        size=MIG_SIZE_SOL, label="migration", strat="Migration", tag="MIGR",
                        curve=True, amm=False, agents=False, std_curve=True, curve_min_age_s=300.0,
-                       curve_min_sol=MIG_MIN_CURVE_SOL, curve_max_sol=MIG_MAX_CURVE_SOL))
+                       curve_min_sol=MIG_MIN_CURVE_SOL, curve_max_sol=MIG_MAX_CURVE_SOL),
+        # Breakout (11.11, вход SniperBot у HOTBOT): тот же рынок и фильтры, что mid, но покупка только на
+        # пробое тихого диапазона при живой торговле; без задержки входа.
+        breakout=dict(min_mcap=MID_MIN_MCAP, max_mcap=MID_MAX_MCAP, min_liq=MID_MIN_LIQ, max_age_h=MID_MAX_AGE_H,
+                      delay_s=0.0, size=MID_SIZE_SOL, label="breakout", strat="Breakout", tag="BRK",
+                      breakout=dict(minutes=BRK_MINUTES, range_pct=BRK_RANGE_PCT, buyers=BRK_BUYERS, max_up=BRK_MAX_UP_PCT),
+                      active=dict(last_swap_s=BRK_LAST_SWAP_S, buckets=BRK_BUCKETS, buyers=BRK_ACTIVE_BUYERS)))
 
 # 22.10 разбор: 36 рагов mid (−10.5 SOL при +4.08 без них) — копии чужих тикеров (HELL ×3,
 # USDF/NODF/ECTF/Kimchi/NTDA ×2), каждый со свежего кошелька-создателя → история деплоера не ловит.
@@ -2780,6 +2796,23 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
                 hot_cut["agents_skip"] = hot_cut.get("agents_skip", 0) + 1
                 continue
         fm = dict(fm, agent=av)
+        bk = MK.get("breakout")
+        if bk:                                         # вход только на пробое тихого диапазона при живой торговле
+            ac = MK.get("active") or {}
+            at = pumpflow.FLOW.active_trading(m, ac.get("last_swap_s", 15), ac.get("buckets", 9), ac.get("buyers", 3))
+            if not (at and at["ok"]):
+                hot_cut["inactive"] = hot_cut.get("inactive", 0) + 1
+                continue
+            br = pumpflow.FLOW.breakout(m, bk["minutes"], bk["range_pct"], bk["buyers"])
+            if not (br and br["ok"]):
+                k = "no_range" if not br else "not_quiet" if not br["quiet"] else "no_break" if not br["broke"] else "few_buyers"
+                hot_cut[k] = hot_cut.get(k, 0) + 1
+                continue
+            if bk.get("max_up") and br["over_pct"] > bk["max_up"]:
+                hot_cut["chase"] = hot_cut.get("chase", 0) + 1
+                continue                               # уже улетело выше пробоя — не догоняем
+            fm = dict(fm, brk_range=br["range_pct"], brk_over=br["over_pct"], brk_buyers=br["buyers"],
+                      act_buckets=at["buckets"])
         rows.append((d.get("vol_h1") or 0, m, d, fm))
     best: dict[str, float] = {}                        # одноимённые в скане: оставить самый ликвидный
     for _, m, d, _ in rows:
@@ -2795,6 +2828,9 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
                      buys_h1=d.get("buys_h1"), sells_h1=d.get("sells_h1"), chg_h1=d.get("chg_h1"),
                      dex=d.get("dex"), buy_ratio=fm.get("buy_ratio"), unique_buyers_5m=fm.get("unique_buyers"),
                      rug_p=fm.get("rug_p"))
+        if fm.get("brk_range") is not None:            # параметры пробоя — в признаки сделки (сверка с исходом)
+            feats.update(brk_range=fm["brk_range"], brk_over=fm["brk_over"], brk_buyers=fm["brk_buyers"],
+                         act_buckets=fm["act_buckets"])
         zv = fm.get("zooai")
         if zv:                                         # шансы ZOOAI — в признаки сделки (тень → сверка с исходом)
             feats.update(zooai_run=zv.get("run"), zooai_vsavg=zv.get("vs_average"),
@@ -4552,8 +4588,8 @@ def _bot_buy_fn(sess: UserSession):
             msg = f"stale market data {age:.0f}s > {BOT_MAX_DATA_AGE_S:.0f}s"
             log("BUY_BLOCK", address[:8], msg, mode=sess.mode, pubkey=sess.pubkey)
             raise HTTPException(409, msg)
-        if _mkt == "migration" and sess.mode == "LIVE":   # обкатка: на истории в минусе — только бумага
-            msg = "Migration bot is paper-only for now"
+        if _mkt in bot.PAPER_ONLY_MARKETS and sess.mode == "LIVE":   # обкатка: только бумага
+            msg = f"{_mkt.capitalize()} bot is paper-only for now"
             log("BUY_BLOCK", address[:8], msg, mode=sess.mode, pubkey=sess.pubkey)
             raise HTTPException(409, msg)
         # кулдаун перезахода: только что вышли из этого CA → бот не перекупает его же
@@ -4712,7 +4748,7 @@ def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader, x_auth: 
     if "poll_s" in patch:                          # 0/минус = busy-loop по GMGN (бан IP)
         patch["poll_s"] = max(5.0, float(patch["poll_s"]))
     if "market" in patch and patch["market"] not in (*bot.FLOW_MARKETS, "fresh"):
-        raise HTTPException(400, "market: mid | snipe | migration | fresh")
+        raise HTTPException(400, "market: mid | snipe | migration | breakout | fresh")
     if "max_dump_pct" in patch:
         patch["max_dump_pct"] = max(0.0, min(100.0, float(patch["max_dump_pct"])))
     if "max_new_per_tick" in patch:

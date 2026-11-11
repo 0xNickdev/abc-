@@ -23,7 +23,9 @@ import time
 from dataclasses import dataclass
 
 # Рынки, которые идут через свой поток (pumpflow), а не через GMGN-скан.
-FLOW_MARKETS = ("mid", "snipe", "migration")
+FLOW_MARKETS = ("mid", "snipe", "migration", "breakout")
+# Рынки на обкатке: в LIVE вход закрыт, пока бумага не покажет плюс.
+PAPER_ONLY_MARKETS = ("migration", "breakout")
 
 # 机器人自身的执行参数（与 strategy.PRESET / app.CFG 的风控参数互补，不重复其值）。
 CFG = {
@@ -70,7 +72,103 @@ CFG = {
     # мигрировал на PumpSwap; не дошёл — стоп или выход по времени (проверка 08.11: стоп 15%, 20 мин).
     "mig_sl": float(os.getenv("ABC_MIG_SL", "0.15") or 0.15),
     "mig_max_hold_s": float(os.getenv("ABC_MIG_MAX_HOLD_S", "1200") or 1200),
+    # Breakout bot (11.11, механика HOTBOT): вход на пробое тихого диапазона, выход — именованный план
+    # (EXIT_PLANS) над всегда включённым трейлингом от максимума; плюс выходы по тишине и сливу.
+    "brk_plan": os.getenv("ABC_BRK_PLAN", "clip").strip() or "clip",
+    "brk_trail": float(os.getenv("ABC_BRK_TRAIL", "0.20") or 0.20),
+    "brk_no_trade_s": float(os.getenv("ABC_BRK_NO_TRADE_S", "300") or 0),
+    "brk_drain_drop": float(os.getenv("ABC_BRK_DRAIN_DROP", "10") or 0),
+    "brk_max_hold_s": float(os.getenv("ABC_BRK_MAX_HOLD_S", "14400") or 14400),
 }
+
+# Планы выхода HOTBOT (types/exits.ts, числа открытые). Доли — от исходной позиции.
+#   tps: (рост, доля, откат) — тейк на росте; с откатом — после роста на откате от максимума
+#   stops: trail(дистанция, arm=рост включения, after=минут удержания) | floor(after) — «по цене входа, если не вырос»
+#   scale: (с роста, шаг, доля) — доля на росте и на каждом следующем шаге (сложным процентом)
+#   lock: каждый шаг роста фиксирует ступень ниже · stall: (рост включения, минут без нового максимума)
+def _trail(d, arm=0.0, after=0.0):
+    return dict(kind="trail", dist=d, arm=arm, after=after)
+
+def _floor(after):
+    return dict(kind="floor", after=after)
+
+EXIT_PLANS = {
+    "clip": dict(name="Clip", tps=[(1.0, 1.0, 0)], stops=[_trail(0.10, arm=0.30), _floor(10)]),
+    "stake": dict(name="Stake back", tps=[(1.0, 0.5, 0)], stops=[]),
+    "flip": dict(name="Quick flip", tps=[(1.0, 1.0, 0)], stops=[]),
+    "ladder": dict(name="Ladder", tps=[(0.5, 0.33, 0), (1.0, 0.33, 0)], stops=[]),
+    "trailingTp": dict(name="Trailing take-profit", tps=[(1.0, 0.5, 0.15)], stops=[]),
+    "trail": dict(name="Trailing stop only", tps=[], stops=[]),
+    "scaleOut": dict(name="Scale out", tps=[], scale=(0.20, 0.10, 0.10), stops=[_floor(10)]),
+    "scalp": dict(name="Quick scalp", tps=[(0.20, 0.5, 0)], stops=[_floor(5)]),
+    "take30": dict(name="Take 30%", tps=[(0.30, 1.0, 0)], stall=(0.15, 10), stops=[_floor(20)]),
+    "stall": dict(name="Stall exit", tps=[], stall=(0.15, 5), stops=[_floor(10)]),
+    "stepLock": dict(name="Step lock", tps=[], lock=0.25, stops=[_floor(10)]),
+    "doubling": dict(name="Doubling ladder", tps=[], scale=(1.0, 1.0, 0.34), stops=[]),
+    "tighten": dict(name="Tightening trail", tps=[], stops=[_floor(10), _trail(0.15, after=10), _trail(0.08, after=30)]),
+}
+
+
+def _plan_tp(plan: dict, rung: int):
+    """Тейк номер rung: сначала свои тейки плана, затем ступени scale, пока не продана вся позиция."""
+    tps = plan.get("tps") or []
+    if rung < len(tps):
+        return tps[rung]
+    sc, step = plan.get("scale"), rung - len(tps)
+    if not sc or step * sc[2] >= 1.0:
+        return None
+    return ((1 + sc[0]) * (1 + sc[1]) ** step - 1, sc[2], 0)
+
+
+def plan_exit(pos: dict, plan_id: str, trail: float = 0.0, now: float | None = None) -> "ExitDecision":
+    """Выход по именованному плану над всегда включённым трейлингом `trail` (0 = без него).
+    pos: pnl, peak_pnl, opened_ts, tp_taken (номера взятых тейков), peak_ts (время максимума)."""
+    plan = EXIT_PLANS.get(plan_id) or EXIT_PLANS["clip"]
+    now = now or time.time()
+    pnl = float(pos.get("pnl", 0.0))
+    peak = max(float(pos.get("peak_pnl", pnl)), pnl, 0.0)   # максимум с момента покупки — не ниже цены входа
+    taken = pos.get("tp_taken", []) or []
+    held_min = (now - float(pos.get("opened_ts") or now)) / 60
+    name = plan["name"]
+    # уровень стопа (в долях цены входа): побеждает самый высокий из активных
+    level, why = 0.0, ""
+    stops = list(plan.get("stops") or [])
+    if trail > 0:
+        stops.insert(0, _trail(trail))
+    for st in stops:
+        if st.get("after") and held_min < st["after"]:
+            continue
+        if st["kind"] == "floor":
+            lv, w = 1.0, f"not up {st['after']:.0f}m after the buy"
+        else:
+            if st.get("arm") and peak < st["arm"]:
+                continue
+            lv, w = (1 + peak) * (1 - st["dist"]), f"trailing stop {st['dist']:.0%} below the high (peak {peak:+.0%})"
+        if lv > level:
+            level, why = lv, w
+    lock = plan.get("lock")
+    if lock:
+        steps = int(peak / lock + 1e-9)
+        if steps >= 2 and 1 + (steps - 1) * lock > level:
+            level, why = 1 + (steps - 1) * lock, f"step lock holds +{(steps - 1) * lock:.0%}"
+    if level > 0 and 1 + pnl <= level:
+        return ExitDecision("SELL", 1.0, f"{name}: {why}, PnL {pnl:+.0%}")
+    stall = plan.get("stall")
+    if stall and peak >= stall[0] and pos.get("peak_ts") and now - float(pos["peak_ts"]) >= stall[1] * 60:
+        return ExitDecision("SELL", 1.0, f"{name}: no new high for {stall[1]:.0f}m after +{stall[0]:.0%}, PnL {pnl:+.0%}")
+    rung = len(taken)
+    tp = _plan_tp(plan, rung)
+    if tp:
+        gain, share, pullback = tp
+        drawdown = 1.0 - (1.0 + pnl) / (1.0 + peak) if peak > -1.0 else 0.0
+        hit = (peak >= gain and drawdown >= pullback) if pullback else pnl >= gain
+        if hit:
+            sold = sum((_plan_tp(plan, i) or (0, 0, 0))[1] for i in range(rung))
+            left = max(1e-9, 1.0 - sold)
+            frac = 1.0 if sold + share >= 0.999 else min(1.0, share / left)
+            return ExitDecision("SELL", round(frac, 4), f"{name}: take {share:.0%} at +{gain:.0%}, PnL {pnl:+.0%}",
+                                rung=-1 if frac >= 1.0 else rung)
+    return ExitDecision("HOLD", 0.0, "")
 
 
 @dataclass
@@ -149,6 +247,26 @@ def decide_exit(pos: dict, severity, risk_cfg: dict, bot_cfg: dict | None = None
         held = time.time() - float(pos.get("opened_ts") or time.time())
         if held >= float(bc.get("mig_max_hold_s", 1200)):
             return ExitDecision("SELL", 1.0, f"Migration time exit after {held / 60:.0f}m, PnL {pnl:+.0%}")
+        return ExitDecision("HOLD", 0.0, "")
+    if pos.get("market") == "breakout":             # вход на пробое: план выхода + выходы по потоку
+        sh = pos.get("flow_shock")
+        sd, sp = float(bc.get("mid_shock_drop", 0.15)), float(bc.get("mid_shock_pool", 0.25))
+        if sh and ((sd > 0 and sh[1] >= sd) or (sp > 0 and sh[2] >= sp)):
+            return ExitDecision("SELL", 1.0, f"Breakout shock exit: one sell moved price -{sh[1]:.0%} "
+                                             f"({sh[2]:.0%} of pool SOL), PnL {pnl:+.0%}")
+        dr = pos.get("flow_drain") or {}
+        nt = float(bc.get("brk_no_trade_s", 300))
+        if nt > 0 and dr.get("idle_s") is not None and dr["idle_s"] >= nt:
+            return ExitDecision("SELL", 1.0, f"Breakout no-trade exit: no trades for {dr['idle_s']:.0f}s, PnL {pnl:+.0%}")
+        dd = float(bc.get("brk_drain_drop", 10))
+        if dd > 0 and dr.get("drop_pct") is not None and dr["drop_pct"] >= dd and dr.get("sells_over_buys"):
+            return ExitDecision("SELL", 1.0, f"Breakout drain exit: -{dr['drop_pct']:.0f}% in 5m with more sells than buys, PnL {pnl:+.0%}")
+        ed = plan_exit(pos, pos.get("exit_plan") or bc.get("brk_plan", "clip"), float(bc.get("brk_trail", 0.20)))
+        if ed.action == "SELL":
+            return ed
+        held = time.time() - float(pos.get("opened_ts") or time.time())
+        if held >= float(bc.get("brk_max_hold_s", 14400)) and not taken:
+            return ExitDecision("SELL", 1.0, f"Breakout time exit after {held / 3600:.1f}h, PnL {pnl:+.0%}")
         return ExitDecision("HOLD", 0.0, "")
     if pos.get("market") in ("mid", "snipe"):       # рынок бота: выходы HOTBOT
         sl = float(bc.get("mid_sl", 0.20))

@@ -1497,9 +1497,10 @@ function renderStrategy() {
   const exitCustom = ['stop_pct', 'trailing_pct', 'trail_activate_pct', 'take_profit'].some(k => k in ov);
   const tp = e.take_profit || [];
   const left = Math.max(0, 1 - tp.reduce((a, t) => a + t.sell_pct, 0));
-  const fixed = (_strats.strategies.find(s => s.id === active) || {}).exit_note;   // strategy with its own exits
+  const fixedS = _strats.strategies.find(s => s.id === active) || {};
+  const fixed = fixedS.exit_note;   // strategy with its own exits
   $('adv').hidden = !!fixed;
-  if (fixed) { $('rules').innerHTML = '<div class="rule" style="grid-column:1/-1"><span>Fixed exits</span><b>Graduation · −15% stop · 20 min</b><small>' + esc(fixed) + '</small></div>'; return; }
+  if (fixed) { $('rules').innerHTML = '<div class="rule" style="grid-column:1/-1"><span>Fixed exits</span><b>' + esc(fixedS.exit_label || 'Fixed') + '</b><small>' + esc(fixed) + '</small></div>'; return; }
   $('rules').innerHTML =
     '<div class="rule"><span>Stop loss</span><b class="down">−' + P(e.stop_pct) + '%</b><small>sells everything</small></div>' +
     '<div class="rule"><span>Take profit</span><b>' + (tp.length ? tp.map(t => signedPct(t.at_pct)).join(' · ') : 'Off') + '</b><small>' +

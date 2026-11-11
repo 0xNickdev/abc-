@@ -226,6 +226,8 @@ class PositionWatcher:
                 p["px_src"] = s_
                 p["cur_price"] = px
                 p["pnl"] = round((px - ep) / ep, 4)
+                if "peak_pnl" not in p or p["pnl"] > float(p["peak_pnl"]):
+                    p["peak_ts"] = time.time()   # когда был максимум (выход stall: N минут без нового максимума)
                 p["peak_pnl"] = max(float(p.get("peak_pnl", p["pnl"])), p["pnl"])
                 p["rt_ts"] = time.time()   # штамп свежести: monitor_positions не перетирает
                 self.stats["price_updates"] += 1   # RT-цену устаревшей строкой хот-листа
@@ -249,6 +251,9 @@ class PositionWatcher:
                 if p.get("market") == "mid":         # признаки выхода по потоку: крупный слив, мёртвый токен
                     p["flow_shock"] = pumpflow.FLOW.shock_since(p["address"], float(p.get("opened_ts") or 0))
                     p["flow_dead"] = pumpflow.FLOW.dead_stats(p["address"])
+                elif p.get("market") == "breakout":   # выходы по потоку: крупный слив, тишина, слив за 5 мин
+                    p["flow_shock"] = pumpflow.FLOW.shock_since(p["address"], float(p.get("opened_ts") or 0))
+                    p["flow_drain"] = pumpflow.FLOW.drain(p["address"], 5)
                 elif p.get("market") == "migration":  # выход: токен мигрировал / крупный слив на кривой
                     p["flow_shock"] = pumpflow.FLOW.shock_since(p["address"], float(p.get("opened_ts") or 0))
                     p["migrated"] = pumpflow.FLOW.graduated(p["address"])

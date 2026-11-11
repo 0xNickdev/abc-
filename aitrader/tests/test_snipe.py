@@ -11,7 +11,7 @@ import bot
 
 def test_markets_profiles():
     mk = appmod._markets()
-    assert set(mk) == {"mid", "snipe", "migration"}
+    assert set(mk) == {"mid", "snipe", "migration", "breakout"}
     assert mk["snipe"]["label"] == "snipe" and mk["snipe"]["delay_s"] == 0.0
     assert mk["snipe"]["min_mcap"] < mk["mid"]["min_mcap"]       # снайп — ниже капа
     assert mk["snipe"]["max_age_h"] < mk["mid"]["max_age_h"]     # и моложе

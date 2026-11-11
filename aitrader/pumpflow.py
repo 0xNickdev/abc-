@@ -1031,6 +1031,63 @@ class PumpFlow:
             return None                              # 61 свеча не дотягивает до начала окна
         return round(100 * (px / base - 1), 2) if base > 0 else None
 
+    def breakout(self, mint: str, minutes: int = 10, range_pct: float = 10.0, buyers: int = 3) -> dict | None:
+        """Пробой тихого диапазона (вход SniperBot у HOTBOT): диапазон — максимум и минимум цены за
+        `minutes` полных минут до текущей; тихий, если максимум в пределах `range_pct`% от минимума.
+        Пробой: текущая цена выше максимума и за последние 60 с купили ≥ `buyers` разных кошельков.
+        None — свечи не покрывают окно (токен моложе окна / поток только поднялся)."""
+        now = time.time()
+        with self._lock:
+            mf = self._m.get(mint)
+            if not mf or mf.price_sol <= 0:
+                return None
+            cur = int(now // 60 * 60)
+            lo = cur - int(minutes) * 60
+            cs = [c for c in mf.candles if lo <= c[0] < cur]
+            covered = bool(mf.candles) and mf.candles[0][0] <= lo
+            px = mf.price_sol
+            who = {r[4] for r in mf.recent if r[2] and r[0] >= now - 60}
+        if not cs or not covered:
+            return None
+        hi, low = max(c[2] for c in cs), min(c[3] for c in cs)
+        if low <= 0:
+            return None
+        rng = 100 * (hi / low - 1)
+        quiet = rng <= range_pct
+        broke = px > hi
+        return dict(range_pct=round(rng, 2), high=hi, low=low, price=px, quiet=quiet, broke=broke,
+                    over_pct=round(100 * (px / hi - 1), 2), buyers=len(who),
+                    ok=bool(quiet and broke and len(who) >= buyers))
+
+    def active_trading(self, mint: str, last_swap_s: float = 15, buckets: int = 9, buyers: int = 3) -> dict | None:
+        """Проверка живой торговли (HOTBOT activeTrading): последняя сделка не старше `last_swap_s`,
+        за последнюю минуту ≥ `buckets` из 12 пятисекундных интервалов со сделкой и ≥ `buyers` покупателей."""
+        now = time.time()
+        with self._lock:
+            mf = self._m.get(mint)
+            if not mf:
+                return None
+            rows = [r for r in mf.recent if r[0] >= now - 60]
+            idle = now - mf.last_ts
+        slots = {int((now - r[0]) // 5) for r in rows}
+        who = {r[4] for r in rows if r[2]}
+        return dict(idle_s=round(idle, 1), buckets=len(slots), buyers=len(who),
+                    ok=bool(idle <= last_swap_s and len(slots) >= buckets and len(who) >= buyers))
+
+    def drain(self, mint: str, minutes: int = 5) -> dict | None:
+        """Слив (HOTBOT drain): падение цены за `minutes` минут в % и перевес продаж над покупками за то же окно."""
+        ch = self.change_pct(mint, minutes * 60)
+        now = time.time()
+        with self._lock:
+            mf = self._m.get(mint)
+            if not mf:
+                return None
+            lo = now - minutes * 60
+            b = sum(x[1] for x in mf.buckets if x[0] + BUCKET_S > lo)
+            sl = sum(x[2] for x in mf.buckets if x[0] + BUCKET_S > lo)
+            idle = now - mf.last_ts
+        return dict(drop_pct=None if ch is None else round(-ch, 2), sells_over_buys=sl > b, idle_s=round(idle, 1))
+
     def dead_stats(self, mint: str, window_s: float = 1800) -> dict | None:
         """«Мёртвый» токен: оборот за окно / капа и размах цены по минутным свечам. None —
         окно видели не целиком (рестарт потока) или нет цены."""
