@@ -188,3 +188,90 @@ def test_smooth_climb_and_young_top10_rules():
     assert appmod._hotbot_rules({}, dict(top10_supply_pct=30, age_s=3600)).startswith("top10_young")
     assert appmod._hotbot_rules({}, dict(top10_supply_pct=30, age_s=3 * 3600)) is None  # старше 2 ч — не судим
     assert appmod._hotbot_rules({}, dict(top10_supply_pct=20, age_s=3600)) is None
+
+
+# ── 11.11: стоп с учётом издержек, выбор плана, слоёный запуск, балльная оценка ──
+def test_stop_accounts_for_exit_costs():
+    rc = dict(hard_stop_pct=0.5, trailing_pct=0.25, tp_ladder=[])
+    base = dict(market="mid", peak_pnl=0.0, opened_ts=time.time() - 60, tp_taken=[])
+    sim = dict(fee=0.003, impact=0.004)                       # издержки выхода ≈ 0.7% + 5% проскальзывания стопа
+    assert bot.stop_cost(dict(sim_entry=sim)) == pytest.approx(0.057)
+    assert bot.decide_exit(dict(base, pnl=-0.15, sim_entry=sim), None, rc).reason.startswith("Mid stop")   # раньше ждал −20%
+    assert bot.decide_exit(dict(base, pnl=-0.13, sim_entry=sim), None, rc).action == "HOLD"
+    assert bot.decide_exit(dict(base, pnl=-0.15), None, rc).action == "HOLD"                               # LIVE/без расчёта — как было
+    assert bot.decide_exit(dict(base, pnl=-0.15, sim_entry=sim), None, rc, dict(bot.CFG, stop_net=0)).action == "HOLD"
+    pos = dict(market="breakout", pnl=-0.16, peak_pnl=0.0, opened_ts=time.time() - 60, tp_taken=[], sim_entry=sim)
+    assert "trailing stop 20%" in bot.decide_exit(pos, None, rc).reason
+    floor = dict(pos, pnl=0.03, peak_pnl=0.05, opened_ts=time.time() - 700)
+    assert bot.decide_exit(floor, None, rc).action == "HOLD"                                               # «по цене входа» — без поправки
+
+
+def test_plan_picker_api(tmp_path, monkeypatch):
+    from test_app import _mu_client
+    c = _mu_client(tmp_path, monkeypatch)
+    pk, H = "Usr7777777777777777777777777777777777777777", {"X-Wallet": "Usr7777777777777777777777777777777777777777"}
+    c.post("/api/strategy/select", json={"id": "breakout_v1"}, headers=H)
+    card = next(s for s in c.get("/api/strategies?view=public", headers=H).json()["strategies"] if s["id"] == "breakout_v1")
+    assert len(card["exit_plans"]) == 13 and card["plan"] == "clip" and card["trail"] == 0.20 and all(p["summary"] for p in card["exit_plans"])
+    assert c.post("/api/bot/config", json={"brk_plan": "scalp", "brk_trail": 0.15}, headers=H).status_code == 200
+    assert c.post("/api/bot/config", json={"brk_plan": "nope"}, headers=H).status_code == 400
+    assert c.post("/api/bot/config", json={"brk_trail": 0.9}, headers=H).status_code == 400
+    card = next(s for s in c.get("/api/strategies?view=public", headers=H).json()["strategies"] if s["id"] == "breakout_v1")
+    assert card["plan"] == "scalp" and card["trail"] == 0.15
+    cfg = appmod.get_session(pk).bot.cfg
+    pos = dict(market="breakout", pnl=0.21, peak_pnl=0.21, opened_ts=time.time() - 60, tp_taken=[])
+    ed = bot.decide_exit(pos, None, {}, cfg)
+    assert ed.action == "SELL" and ed.fraction == 0.5 and "Quick scalp" in ed.reason                        # план из настроек юзера
+    other = next(s for s in c.get("/api/strategies?view=public", headers=H).json()["strategies"] if s["id"] == "migration_v1")
+    assert "exit_plans" not in other
+
+
+def test_layered_launch_check():
+    import layered
+    sup = 10 ** 15
+    w = [("dev", 40 * 10 ** 12, True), ("b1", 20 * 10 ** 12, False), ("b2", 20 * 10 ** 12, False), ("b3", 5 * 10 ** 12, False)]
+    held = {"dev": 40 * 10 ** 12, "b1": 20 * 10 ** 12, "b2": 20 * 10 ** 12, "b3": 5 * 10 ** 12}
+    assert layered.verdict_of(w, held, sup)["layered"] is False                       # все держат купленное
+    v = layered.verdict_of(w, dict(held, b1=0, b2=10 ** 12), sup)
+    assert v["layered"] and v["moved_wallets"] == 2                                   # двое увели без продажи
+    assert layered.verdict_of(w, dict(held, dev=20 * 10 ** 12), sup)["layered"]       # дев увёл 2% саплая
+    assert layered.verdict_of(w, dict(held, b3=0), sup)["layered"] is False           # один мелкий — не слоёный
+    assert layered.verdict_of(w, {}, sup) == dict(layered=False, moved_wallets=0, moved_pct=0, dev_moved_pct=0, checked=0)
+    calls = []
+    def rpc(method, params):
+        calls.append(params[0])
+        amt = {"dev": 0}.get(params[0], held[params[0]])
+        return {"value": [{"account": {"data": {"parsed": {"info": {"tokenAmount": {"amount": str(amt)}}}}}}]}
+    ch = layered.LayeredCheck(rpc=rpc)
+    ch.request(MINT, w, sup)
+    assert ch.pending(MINT) and ch.verdict(MINT) is None
+    assert ch.tick() == 1 and calls == ["dev", "b1", "b2", "b3"]
+    assert ch.verdict(MINT)["layered"] and ch.verdict(MINT)["dev_moved_pct"] == 4.0 and not ch.pending(MINT)
+    ch.request(MINT, w, sup)
+    assert ch.tick() == 0                                                             # ответ в кэше — RPC не дёргаем
+    bad = layered.LayeredCheck(rpc=lambda m, p: (_ for _ in ()).throw(RuntimeError("429")))
+    bad.request(MINT, w, sup); bad.tick()
+    assert bad.verdict(MINT) is None and not bad.pending(MINT)                        # сеть упала — не судим и не ждём
+
+
+def test_launch_wallets_from_flow():
+    f = pumpflow.PumpFlow()
+    mf = f._get(MINT, time.time())
+    assert f.launch_wallets(MINT) == ([], 0)                                          # создание не видели — учёт неполный
+    mf.create_slot, mf.creator = 100, "dev"
+    mf.slot_buyers = {100: {"b1", "b2"}, 101: {"b3"}}
+    mf.bal = {"dev": 50, "b1": 30, "b2": 0, "b3": 40, "late": 999}
+    rows, sup = f.launch_wallets(MINT)
+    assert rows == [("dev", 50, True), ("b3", 40, False), ("b1", 30, False)] and sup > 0
+
+
+def test_fit_score_shadow():
+    clean = dict(dev_supply_pct=0, launch_bundle_pct=0, sniper_supply_pct=0, top10_supply_pct=15, crash_1m_max_pct=5,
+                 dd_from_high_pct=10, holders_obs=500, lp_mc_ratio=0.15, **{"5m": dict(uniq=40, br=0.85)})
+    assert appmod._fit_score(clean) == 100.0
+    edge = dict(dev_supply_pct=10, launch_bundle_pct=10, sniper_supply_pct=10, top10_supply_pct=40, crash_1m_max_pct=20,
+                dd_from_high_pct=50, holders_obs=100, lp_mc_ratio=0.05, **{"5m": dict(uniq=12, br=0.68)})
+    assert appmod._fit_score(edge) == 0.0
+    assert 40 < appmod._fit_score(dict(clean, dev_supply_pct=10, crash_1m_max_pct=20, top10_supply_pct=40, holders_obs=100, lp_mc_ratio=0.05)) < 60
+    assert appmod._fit_score(dict(dev_supply_pct=3)) is None                          # мало признаков — не оцениваем
+    assert appmod.FIT_MIN == 0                                                        # по умолчанию входа не режет

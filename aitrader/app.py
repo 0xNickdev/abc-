@@ -63,6 +63,7 @@ import farm  # детектор ферм по кластеризации ист�
 import gmgnguard  # общий ban-гейт + лимитер для всех вызовов gmgn-cli
 import calls  # сканер коллов: X (getxapi) + публичные Telegram-каналы + автопоиск коллеров
 import kol  # Twitter/X KOL 信号（per-user opt-in）
+import layered  # слоёный запуск: кошельки запуска раздали токен переводами (сверка с RPC)
 import learn  # самообучение: все кандидаты скана + исходы по своему потоку (датасет для модели)
 import notify  # Telegram-алерты оператору (TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)
 import pumpcurve  # цена pump.fun из bonding curve по RPC (fallback для свежих токенов)
@@ -289,7 +290,7 @@ def _public_screen(out: dict) -> dict:
     decs = [x for x in (_public_decision(i) for i in (out or {}).get("decisions", [])) if x]
     return dict(out, decisions=decs)
 
-_PUB_BOT_CFG = ("mode", "max_new_per_tick", "poll_s", "trail_activate_pct")
+_PUB_BOT_CFG = ("mode", "max_new_per_tick", "poll_s", "trail_activate_pct", "brk_plan", "brk_trail")
 
 def _bot_status(sess, x_auth: str | None) -> dict:
     st = sess.bot.status()
@@ -2697,6 +2698,27 @@ def _hotbot_rules(d: dict, snap: dict, fund: dict | None = None, uniq_h1: int | 
         return f"turnover {tv:g}"
     return None
 
+# 11.11 балльная оценка (идея HOTBOT fit-score): насколько чисто токен прошёл мягкие критерии. Каждая
+# строка: (ключ, где 0 баллов, где 100 баллов) — линейно между ними; признака нет → строка не считается.
+# Пороги свои (у HOTBOT кривые оценки закрыты). FIT_MIN = 0 → оценка только пишется в признаки сделки и
+# датасет (тень), входа не режет; порог включать после сверки с исходами.
+FIT_MIN = float(os.getenv("ABC_FIT_MIN", "0") or 0)
+FIT_ROWS = (("dev_supply_pct", 10, 0), ("launch_bundle_pct", 10, 0), ("sniper_supply_pct", 10, 0),
+            ("top10_supply_pct", 40, 15), ("crash_1m_max_pct", 20, 5), ("dd_from_high_pct", 50, 10),
+            ("holders_obs", 100, 500), ("lp_mc_ratio", 0.05, 0.15), ("uniq5m", 12, 40), ("br5m", 0.68, 0.85))
+
+def _fit_score(snap: dict) -> float | None:
+    w5 = snap.get("5m") or {}
+    vals = dict(snap, uniq5m=w5.get("uniq"), br5m=w5.get("br"))
+    got = []
+    for k, zero, full in FIT_ROWS:
+        try:
+            v = float(vals.get(k))
+        except (TypeError, ValueError):
+            continue
+        got.append(max(0.0, min(1.0, (v - zero) / (full - zero))))
+    return round(100 * sum(got) / len(got), 1) if len(got) >= 4 else None
+
 def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") -> dict:
     """Общий сканер своего потока для рынков mid и snipe (профиль из _markets): кандидаты из
     потока (PumpSwap + venues), сверка DexScreener, фильтр спроса 5м + rug-щит, цена потока ≈ Dex.
@@ -2788,6 +2810,23 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
             k = why.split()[0]
             hot_cut[k] = hot_cut.get(k, 0) + 1
             continue
+        # слоёный запуск (щит HOTBOT): дев/первые покупатели раздали токен переводами — сверка с RPC
+        lw, lsup = pumpflow.FLOW.launch_wallets(m) if hasattr(pumpflow.FLOW, "launch_wallets") else ([], 0)
+        lv = None
+        if lw:
+            layered.CHECK.request(m, lw, lsup)
+            lv = layered.CHECK.verdict(m)
+            if lv is None and layered.CHECK.pending(m):
+                hot_cut["layered_wait"] = hot_cut.get("layered_wait", 0) + 1
+                continue                               # ответ RPC в пути — ждём следующий проход
+            if lv and lv["layered"]:
+                hot_cut["layered"] = hot_cut.get("layered", 0) + 1
+                continue
+        fit = _fit_score(snap)
+        if FIT_MIN > 0 and fit is not None and fit < FIT_MIN:
+            hot_cut["fit"] = hot_cut.get("fit", 0) + 1
+            continue
+        fm = dict(fm, fit=fit, layered_moved=(lv or {}).get("moved_wallets"))
         # ZOOAI (30.10): калиброванные шансы/отсев рага ДО входа (AUC 0.89, модель юзера).
         zv = zooai.check(m) if zooai.enabled() else None
         if zooai.MODE == "gate":
@@ -2845,7 +2884,7 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
                      curve_sol=fm.get("curve_sol"),
                      buys_h1=d.get("buys_h1"), sells_h1=d.get("sells_h1"), chg_h1=d.get("chg_h1"),
                      dex=d.get("dex"), buy_ratio=fm.get("buy_ratio"), unique_buyers_5m=fm.get("unique_buyers"),
-                     rug_p=fm.get("rug_p"))
+                     rug_p=fm.get("rug_p"), fit=fm.get("fit"), layered_moved=fm.get("layered_moved"))
         if fm.get("brk_range") is not None:            # параметры пробоя — в признаки сделки (сверка с исходом)
             feats.update(brk_range=fm["brk_range"], brk_over=fm["brk_over"], brk_buyers=fm["brk_buyers"],
                          act_buckets=fm["act_buckets"])
@@ -4115,7 +4154,12 @@ def api_strategies(view: str = "", x_wallet: str | None = WalletHeader, x_auth: 
     """全部具名策略 + 当前用户激活的（前端策略选择卡片直接渲染）。Тестерам — без порогов входа."""
     sess = get_session(x_wallet)
     if view == "public" or not _sees_internals(sess, x_auth):     # /app всегда показывает витрину
-        return strategy.describe_public(sess.strategy_id)
+        out = strategy.describe_public(sess.strategy_id)
+        for card in out["strategies"]:                             # стратегия с выбором плана выхода
+            if card.get("plan_picker"):
+                card.update(exit_plans=bot.plans_public(), trail_choices=list(bot.TRAIL_CHOICES),
+                            plan=sess.bot.cfg.get("brk_plan", "clip"), trail=sess.bot.cfg.get("brk_trail", 0.20))
+        return out
     return strategy.describe_all(sess.strategy_id)
 
 class StrategyIn(BaseModel):
@@ -4330,6 +4374,8 @@ class BotConfigIn(BaseModel):
     min_buy_ratio: float | None = None       # фильтр перевеса (анализ 10.10), 0 = выкл
     max_sm_confluence: int | None = None
     max_dump_pct: float | None = None        # ёмкость дампа топ-10 держателей, %; 0 = выкл
+    brk_plan: str | None = None              # план выхода Breakout bot (bot.EXIT_PLANS)
+    brk_trail: float | None = None           # трейлинг от максимума, доля (0.10–0.30)
 
 # ── Этап 6: N1 — бот не исполняет, а кладёт предложение в очередь; человек кликает.
 def _propose(sess: UserSession, side: str, chain: str, address: str,
@@ -4767,6 +4813,10 @@ def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader, x_auth: 
         patch["poll_s"] = max(5.0, float(patch["poll_s"]))
     if "market" in patch and patch["market"] not in (*bot.FLOW_MARKETS, "fresh"):
         raise HTTPException(400, "market: mid | snipe | migration | breakout | fresh")
+    if "brk_plan" in patch and patch["brk_plan"] not in bot.EXIT_PLANS:
+        raise HTTPException(400, "brk_plan: " + " | ".join(bot.EXIT_PLANS))
+    if "brk_trail" in patch and not 0.05 <= float(patch["brk_trail"]) <= 0.49:
+        raise HTTPException(400, "brk_trail: 0.05–0.49")
     if "max_dump_pct" in patch:
         patch["max_dump_pct"] = max(0.0, min(100.0, float(patch["max_dump_pct"])))
     if "max_new_per_tick" in patch:

@@ -1144,6 +1144,20 @@ class PumpFlow:
             top = heapq.nlargest(n, ((v, u) for u, v in mf.bal.items() if v > 0))
             return [(u, round(100 * v / supply, 3)) for v, u in top], mf.creator
 
+    def launch_wallets(self, mint: str, n: int = 6) -> tuple[list, int]:
+        """Кошельки запуска для проверки «слоёного запуска»: дев и покупатели первых слотов с тем, что у них
+        должно лежать по нашим сделкам. → ([(кошелёк, токены, это_дев)] по убыванию, саплай). Только при
+        полной истории (видели создание), иначе учёт неполный → []."""
+        with self._lock:
+            mf = self._m.get(mint)
+            if not mf or not mf.create_slot:
+                return [], 0
+            who = set().union(*mf.slot_buyers.values()) if mf.slot_buyers else set()
+            rows = [(u, mf.bal.get(u, 0), False) for u in who if u != mf.creator and mf.bal.get(u, 0) > 0]
+            rows.sort(key=lambda r: -r[1])
+            dev = [(mf.creator, mf.bal.get(mf.creator, 0), True)] if mf.creator and mf.bal.get(mf.creator, 0) > 0 else []
+            return dev + rows[:max(0, n - len(dev))], PUMP_SUPPLY * 10 ** TOKEN_DECIMALS
+
     def entry_snapshot(self, mint: str) -> dict | None:
         """Компактный ончейн-срез токена (30с/1м/5м + дев/снайперы) — признаки для входа и обучения."""
         w = {k: self.metrics(mint, sec) for k, sec in (("30s", 30), ("1m", 60), ("5m", 300))}

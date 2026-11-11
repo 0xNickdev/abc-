@@ -79,7 +79,22 @@ CFG = {
     "brk_no_trade_s": float(os.getenv("ABC_BRK_NO_TRADE_S", "300") or 0),
     "brk_drain_drop": float(os.getenv("ABC_BRK_DRAIN_DROP", "10") or 0),
     "brk_max_hold_s": float(os.getenv("ABC_BRK_MAX_HOLD_S", "14400") or 14400),
+    # Стоп с учётом издержек выхода (11.11): стоп −20% срабатывал на −20% по цене, а после комиссии, влияния
+    # на пул и проскальзывания стопа позиция закрывалась на −25…−28%. Теперь стоп срабатывает раньше на
+    # ожидаемые издержки выхода, чтобы итог был около заданного. 0 = выключить.
+    "stop_net": float(os.getenv("ABC_STOP_NET", "1") or 0),
+    "stop_slip": float(os.getenv("ABC_SIM_SLIP_STOP", "0.05") or 0.05),
 }
+
+
+def stop_cost(pos: dict, bot_cfg: dict | None = None) -> float:
+    """Ожидаемые издержки выхода по стопу в долях позиции: комиссия площадки + влияние размера на пул
+    (как на входе) + проскальзывание стопа. 0 — учёт выключен или у позиции нет расчёта издержек входа."""
+    bc = bot_cfg or CFG
+    se = pos.get("sim_entry") or {}
+    if not bc.get("stop_net", 1) or se.get("fee") is None:
+        return 0.0
+    return min(0.10, float(se.get("fee") or 0) + float(se.get("impact") or 0) + float(bc.get("stop_slip", 0.05)))
 
 # Планы выхода HOTBOT (types/exits.ts, числа открытые). Доли — от исходной позиции.
 #   tps: (рост, доля, откат) — тейк на росте; с откатом — после роста на откате от максимума
@@ -93,19 +108,19 @@ def _floor(after):
     return dict(kind="floor", after=after)
 
 EXIT_PLANS = {
-    "clip": dict(name="Clip", tps=[(1.0, 1.0, 0)], stops=[_trail(0.10, arm=0.30), _floor(10)]),
-    "stake": dict(name="Stake back", tps=[(1.0, 0.5, 0)], stops=[]),
-    "flip": dict(name="Quick flip", tps=[(1.0, 1.0, 0)], stops=[]),
-    "ladder": dict(name="Ladder", tps=[(0.5, 0.33, 0), (1.0, 0.33, 0)], stops=[]),
-    "trailingTp": dict(name="Trailing take-profit", tps=[(1.0, 0.5, 0.15)], stops=[]),
-    "trail": dict(name="Trailing stop only", tps=[], stops=[]),
-    "scaleOut": dict(name="Scale out", tps=[], scale=(0.20, 0.10, 0.10), stops=[_floor(10)]),
-    "scalp": dict(name="Quick scalp", tps=[(0.20, 0.5, 0)], stops=[_floor(5)]),
-    "take30": dict(name="Take 30%", tps=[(0.30, 1.0, 0)], stall=(0.15, 10), stops=[_floor(20)]),
-    "stall": dict(name="Stall exit", tps=[], stall=(0.15, 5), stops=[_floor(10)]),
-    "stepLock": dict(name="Step lock", tps=[], lock=0.25, stops=[_floor(10)]),
-    "doubling": dict(name="Doubling ladder", tps=[], scale=(1.0, 1.0, 0.34), stops=[]),
-    "tighten": dict(name="Tightening trail", tps=[], stops=[_floor(10), _trail(0.15, after=10), _trail(0.08, after=30)]),
+    "clip": dict(summary="Once up 30%, trails 10% below the high and sells everything at 2x. Sells at the buy price if not up after 10 minutes.", name="Clip", tps=[(1.0, 1.0, 0)], stops=[_trail(0.10, arm=0.30), _floor(10)]),
+    "stake": dict(summary="Sells half at 2x to take the stake back. The rest rides the trailing stop.", name="Stake back", tps=[(1.0, 0.5, 0)], stops=[]),
+    "flip": dict(summary="Sells everything at 2x.", name="Quick flip", tps=[(1.0, 1.0, 0)], stops=[]),
+    "ladder": dict(summary="Sells a third at +50%, a third at 2x. The rest rides the trailing stop.", name="Ladder", tps=[(0.5, 0.33, 0), (1.0, 0.33, 0)], stops=[]),
+    "trailingTp": dict(summary="Once at 2x, sells half on a 15% pullback. The rest rides the trailing stop.", name="Trailing take-profit", tps=[(1.0, 0.5, 0.15)], stops=[]),
+    "trail": dict(summary="Only the trailing stop sells.", name="Trailing stop only", tps=[], stops=[]),
+    "scaleOut": dict(summary="Sells 10% at +20% and again at every further +10%. Sells at the buy price if not up after 10 minutes.", name="Scale out", tps=[], scale=(0.20, 0.10, 0.10), stops=[_floor(10)]),
+    "scalp": dict(summary="Sells half at +20%. Sells at the buy price if not up after 5 minutes.", name="Quick scalp", tps=[(0.20, 0.5, 0)], stops=[_floor(5)]),
+    "take30": dict(summary="Sells everything at +30%. Once up 15%, sells after 10 minutes without a new high. Sells at the buy price if not up after 20 minutes.", name="Take 30%", tps=[(0.30, 1.0, 0)], stall=(0.15, 10), stops=[_floor(20)]),
+    "stall": dict(summary="Once up 15%, sells after 5 minutes without a new high. Sells at the buy price if not up after 10 minutes.", name="Stall exit", tps=[], stall=(0.15, 5), stops=[_floor(10)]),
+    "stepLock": dict(summary="Every +25% locks in the step below. Sells at the buy price if not up after 10 minutes.", name="Step lock", tps=[], lock=0.25, stops=[_floor(10)]),
+    "doubling": dict(summary="Sells a third at 2x, 4x and 8x. The trailing stop sells what is left.", name="Doubling ladder", tps=[], scale=(1.0, 1.0, 0.34), stops=[]),
+    "tighten": dict(summary="Tightens the trailing stop to 15% after 10 minutes and 8% after 30. Sells at the buy price if not up after 10 minutes.", name="Tightening trail", tps=[], stops=[_floor(10), _trail(0.15, after=10), _trail(0.08, after=30)]),
 }
 
 
@@ -120,7 +135,14 @@ def _plan_tp(plan: dict, rung: int):
     return ((1 + sc[0]) * (1 + sc[1]) ** step - 1, sc[2], 0)
 
 
-def plan_exit(pos: dict, plan_id: str, trail: float = 0.0, now: float | None = None) -> "ExitDecision":
+TRAIL_CHOICES = (0.10, 0.15, 0.20, 0.25, 0.30)
+
+
+def plans_public() -> list:
+    return [dict(id=k, name=v["name"], summary=v["summary"]) for k, v in EXIT_PLANS.items()]
+
+
+def plan_exit(pos: dict, plan_id: str, trail: float = 0.0, now: float | None = None, cost: float = 0.0) -> "ExitDecision":
     """Выход по именованному плану над всегда включённым трейлингом `trail` (0 = без него).
     pos: pnl, peak_pnl, opened_ts, tp_taken (номера взятых тейков), peak_ts (время максимума)."""
     plan = EXIT_PLANS.get(plan_id) or EXIT_PLANS["clip"]
@@ -151,7 +173,9 @@ def plan_exit(pos: dict, plan_id: str, trail: float = 0.0, now: float | None = N
         steps = int(peak / lock + 1e-9)
         if steps >= 2 and 1 + (steps - 1) * lock > level:
             level, why = 1 + (steps - 1) * lock, f"step lock holds +{(steps - 1) * lock:.0%}"
-    if level > 0 and 1 + pnl <= level:
+    # трейлинг/ступень — с учётом издержек выхода (итог после продажи ≈ уровень); «по цене входа» — как есть
+    edge = level if why.startswith("not up") else level * (1 + cost)
+    if level > 0 and 1 + pnl <= edge:
         return ExitDecision("SELL", 1.0, f"{name}: {why}, PnL {pnl:+.0%}")
     stall = plan.get("stall")
     if stall and peak >= stall[0] and pos.get("peak_ts") and now - float(pos["peak_ts"]) >= stall[1] * 60:
@@ -242,7 +266,7 @@ def decide_exit(pos: dict, severity, risk_cfg: dict, bot_cfg: dict | None = None
             return ExitDecision("SELL", 1.0, f"Migration shock exit: one sell moved price -{sh[1]:.0%} "
                                              f"({sh[2]:.0%} of curve SOL), PnL {pnl:+.0%}")
         sl = float(bc.get("mig_sl", 0.15))
-        if pnl <= -sl:
+        if pnl <= -(sl - stop_cost(pos, bc)):
             return ExitDecision("SELL", 1.0, f"Migration stop PnL {pnl:+.0%} ≤ -{sl:.0%}")
         held = time.time() - float(pos.get("opened_ts") or time.time())
         if held >= float(bc.get("mig_max_hold_s", 1200)):
@@ -261,7 +285,8 @@ def decide_exit(pos: dict, severity, risk_cfg: dict, bot_cfg: dict | None = None
         dd = float(bc.get("brk_drain_drop", 10))
         if dd > 0 and dr.get("drop_pct") is not None and dr["drop_pct"] >= dd and dr.get("sells_over_buys"):
             return ExitDecision("SELL", 1.0, f"Breakout drain exit: -{dr['drop_pct']:.0f}% in 5m with more sells than buys, PnL {pnl:+.0%}")
-        ed = plan_exit(pos, pos.get("exit_plan") or bc.get("brk_plan", "clip"), float(bc.get("brk_trail", 0.20)))
+        ed = plan_exit(pos, pos.get("exit_plan") or bc.get("brk_plan", "clip"), float(bc.get("brk_trail", 0.20)),
+                       cost=stop_cost(pos, bc))
         if ed.action == "SELL":
             return ed
         held = time.time() - float(pos.get("opened_ts") or time.time())
@@ -293,8 +318,9 @@ def decide_exit(pos: dict, severity, risk_cfg: dict, bot_cfg: dict | None = None
             if drawdown >= trail_m:
                 return ExitDecision("SELL", 1.0, f"Mid trailing stop: peak {peak:+.0%}, drawdown {drawdown:.0%} ≥ {trail_m:.0%}")
             return ExitDecision("HOLD", 0.0, "")
-        if pnl <= -sl:
-            return ExitDecision("SELL", 1.0, f"Mid stop PnL {pnl:+.0%} ≤ -{sl:.0%}")
+        sc = stop_cost(pos, bc)
+        if pnl <= -(sl - sc):
+            return ExitDecision("SELL", 1.0, f"Mid stop PnL {pnl:+.0%} ≤ -{sl - sc:.0%}" + (f" (-{sl:.0%} after exit costs)" if sc else ""))
         tp1, pb = float(bc.get("mid_tp1", 1.0)), float(bc.get("mid_tp1_pullback", 0.15))
         if peak >= tp1 and drawdown >= pb:
             frac = float(bc.get("mid_tp1_frac", 0.5))

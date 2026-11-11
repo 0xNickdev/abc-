@@ -261,10 +261,10 @@ PUBLIC = {
                      "for the price to go quiet and then break upward with fresh buyers. Cuts trades that "
                      "do not move within 10 minutes. Experimental."),
         activity="Low", risk="Medium",
-        exit_note="Trails 20% below the high. Once up 30% the trail tightens to 10%, and everything is sold "
-                  "at 2×. Sells at the buy price if the token is not up after 10 minutes, after one large "
-                  "dump, or when trading stops. These exits are fixed.",
-        exit_label="20% trail · 2× target · 10 min floor"),
+        exit_note="A trailing stop below the high is always on, with the exit plan you pick on top of it. "
+                  "The bot also sells after one large dump, when trading stops for 5 minutes, or on a 10% slide "
+                  "with more sells than buys.",
+        exit_label="20% trail · 2× target · 10 min floor", plan_picker=True),
 }
 
 def _public_exits(preset: dict) -> dict:

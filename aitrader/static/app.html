@@ -325,6 +325,10 @@ details.adv[open] summary svg{transform:rotate(90deg)}
 .fld .in{display:flex;align-items:center;border:1px solid var(--line2);border-radius:12px;background:rgba(255,255,255,.03)}
 .fld input{flex:1;min-width:0;height:42px;border:0;background:none;color:#fff;font:inherit;font-size:15px;padding:0 12px;outline:none}
 .fld input:disabled{color:var(--strip)}
+.fld select{flex:1;min-width:0;height:42px;border:0;background:none;color:#fff;font:inherit;font-size:15px;padding:0 12px;outline:none;appearance:none;-webkit-appearance:none;cursor:pointer}
+.fld select option{background:#111;color:#fff}
+.fld select:disabled{color:var(--strip);cursor:default}
+.rule .fld{margin:6px 0}
 .fld .in:focus-within{border-color:rgba(255,255,255,.4)}
 .fld .u{color:var(--strip);font-size:13px;padding:0 12px;white-space:nowrap}
 .fld small{display:block;color:var(--dim);font-size:12px;margin-top:5px}
@@ -1500,6 +1504,18 @@ function renderStrategy() {
   const fixedS = _strats.strategies.find(s => s.id === active) || {};
   const fixed = fixedS.exit_note;   // strategy with its own exits
   $('adv').hidden = !!fixed;
+  if (fixed && fixedS.exit_plans) {   // strategy whose exit plan the user picks
+    const cur = fixedS.exit_plans.find(p => p.id === fixedS.plan) || fixedS.exit_plans[0], dis = S.wallet ? '' : 'disabled';
+    $('rules').innerHTML =
+      '<div class="rule"><span>Exit plan</span><div class="fld"><div class="in"><select id="brkPlan" ' + dis + '>' +
+        fixedS.exit_plans.map(p => '<option value="' + esc(p.id) + '"' + (p.id === cur.id ? ' selected' : '') + '>' + esc(p.name) + '</option>').join('') +
+      '</select></div></div><small>' + esc(cur.summary) + '</small></div>' +
+      '<div class="rule"><span>Trailing stop</span><div class="fld"><div class="in"><select id="brkTrail" ' + dis + '>' +
+        fixedS.trail_choices.map(t => '<option value="' + t + '"' + (Math.abs(t - fixedS.trail) < 1e-9 ? ' selected' : '') + '>' + P(t) + '% below the high</option>').join('') +
+      '</select></div></div><small>always on, from the moment of the buy</small></div>' +
+      '<div class="rule" style="grid-column:1/-1"><span>Also sells</span><small>' + esc(fixed) + '</small></div>';
+    return;
+  }
   if (fixed) { $('rules').innerHTML = '<div class="rule" style="grid-column:1/-1"><span>Fixed exits</span><b>' + esc(fixedS.exit_label || 'Fixed') + '</b><small>' + esc(fixed) + '</small></div>'; return; }
   $('rules').innerHTML =
     '<div class="rule"><span>Stop loss</span><b class="down">−' + P(e.stop_pct) + '%</b><small>sells everything</small></div>' +
@@ -1544,6 +1560,14 @@ async function saveRisk(body, msg) {
   try { await signIn(); _risk = await post('/api/risk', body); renderStrategy(); toast(msg || 'Saved. Your bot uses it from the next check.'); }
   catch (e) { toast(e.message, 'err'); }
 }
+$('v-strategy').addEventListener('change', async e => {
+  if (e.target.id !== 'brkPlan' && e.target.id !== 'brkTrail') return;
+  try {
+    await signIn();
+    await post('/api/bot/config', { brk_plan: $('brkPlan').value, brk_trail: parseFloat($('brkTrail').value) });
+    await loadStrategy(); toast('Exit plan saved. Open positions follow it from the next check.');
+  } catch (err) { toast(err.message, 'err'); }
+});
 $('v-strategy').addEventListener('click', async e => {
   const st = e.target.closest('[data-sid]'), pr = e.target.closest('[data-preset]');
   if ((st || pr) && !S.wallet) { toast('Connect Phantom to save your setup', 'err'); connect(); return; }
