@@ -163,3 +163,28 @@ def test_breakout_scan_gate(tmp_path, monkeypatch):
     assert appmod.screen_market("sol", s, "breakout")["decisions"] == []
     mf.price_sol = 4e-6 * 1.20                                                     # улетело на +16% выше пробоя — не догоняем
     assert appmod.screen_market("sol", s, "breakout")["decisions"] == []
+
+
+def test_smooth_climb_and_young_top10_rules():
+    """11.11 щит HOTBOT: разгон «по линейке» (+50% за 30 мин без отката) и топ-10 ≥25% у токена моложе 2 ч."""
+    f = pumpflow.PumpFlow()
+    now = time.time()
+    mf = f._get(MINT, now)
+    cur = int(now // 60 * 60)
+    px = 1.0
+    for i in range(30):                              # +1.5% каждую минуту, ровно
+        mf.candles.append([cur - (30 - i) * 60, px, px * 1.015, px, px * 1.015, 0.0])
+        px *= 1.015
+    mf.price_sol = px
+    cl = f.climb(MINT)
+    assert cl["rise_pct"] >= 50 and cl["step_vol"] < 0.005 and cl["off_high_pct"] < 1
+    assert appmod._hotbot_rules({}, dict(climb=cl)).startswith("smooth_climb")
+    assert appmod._hotbot_rules({}, dict(climb=dict(cl, step_vol=0.06))) is None       # рваный рост — нормальный рынок
+    assert appmod._hotbot_rules({}, dict(climb=dict(cl, off_high_pct=12))) is None     # уже откатил от максимума
+    assert appmod._hotbot_rules({}, dict(climb=dict(cl, rise_pct=30))) is None
+    g = pumpflow.PumpFlow()
+    g._get(MINT, now).price_sol = 1.0
+    assert g.climb(MINT) is None                                                       # свечей нет — не судим
+    assert appmod._hotbot_rules({}, dict(top10_supply_pct=30, age_s=3600)).startswith("top10_young")
+    assert appmod._hotbot_rules({}, dict(top10_supply_pct=30, age_s=3 * 3600)) is None  # старше 2 ч — не судим
+    assert appmod._hotbot_rules({}, dict(top10_supply_pct=20, age_s=3600)) is None

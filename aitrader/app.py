@@ -2611,7 +2611,15 @@ HOT = dict(chg_h1_min=float(os.getenv("ABC_HOT_CHG_H1_MIN", "-1e9") or -1e9),
            flow_uniq5m_min=float(os.getenv("ABC_HOT_UNIQ5M_MIN", "12") or 0),
            flow_br5m_min=float(os.getenv("ABC_HOT_BR5M_MIN", "0.68") or 0),
            flow_net5m_min=float(os.getenv("ABC_HOT_NET5M_MIN", "1.5") or 0),
-           flow_age_max_s=float(os.getenv("ABC_HOT_AGE_MAX_S", "28800") or 0))
+           flow_age_max_s=float(os.getenv("ABC_HOT_AGE_MAX_S", "28800") or 0),
+           # 11.11 щит HOTBOT (настоящие дефолты из их боевого бандла): «плавный рост» — +50% за 30 мин почти
+           # по прямой без отката (разгон перед сливом); у них разброс 10-секундных шагов ≤1%, у нас свечи
+           # минутные → порог пересчитан на минуту (×√6 ≈ 2.5%). Топ-10 держателей ≥25% у токенов моложе 2 ч.
+           smooth_rise=float(os.getenv("ABC_HOT_SMOOTH_RISE", "50") or 0),
+           smooth_step_vol=float(os.getenv("ABC_HOT_SMOOTH_STEP_VOL", "0.025") or 0),
+           smooth_off_high=float(os.getenv("ABC_HOT_SMOOTH_OFF_HIGH", "5") or 0),
+           top10_young_max=float(os.getenv("ABC_HOT_TOP10_YOUNG_MAX", "25") or 0),
+           young_s=float(os.getenv("ABC_HOT_YOUNG_S", "7200") or 0))
 # 23.10 разбор: бренд-тикеры (YouTube −93%, ELON −92%, Robinhood −82%, McRib/McNugget −27%) — разгон и слив
 # за 5–15 мин. Короткие — точное совпадение тикера, длинные — вхождение.
 BRAND_EXACT = {"elon", "musk", "trump", "melania", "barron", "kfc", "x", "ai", "gpt", "grok", "meta", "apple", "tesla",
@@ -2657,6 +2665,14 @@ def _hotbot_rules(d: dict, snap: dict, fund: dict | None = None, uniq_h1: int | 
         v = num(snap.get(k))
         if v is not None and (v >= lim if op == ">=" else v < lim if op == "<" else v > lim):
             return f"{k} {v:g}"
+    cl = snap.get("climb")
+    if (cl and h["smooth_rise"] > 0 and cl["rise_pct"] >= h["smooth_rise"]
+            and cl["step_vol"] <= h["smooth_step_vol"] and cl["off_high_pct"] <= h["smooth_off_high"]):
+        return f"smooth_climb +{cl['rise_pct']:.0f}%"
+    t10, age0 = num(snap.get("top10_supply_pct")), num(snap.get("age_s"))
+    if (t10 is not None and age0 is not None and h["top10_young_max"] > 0
+            and age0 < h["young_s"] and t10 >= h["top10_young_max"]):
+        return f"top10_young {t10:g}"
     for k in ("insiders_pct", "bundle_pct"):
         v = num(f.get(k))
         if v is not None and v >= h["insiders_max"]:
@@ -2765,7 +2781,9 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
         except Exception:
             fund = None
         h1 = pumpflow.FLOW.metrics(m, 3600) or {}
-        why = _hotbot_rules(d, snap, fund, h1.get("unique_buyers") if h1.get("full") else None)
+        climb = pumpflow.FLOW.climb(m) if hasattr(pumpflow.FLOW, "climb") else None
+        why = _hotbot_rules(d, dict(snap, climb=climb), fund,
+                            h1.get("unique_buyers") if h1.get("full") else None)
         if why:
             k = why.split()[0]
             hot_cut[k] = hot_cut.get(k, 0) + 1

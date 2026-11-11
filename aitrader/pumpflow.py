@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import base64
 import collections
+import math
 import hashlib
 import heapq
 import os
@@ -1058,6 +1059,30 @@ class PumpFlow:
         return dict(range_pct=round(rng, 2), high=hi, low=low, price=px, quiet=quiet, broke=broke,
                     over_pct=round(100 * (px / hi - 1), 2), buyers=len(who),
                     ok=bool(quiet and broke and len(who) >= buyers))
+
+    def climb(self, mint: str, minutes: int = 30) -> dict | None:
+        """Форма роста за `minutes` минут (проверка HOTBOT smooth climb — разгон «по линейке» перед сливом):
+        рост от минимума окна в %, расстояние под максимумом окна в %, разброс минутных лог-шагов цены.
+        None — в окне меньше 2/3 минутных свечей (форму оценить не по чему)."""
+        now = time.time()
+        with self._lock:
+            mf = self._m.get(mint)
+            if not mf or mf.price_sol <= 0:
+                return None
+            lo = now - minutes * 60
+            cs = [c for c in mf.candles if c[0] >= lo]
+            px = mf.price_sol
+        if len(cs) < minutes * 2 // 3:
+            return None
+        low, hi = min(c[3] for c in cs), max(c[2] for c in cs)
+        if low <= 0 or hi <= 0:
+            return None
+        steps = [math.log(b[4] / a[4]) for a, b in zip(cs, cs[1:]) if a[4] > 0 and b[4] > 0]
+        if len(steps) < 2:
+            return None
+        mean = sum(steps) / len(steps)
+        vol = (sum((x - mean) ** 2 for x in steps) / len(steps)) ** 0.5
+        return dict(rise_pct=round(100 * (px / low - 1), 1), off_high_pct=round(100 * (1 - px / hi), 2), step_vol=round(vol, 4))
 
     def active_trading(self, mint: str, last_swap_s: float = 15, buckets: int = 9, buyers: int = 3) -> dict | None:
         """Проверка живой торговли (HOTBOT activeTrading): последняя сделка не старше `last_swap_s`,
