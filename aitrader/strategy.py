@@ -161,9 +161,13 @@ def describe() -> dict:
 # 策略注册表：具名预设可选（每用户各选各的，见 app.UserSession.strategy_id）。
 # 结构同构：trigger（入场触发阈值）+ preset（并入 CFG 的纪律参数）+ preset_filters。
 # ──────────────────────────────────────────────────────────────────────────
-def _mk(sid, name, version, thesis, trigger, preset, preset_filters):
-    return dict(id=sid, name=name, version=version, thesis=thesis,
-                trigger=trigger, preset=preset, preset_filters=preset_filters)
+def _mk(sid, name, version, thesis, trigger, preset, preset_filters, market=None):
+    """market — стратегия задаёт рынок бота (скан своего потока) вместо рынка из настроек бота."""
+    d = dict(id=sid, name=name, version=version, thesis=thesis,
+             trigger=trigger, preset=preset, preset_filters=preset_filters)
+    if market:
+        d["market"] = market
+    return d
 
 _SNIPER_TRIGGER = dict(TRIGGER, min_tracked_or_smart=3, min_buy_ratio=0.60,
                        min_liquidity=15000.0, max_age_min=30.0, ideal_age_max=10.0)
@@ -177,6 +181,11 @@ _DEGEN_PRESET = dict(PRESET, max_concurrent_positions=5, risk_per_trade=0.015,
                      hard_stop_pct=0.45, trailing_pct=0.35,
                      tp_ladder=[(1.00, 0.30), (3.00, 0.30), (8.00, 0.20)],
                      kill_switch_consec_losses=4)
+
+# Migration bot (11.11): отдельный рынок — выходы задаёт bot.decide_exit (миграция/стоп/время),
+# пресет ниже нужен для витрины и лимитов (стоп 15%, без лестницы тейков).
+_MIGRATION_PRESET = dict(PRESET, max_concurrent_positions=3, hard_stop_pct=0.15, trailing_pct=0.25,
+                         tp_ladder=[], kill_switch_consec_losses=4)
 
 DEFAULT_STRATEGY = "abc_alpha_v1"
 STRATEGIES = {
@@ -199,6 +208,12 @@ STRATEGIES = {
         _DEGEN_TRIGGER, _DEGEN_PRESET,
         dict(min_liquidity=_DEGEN_TRIGGER["min_liquidity"], min_age_min=1.0,
              max_age_min=_DEGEN_TRIGGER["max_age_min"], require_renounced_freeze=True)),
+    "migration_v1": _mk(
+        "migration_v1", "Migration bot", "1.0",
+        ("Покупка на бондинг-кривой pump.fun незадолго до миграции (в кривой 75–80 SOL из 85), "
+         "продажа сразу после миграции на PumpSwap; не дошёл — стоп 15% или выход через 20 мин. "
+         "Проверка на истории 08.11 без фильтров — в минусе; обкатка только на бумаге."),
+        TRIGGER, _MIGRATION_PRESET, PRESET_FILTERS, market="migration"),
 }
 
 # Публичные описания для беты: ЧТО делает стратегия и как выходит — без порогов входа
@@ -220,6 +235,14 @@ PUBLIC = {
         description=("Casts a wide net with a looser bar, gives trades more room and aims for "
                      "larger moves. Expect many small losses and rare big wins."),
         activity="High", risk="High"),
+    "migration_v1": dict(
+        name="Migration bot", tagline="Buys just before graduation. Paper only.",
+        description=("Buys pump.fun tokens that have almost filled their bonding curve and sells the "
+                     "moment they graduate to PumpSwap. If the token stalls, it exits on a 15% stop "
+                     "or after 20 minutes. Experimental: it lost money in our backtest."),
+        activity="High", risk="High",
+        exit_note="Sells everything when the token graduates to PumpSwap, on a 15% stop, "
+                  "after one large dump, or after 20 minutes. These exits are fixed."),
 }
 
 def _public_exits(preset: dict) -> dict:

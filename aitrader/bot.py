@@ -22,6 +22,9 @@ import threading
 import time
 from dataclasses import dataclass
 
+# Рынки, которые идут через свой поток (pumpflow), а не через GMGN-скан.
+FLOW_MARKETS = ("mid", "snipe", "migration")
+
 # 机器人自身的执行参数（与 strategy.PRESET / app.CFG 的风控参数互补，不重复其值）。
 CFG = {
     "mode": "n2",                 # n1=предлагает, человек подтверждает · n2=исполняет сам (paper/LIVE-замки)
@@ -63,6 +66,10 @@ CFG = {
     "mid_breakeven_min": float(os.getenv("ABC_MID_BREAKEVEN_MIN", "10") or 0),
     "mid_breakeven_rise": float(os.getenv("ABC_MID_BREAKEVEN_RISE", "0.12") or 0),
     "max_sm_confluence": int(os.getenv("ABC_BOT_MAX_SM", "8") or 0),
+    # Migration bot (11.11): купили на кривой перед миграцией → продаём, как только токен
+    # мигрировал на PumpSwap; не дошёл — стоп или выход по времени (проверка 08.11: стоп 15%, 20 мин).
+    "mig_sl": float(os.getenv("ABC_MIG_SL", "0.15") or 0.15),
+    "mig_max_hold_s": float(os.getenv("ABC_MIG_MAX_HOLD_S", "1200") or 1200),
 }
 
 
@@ -128,6 +135,21 @@ def decide_exit(pos: dict, severity, risk_cfg: dict, bot_cfg: dict | None = None
     ladder = risk_cfg.get("tp_ladder", []) or []
     taken = pos.get("tp_taken", []) or []
 
+    if pos.get("market") == "migration":            # вход на кривой перед миграцией
+        if pos.get("migrated"):
+            return ExitDecision("SELL", 1.0, f"Migration exit: token graduated to PumpSwap, PnL {pnl:+.0%}")
+        sh = pos.get("flow_shock")
+        sd, sp = float(bc.get("mid_shock_drop", 0.15)), float(bc.get("mid_shock_pool", 0.25))
+        if sh and ((sd > 0 and sh[1] >= sd) or (sp > 0 and sh[2] >= sp)):
+            return ExitDecision("SELL", 1.0, f"Migration shock exit: one sell moved price -{sh[1]:.0%} "
+                                             f"({sh[2]:.0%} of curve SOL), PnL {pnl:+.0%}")
+        sl = float(bc.get("mig_sl", 0.15))
+        if pnl <= -sl:
+            return ExitDecision("SELL", 1.0, f"Migration stop PnL {pnl:+.0%} ≤ -{sl:.0%}")
+        held = time.time() - float(pos.get("opened_ts") or time.time())
+        if held >= float(bc.get("mig_max_hold_s", 1200)):
+            return ExitDecision("SELL", 1.0, f"Migration time exit after {held / 60:.0f}m, PnL {pnl:+.0%}")
+        return ExitDecision("HOLD", 0.0, "")
     if pos.get("market") in ("mid", "snipe"):       # рынок бота: выходы HOTBOT
         sl = float(bc.get("mid_sl", 0.20))
         sh = pos.get("flow_shock")                  # (ts, падение цены, доля пула) крупной продажи после входа

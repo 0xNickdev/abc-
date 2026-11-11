@@ -68,6 +68,9 @@ POOL_FRESH_S = 600      # пул без сделок дольше — не ка�
 GAP_S = 30              # тишина дольше — считаем разрывом покрытия (pump.fun не молчит и секунды)
 TOKEN_DECIMALS = 6      # pump.fun-токены всегда 6 знаков
 PUMP_SUPPLY = 1_000_000_000
+# Инвариант стандартной кривой pump.fun: виртуальные 30 SOL × 1.073 млрд токенов (лампорты × сырые
+# единицы) ≈ 3.22e25. У mayhem-токенов он другой и плывёт — на записи 08.11 это 78% сливов.
+STD_CURVE_K = (3.0e25, 3.4e25)
 
 
 def enabled() -> bool:
@@ -359,7 +362,7 @@ class MintFlow:
                  "last_ts", "buckets", "recent", "users", "tracked", "dev_buy_sol", "dev_sell_sol",
                  "dev_sells", "dev_tok_in", "dev_tok_out", "dev_first_sell", "dev_last_sell", "dev_rebuy_sol",
                  "dev_rebuys", "dev_rebuy_delay", "bal", "reserve_tok", "pool_px", "cost", "candles", "ticks60", "peak_px",
-                 "create_wall", "launch_px", "launch_max10", "rpnl", "slot_buyers", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue", "shocks")
+                 "create_wall", "launch_px", "launch_max10", "rpnl", "slot_buyers", "snipers", "sniper_sol", "price_sol", "real_sol", "complete", "venue", "shocks", "odd_curve")
 
     def __init__(self, mint: str, now: float):
         self.mint = mint
@@ -399,6 +402,7 @@ class MintFlow:
         self.complete = False
         self.venue = "curve"
         self.shocks: collections.deque = collections.deque(maxlen=8)   # (ts, падение цены, доля SOL пула) — крупные продажи
+        self.odd_curve = False                      # нестандартная кривая (mayhem-агент: k плывёт, саплай 2 млрд)
 
     def add(self, now: float, slot: int, is_buy: bool, lamports: int, tokens: int, user: str):
         """Учёт сделки. Для продажи из позиции с известной себестоимостью → (pnl_лампорты, закрыта)."""
@@ -667,6 +671,8 @@ class PumpFlow:
             mf.price_sol = (d["vsol"] / 1e9) / (d["vtok"] / 10 ** TOKEN_DECIMALS)
         mf.real_sol = d["real_sol"]
         mf.reserve_tok = d["vtok"]
+        if not STD_CURVE_K[0] < d["vsol"] * d["vtok"] < STD_CURVE_K[1]:
+            mf.odd_curve = True                     # не стандартная кривая pump.fun — помечаем навсегда
         mf.venue = "curve"
         mf.tick_price(now)
         self._ledger(d["user"], mf.add(now, slot, d["is_buy"], d["sol"], d["tokens"], d["user"]), d["sol"], now)
@@ -1112,8 +1118,15 @@ class PumpFlow:
         out.sort(key=lambda r: r[1])             # с меньших кап: целевой диапазон $200k+ первым,
         return out                               # гиганты на миллиарды не съедают лимит выборки
 
+    def graduated(self, mint: str) -> bool:
+        """Токен дошёл до конца кривой / уже торгуется на PumpSwap (для выхода рынка migration)."""
+        mf = self._m.get(mint)
+        return bool(mf and (mf.complete or mf.venue == "amm"))
+
     def curve_candidates(self, min_mcap_sol: float, max_mcap_sol: float, min_liq_sol: float,
-                         min_age_s: float = 300, max_age_s: float = 3600, active_s: float = 180) -> list[tuple]:
+                         min_age_s: float = 300, max_age_s: float = 3600, active_s: float = 180,
+                         min_real_sol: float = 0.0, max_real_sol: float = 0.0,
+                         std_only: bool = False) -> list[tuple]:
         """Снайп на бондинг-кривой (до миграции): свежие pump-токены на кривой с капой в диапазоне,
         живыми сделками и возрастом min..max. У них НЕТ пары на DexScreener — всё из потока.
         min_age_s даёт времени накопиться 5-мин окну спроса (наш сигнал). → [(mint, mcap, liq)]."""
@@ -1127,6 +1140,11 @@ class PumpFlow:
                     continue
                 age = now - mf.created_ts if mf.created_ts else None
                 if age is None or not (min_age_s <= age <= max_age_s):
+                    continue
+                real = mf.real_sol / 1e9             # рынок migration: окно «почти дошёл до миграции»
+                if real < min_real_sol or (max_real_sol > 0 and real > max_real_sol):
+                    continue
+                if std_only and mf.odd_curve:
                     continue
                 mcap = mf.price_sol * PUMP_SUPPLY
                 liq = self._liq_sol(mf, now)

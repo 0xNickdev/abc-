@@ -294,7 +294,7 @@ textarea.src{width:100%;min-height:120px;border-radius:12px;border:1px solid var
 .setup{margin:12px 0 0;color:var(--strip);font-size:13.5px}
 .setup b{color:#d6d6d6;font-weight:500}
 .setup a{margin-left:6px}
-.strats{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.strats{display:grid;grid-template-columns:repeat(2,1fr);gap:14px}
 .strat{padding:20px;display:flex;flex-direction:column;gap:10px;text-align:left;cursor:pointer;transition:border-color .2s,background .2s}
 .strat:hover{border-color:rgba(255,255,255,.22)}
 .strat.on{border-color:rgba(255,255,255,.55);background:rgba(28,28,28,.82)}
@@ -1497,6 +1497,9 @@ function renderStrategy() {
   const exitCustom = ['stop_pct', 'trailing_pct', 'trail_activate_pct', 'take_profit'].some(k => k in ov);
   const tp = e.take_profit || [];
   const left = Math.max(0, 1 - tp.reduce((a, t) => a + t.sell_pct, 0));
+  const fixed = (_strats.strategies.find(s => s.id === active) || {}).exit_note;   // strategy with its own exits
+  $('adv').hidden = !!fixed;
+  if (fixed) { $('rules').innerHTML = '<div class="rule" style="grid-column:1/-1"><span>Fixed exits</span><b>Graduation · −15% stop · 20 min</b><small>' + esc(fixed) + '</small></div>'; return; }
   $('rules').innerHTML =
     '<div class="rule"><span>Stop loss</span><b class="down">−' + P(e.stop_pct) + '%</b><small>sells everything</small></div>' +
     '<div class="rule"><span>Take profit</span><b>' + (tp.length ? tp.map(t => signedPct(t.at_pct)).join(' · ') : 'Off') + '</b><small>' +

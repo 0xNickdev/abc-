@@ -249,6 +249,9 @@ class PositionWatcher:
                 if p.get("market") == "mid":         # признаки выхода по потоку: крупный слив, мёртвый токен
                     p["flow_shock"] = pumpflow.FLOW.shock_since(p["address"], float(p.get("opened_ts") or 0))
                     p["flow_dead"] = pumpflow.FLOW.dead_stats(p["address"])
+                elif p.get("market") == "migration":  # выход: токен мигрировал / крупный слив на кривой
+                    p["flow_shock"] = pumpflow.FLOW.shock_since(p["address"], float(p.get("opened_ts") or 0))
+                    p["migrated"] = pumpflow.FLOW.graduated(p["address"])
                 ed = botmod.decide_exit(p, None, rc, sess.bot.cfg)
                 if ed.action != "SELL":
                     continue

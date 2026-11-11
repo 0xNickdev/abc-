@@ -2061,7 +2061,7 @@ def health_snapshot() -> dict:
         alerts.append("Real-time WS thread is dead (stops fall back to 2s polling)")
     # mid/snipe идут через СВОЙ поток (pumpflow), GMGN не используют — возраст его данных
     # к торговле не относится. Эти алерты только для старого рынка fresh (GMGN trending).
-    flow_mkt = (ST.bot.cfg.get("market") in ("mid", "snipe"))
+    flow_mkt = (_bot_market(ST) in bot.FLOW_MARKETS)
     if bot_on and MK.is_live_adapter and not flow_mkt:
         if age is None:
             if time.time() - _PROC_START > ALERT_STALE_MIN * 60:
@@ -2448,6 +2448,8 @@ def _flow_market(mint: str, rate: float) -> dict | None:
         out["mcap"] = px[0] * pumpflow.PUMP_SUPPLY * rate
         if m1.get("venue") == "amm":
             out["dex"] = "pumpswap"
+        elif m1.get("venue") == "curve" and not m1.get("complete"):
+            out["dex"] = "pumpfun"                  # кривая: комиссия кривой, а не AMM (издержки бумаги)
     if m1.get("full"):
         out.update(vol_h1=(float(m1.get("buy_vol_sol") or 0) + float(m1.get("sell_vol_sol") or 0)) * rate,
                    buys_h1=m1.get("buys"), sells_h1=m1.get("sells"))
@@ -2506,6 +2508,19 @@ SNIPE_MIN_LIQ = float(os.getenv("ABC_SNIPE_MIN_LIQ", "8000") or 8000)
 SNIPE_MAX_AGE_H = float(os.getenv("ABC_SNIPE_MAX_AGE_H", "1") or 1)       # до часа от роду
 SNIPE_SIZE_SOL = float(os.getenv("ABC_SNIPE_SIZE_SOL", "0.3") or 0)
 
+# Migration bot (11.11, юзер): покупка на кривой перед самой миграцией (в кривой 75–80 SOL из 85),
+# продажа сразу после миграции. Проверка 08.11 на 6 ч записи без фильтров: минус при любом пороге,
+# лучшее окно 75–80 SOL (−2.4…−2.9 SOL/день) → здесь поверх тот же фильтр спроса 5м + rug-щит,
+# mayhem-кривые исключены. Только бумага, отдельная стратегия в UI.
+MIG_MIN_CURVE_SOL = float(os.getenv("ABC_MIG_MIN_CURVE_SOL", "75") or 75)
+MIG_MAX_CURVE_SOL = float(os.getenv("ABC_MIG_MAX_CURVE_SOL", "80") or 80)
+MIG_MAX_AGE_H = float(os.getenv("ABC_MIG_MAX_AGE_H", "24") or 24)
+MIG_SIZE_SOL = float(os.getenv("ABC_MIG_SIZE_SOL", "0") or 0)
+
+def _bot_market(sess) -> str | None:
+    """Рынок бота сессии: стратегия с собственным рынком (Migration bot) важнее настройки бота."""
+    return strategy.get(getattr(sess, "strategy_id", "")).get("market") or sess.bot.cfg.get("market")
+
 def _markets() -> dict:
     """Профили рынков для общего сканера. Читаются на каждом тике (переключение на лету)."""
     return dict(
@@ -2513,7 +2528,11 @@ def _markets() -> dict:
                  delay_s=MID_ENTRY_DELAY_S, size=MID_SIZE_SOL, label="mid", strat="Mid $200k+", tag="MID"),
         snipe=dict(min_mcap=SNIPE_MIN_MCAP, max_mcap=SNIPE_MAX_MCAP, min_liq=SNIPE_MIN_LIQ, max_age_h=SNIPE_MAX_AGE_H,
                    delay_s=0.0, size=SNIPE_SIZE_SOL, label="snipe", strat="Snipe fresh", tag="SNIPE",
-                   curve=True, curve_min_age_s=float(os.getenv("ABC_SNIPE_CURVE_MIN_AGE_S", "300") or 0)))
+                   curve=True, curve_min_age_s=float(os.getenv("ABC_SNIPE_CURVE_MIN_AGE_S", "300") or 0)),
+        migration=dict(min_mcap=0.0, max_mcap=1e12, min_liq=0.0, max_age_h=MIG_MAX_AGE_H, delay_s=0.0,
+                       size=MIG_SIZE_SOL, label="migration", strat="Migration", tag="MIGR",
+                       curve=True, amm=False, agents=False, std_curve=True, curve_min_age_s=300.0,
+                       curve_min_sol=MIG_MIN_CURVE_SOL, curve_max_sol=MIG_MAX_CURVE_SOL))
 
 # 22.10 разбор: 36 рагов mid (−10.5 SOL при +4.08 без них) — копии чужих тикеров (HELL ×3,
 # USDF/NODF/ECTF/Kimchi/NTDA ×2), каждый со свежего кошелька-создателя → история деплоера не ловит.
@@ -2656,14 +2675,18 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
     decisions = []
     if chain != "sol" or rate <= 0:
         return dict(decisions=[], portfolio=_portfolio(s), positions=[], mode=s.mode)
-    cands = [c[0] for c in pumpflow.FLOW.mid_candidates(MK["min_mcap"] / rate, (MK["min_liq"] / 2) / rate)]
+    amm = MK.get("amm", True)                          # migration: только кривая, без PumpSwap/площадок
+    cands = ([c[0] for c in pumpflow.FLOW.mid_candidates(MK["min_mcap"] / rate, (MK["min_liq"] / 2) / rate)]
+             if amm else [])
     if MK.get("curve"):                                # снайп: + свежие токены на бондинг-кривой (до миграции)
         cands += [c[0] for c in pumpflow.FLOW.curve_candidates(
             MK["min_mcap"] / rate, MK["max_mcap"] / rate, MK["min_liq"] / rate,
-            min_age_s=MK.get("curve_min_age_s", 300), max_age_s=MK["max_age_h"] * 3600)]
+            min_age_s=MK.get("curve_min_age_s", 300), max_age_s=MK["max_age_h"] * 3600,
+            min_real_sol=MK.get("curve_min_sol", 0.0), max_real_sol=MK.get("curve_max_sol", 0.0),
+            std_only=bool(MK.get("std_curve")))]
     try:
         import venues
-        for m in venues.WATCH.mints():
+        for m in (venues.WATCH.mints() if amm else ()):
             px = pumpflow.FLOW.price(m)
             if px and time.time() - px[1] <= 300 and m not in cands:
                 cands.append(m)
@@ -2741,13 +2764,15 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
                 continue
         fm = dict(fm, zooai=zv)
         # команда агентов (агенты разбирают токен, пока идёт задержка входа — к входу вердикт готов)
-        agents.TEAM.request(m, d, snap, fund, rug, ctx=dict(stage="rules_pass"))
+        use_agents = MK.get("agents", True)           # migration: окно входа — секунды, LLM не ждём и не тратим
+        if use_agents:
+            agents.TEAM.request(m, d, snap, fund, rug, ctx=dict(stage="rules_pass"))
         first = _MID_FIRST.setdefault(m, now)
         if now - first < MK["delay_s"]:
             hot_cut["delay"] = hot_cut.get("delay", 0) + 1
             continue
-        av = agents.TEAM.verdict(m)
-        if agents.TEAM.mode() == "veto" and agents.TEAM.enabled():
+        av = agents.TEAM.verdict(m) if use_agents else None
+        if use_agents and agents.TEAM.mode() == "veto" and agents.TEAM.enabled():
             if av is None:
                 hot_cut["agents_wait"] = hot_cut.get("agents_wait", 0) + 1
                 continue                               # вердикта ещё нет — ждём следующий скан
@@ -2766,6 +2791,7 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
     size = MK["size"] if MK["size"] > 0 else position_size()
     for vol, m, d, fm in rows[:20]:
         feats = dict(market=MK["label"], mcap=d["mcap"], liquidity=d["liq"], age_h=d["age_h"], vol_h1=vol,
+                     curve_sol=fm.get("curve_sol"),
                      buys_h1=d.get("buys_h1"), sells_h1=d.get("sells_h1"), chg_h1=d.get("chg_h1"),
                      dex=d.get("dex"), buy_ratio=fm.get("buy_ratio"), unique_buyers_5m=fm.get("unique_buyers"),
                      rug_p=fm.get("rug_p"))
@@ -2797,11 +2823,11 @@ def screen_snipe(chain: str, s: UserSession | None = None) -> dict:
     return screen_market(chain, s, "snipe")
 
 def _screen_for(sess: "UserSession"):
-    """Скан по рынку бота (cfg «market» читается на каждом тике — переключение на лету):
-    mid / snipe идут через свой поток, всё прочее (fresh) — старый GMGN-скан."""
+    """Скан по рынку бота (рынок читается на каждом тике — переключение на лету):
+    mid / snipe / migration идут через свой поток, всё прочее (fresh) — старый GMGN-скан."""
     def run(c):
-        mkt = sess.bot.cfg.get("market")
-        if mkt in ("mid", "snipe"):
+        mkt = _bot_market(sess)
+        if mkt in bot.FLOW_MARKETS:
             return screen_market(c, sess, mkt)
         return screen_once(c, sess)
     return run
@@ -3196,7 +3222,7 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
     g = s.adapter_for(chain)
     mkt_liq, mkt_dex = 0.0, None                 # пул/площадка из пары DexScreener (для издержек)
     try:
-        if market in ("mid", "snipe"):           # свой поток: источник цены — как у watcher
+        if market in bot.FLOW_MARKETS:           # свой поток: источник цены — как у watcher
             raise RuntimeError("flow market: price from our stream")
         info = g.token_info(address)
         sec  = g.token_security(address)         # 已归一化安全快照（建仓基线，逃生 diff 用）
@@ -3207,7 +3233,7 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
         pr = {}
         # 25.10: мид-рынок покупает по цене СВОЕГО потока (DexScreener отстаёт на 30–60 с — на бумаге
         # это была покупка по устаревшей цене). Тикер — из кэша скана; DexScreener — только запасной.
-        fl = _flow_market(address, pumpcurve.sol_usd()) if market in ("mid", "snipe") and chain == "sol" else None
+        fl = _flow_market(address, pumpcurve.sol_usd()) if market in bot.FLOW_MARKETS and chain == "sol" else None
         if fl:
             cached = (_MID_DEX.get(address) or (0, None))[1] or {}
             info = dict(symbol=cached.get("sym") or (pumpflow.FLOW.metrics(address, 60) or {}).get("symbol")
@@ -3235,9 +3261,9 @@ def do_buy(chain: str, address: str, size_sol: float, s: UserSession | None = No
                  top10=sec.get("top10", 0.0))
     symbol = sanitize(info.get("symbol", ""))
     try:
-        if market in ("mid", "snipe") and info.get("price"):
+        if market in bot.FLOW_MARKETS and info.get("price"):
             entry_price = _f(info["price"])          # свой поток (или Dex-пара, если потока нет)
-        elif market in ("mid", "snipe"):
+        elif market in bot.FLOW_MARKETS:
             raise RuntimeError("flow market: entry from DexScreener")
         else:
             entry_price = g.token_price(address)     # 建仓价（逃生监控算涨跌基准）
@@ -3537,7 +3563,7 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         log("SELL", p["symbol"], f"{s.mode} closed PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=p.get("size_sol", 0.0), address=p.get("address"), fraction=1.0,
                  attrib=attrib, hold_min=hold_min, pnl_gross=pnl_gross, cost_sol=cost_sol,
-                 costed=costed, live=bool(p.get("live")),
+                 costed=costed, live=bool(p.get("live")), market=p.get("market"),
                  strategy=p.get("strategy"), risk_preset=p.get("risk_preset"), by=p.get("by")),
             mode=s.mode, pubkey=s.pubkey)
         s.positions.pop(idx)
@@ -3550,7 +3576,7 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
         log("SELL", p["symbol"], f"{s.mode} partial {pct}% PnL {pnl:+.1%}{tag}",
             dict(pnl=pnl, size_sol=sold_sol, address=p.get("address"), fraction=frac,
                  attrib=attrib, hold_min=hold_min, pnl_gross=pnl_gross, cost_sol=cost_sol,
-                 costed=costed, live=bool(p.get("live")),
+                 costed=costed, live=bool(p.get("live")), market=p.get("market"),
                  strategy=p.get("strategy"), risk_preset=p.get("risk_preset"), by=p.get("by")),
             mode=s.mode, pubkey=s.pubkey)
     s.save_positions()
@@ -4518,12 +4544,16 @@ def _bot_buy_fn(sess: UserSession):
         if mode != "n3":                           # n1/n2: не меньше минимума (фикс-издержки)
             size_sol = max(size_sol, min(CFG["bot_min_per_trade_sol"], cap))
         size_sol = round(size_sol, 4)
-        _mkt = sess.bot.cfg.get("market")
-        flow_mkt = _mkt in ("mid", "snipe")          # mid/snipe идут через свой поток, не GMGN
+        _mkt = _bot_market(sess)
+        flow_mkt = _mkt in bot.FLOW_MARKETS          # mid/snipe/migration идут через свой поток, не GMGN
         # протухшие рыночные данные (GMGN в бане/кулдауне) → не входим по старой цене/метрикам
         age = None if flow_mkt else MK.trending_age(chain)
         if age is not None and age > BOT_MAX_DATA_AGE_S:
             msg = f"stale market data {age:.0f}s > {BOT_MAX_DATA_AGE_S:.0f}s"
+            log("BUY_BLOCK", address[:8], msg, mode=sess.mode, pubkey=sess.pubkey)
+            raise HTTPException(409, msg)
+        if _mkt == "migration" and sess.mode == "LIVE":   # обкатка: на истории в минусе — только бумага
+            msg = "Migration bot is paper-only for now"
             log("BUY_BLOCK", address[:8], msg, mode=sess.mode, pubkey=sess.pubkey)
             raise HTTPException(409, msg)
         # кулдаун перезахода: только что вышли из этого CA → бот не перекупает его же
@@ -4681,8 +4711,8 @@ def api_bot_config(c: BotConfigIn, x_wallet: str | None = WalletHeader, x_auth: 
         raise HTTPException(400, "mode: n1 | n2 | n3")
     if "poll_s" in patch:                          # 0/минус = busy-loop по GMGN (бан IP)
         patch["poll_s"] = max(5.0, float(patch["poll_s"]))
-    if "market" in patch and patch["market"] not in ("mid", "snipe", "fresh"):
-        raise HTTPException(400, "market: mid | snipe | fresh")
+    if "market" in patch and patch["market"] not in (*bot.FLOW_MARKETS, "fresh"):
+        raise HTTPException(400, "market: mid | snipe | migration | fresh")
     if "max_dump_pct" in patch:
         patch["max_dump_pct"] = max(0.0, min(100.0, float(patch["max_dump_pct"])))
     if "max_new_per_tick" in patch:
