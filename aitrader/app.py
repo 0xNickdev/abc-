@@ -2535,8 +2535,11 @@ BRK_ACTIVE_BUYERS = int(os.getenv("ABC_BRK_ACTIVE_BUYERS", "3") or 0)
 # не доходили (модель рагов ~80%, скачок на запуске, рост за час). Бот бумажный и нужен для статистики,
 # поэтому ТОЛЬКО ему: модель рагов на ступень мягче, скачок на запуске 4× судим у токенов моложе 4 ч
 # (старше — 20×, как у HOTBOT), рост за час до 3000% (пробой после сильного часа — его сценарий).
-BRK_RUG_THR_ADD = float(os.getenv("ABC_BRK_RUG_THR_ADD", "0.05") or 0)
-BRK_HOT = dict(chg_h1_max=float(os.getenv("ABC_BRK_CHG_H1_MAX", "3000") or 3000),
+# 12.11 вечер: за сутки 0 сделок (до проверки пробоя дошло 13 раз из 1987 проходов) → порог модели рагов
+# у Breakout ≈0.25 и скачок на запуске только экстремальный (20×) при любом возрасте. Бумага, ради статистики.
+BRK_RUG_THR_ADD = float(os.getenv("ABC_BRK_RUG_THR_ADD", "0.18") or 0)
+BRK_HOT = dict(launch_x10s_max=float(os.getenv("ABC_BRK_LAUNCH_X10S_MAX", "20") or 0),
+               chg_h1_max=float(os.getenv("ABC_BRK_CHG_H1_MAX", "3000") or 3000),
                launch_young_s=float(os.getenv("ABC_BRK_LAUNCH_YOUNG_S", "14400") or 0),
                launch_x10s_old_max=float(os.getenv("ABC_BRK_LAUNCH_X10S_OLD_MAX", "20") or 0))
 

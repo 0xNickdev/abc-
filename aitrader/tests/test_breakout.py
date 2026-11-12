@@ -290,6 +290,6 @@ def test_breakout_filter_overrides_leave_mid_untouched(monkeypatch):
     old, young = dict(launch_x10s=6, age_s=5 * 3600), dict(launch_x10s=6, age_s=3600)
     assert appmod._hotbot_rules({}, old).startswith("launch_x10s")            # основной бот режет любой возраст
     assert appmod._hotbot_rules({}, old, over=over) is None                   # Breakout: старше 4 ч — до 20×
-    assert appmod._hotbot_rules({}, young, over=over).startswith("launch_x10s")
+    assert appmod._hotbot_rules({}, young, over=over) is None                 # 12.11: у Breakout только экстремальный 20×
+    assert appmod._hotbot_rules({}, dict(launch_x10s=25, age_s=3600), over=over).startswith("launch_x10s")
     assert appmod._hotbot_rules({}, dict(launch_x10s=25, age_s=5 * 3600), over=over).startswith("launch_x10s")
-    assert appmod._hotbot_rules({}, dict(launch_x10s=6), over=over).startswith("launch_x10s")   # возраст неизвестен — строго
