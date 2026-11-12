@@ -275,3 +275,21 @@ def test_fit_score_shadow():
     assert 40 < appmod._fit_score(dict(clean, dev_supply_pct=10, crash_1m_max_pct=20, top10_supply_pct=40, holders_obs=100, lp_mc_ratio=0.05)) < 60
     assert appmod._fit_score(dict(dev_supply_pct=3)) is None                          # мало признаков — не оцениваем
     assert appmod.FIT_MIN == 0                                                        # по умолчанию входа не режет
+
+
+def test_breakout_filter_overrides_leave_mid_untouched(monkeypatch):
+    """12.11: мягче только у Breakout — рост за час, скачок на запуске у старых токенов, модель рагов."""
+    import app as appmod
+    monkeypatch.setitem(appmod.HOT, "launch_x10s_max", 4.0)
+    monkeypatch.setitem(appmod.HOT, "chg_h1_max", 500.0)
+    over = appmod._markets()["breakout"]["hot"]
+    assert "hot" not in appmod._markets()["mid"] and not appmod._markets()["mid"].get("rug_thr_add")
+    assert appmod._markets()["breakout"]["rug_thr_add"] > 0
+    assert appmod._hotbot_rules(dict(chg_h1=900), {}).startswith("chg_h1")
+    assert appmod._hotbot_rules(dict(chg_h1=900), {}, over=over) is None
+    old, young = dict(launch_x10s=6, age_s=5 * 3600), dict(launch_x10s=6, age_s=3600)
+    assert appmod._hotbot_rules({}, old).startswith("launch_x10s")            # основной бот режет любой возраст
+    assert appmod._hotbot_rules({}, old, over=over) is None                   # Breakout: старше 4 ч — до 20×
+    assert appmod._hotbot_rules({}, young, over=over).startswith("launch_x10s")
+    assert appmod._hotbot_rules({}, dict(launch_x10s=25, age_s=5 * 3600), over=over).startswith("launch_x10s")
+    assert appmod._hotbot_rules({}, dict(launch_x10s=6), over=over).startswith("launch_x10s")   # возраст неизвестен — строго

@@ -2531,6 +2531,14 @@ BRK_MAX_UP_PCT = float(os.getenv("ABC_BRK_MAX_UP_PCT", "8") or 0)
 BRK_LAST_SWAP_S = float(os.getenv("ABC_BRK_LAST_SWAP_S", "15") or 15)
 BRK_BUCKETS = int(os.getenv("ABC_BRK_BUCKETS", "9") or 0)
 BRK_ACTIVE_BUYERS = int(os.getenv("ABC_BRK_ACTIVE_BUYERS", "3") or 0)
+# 12.11: за 12 ч после ужесточения фильтров Breakout не сделал ни одной сделки — до условия пробоя токены
+# не доходили (модель рагов ~80%, скачок на запуске, рост за час). Бот бумажный и нужен для статистики,
+# поэтому ТОЛЬКО ему: модель рагов на ступень мягче, скачок на запуске 4× судим у токенов моложе 4 ч
+# (старше — 20×, как у HOTBOT), рост за час до 3000% (пробой после сильного часа — его сценарий).
+BRK_RUG_THR_ADD = float(os.getenv("ABC_BRK_RUG_THR_ADD", "0.05") or 0)
+BRK_HOT = dict(chg_h1_max=float(os.getenv("ABC_BRK_CHG_H1_MAX", "3000") or 3000),
+               launch_young_s=float(os.getenv("ABC_BRK_LAUNCH_YOUNG_S", "14400") or 0),
+               launch_x10s_old_max=float(os.getenv("ABC_BRK_LAUNCH_X10S_OLD_MAX", "20") or 0))
 
 def _markets() -> dict:
     """Профили рынков для общего сканера. Читаются на каждом тике (переключение на лету)."""
@@ -2548,6 +2556,7 @@ def _markets() -> dict:
         # пробое тихого диапазона при живой торговле; без задержки входа.
         breakout=dict(min_mcap=MID_MIN_MCAP, max_mcap=MID_MAX_MCAP, min_liq=MID_MIN_LIQ, max_age_h=MID_MAX_AGE_H,
                       delay_s=0.0, size=MID_SIZE_SOL, label="breakout", strat="Breakout", tag="BRK",
+                      rug_thr_add=BRK_RUG_THR_ADD, hot=BRK_HOT,
                       breakout=dict(minutes=BRK_MINUTES, range_pct=BRK_RANGE_PCT, buyers=BRK_BUYERS, max_up=BRK_MAX_UP_PCT),
                       active=dict(last_swap_s=BRK_LAST_SWAP_S, buckets=BRK_BUCKETS, buyers=BRK_ACTIVE_BUYERS)))
 
@@ -2641,9 +2650,11 @@ def _brand_ticker(sym: str | None, name: str | None = None) -> bool:
             return True
     return False
 
-def _hotbot_rules(d: dict, snap: dict, fund: dict | None = None, uniq_h1: int | None = None) -> str | None:
-    """Причина отказа по правилам HOTBOT или None (прошёл). d — DexScreener, snap — entry_snapshot потока."""
-    h, f = HOT, fund or {}
+def _hotbot_rules(d: dict, snap: dict, fund: dict | None = None, uniq_h1: int | None = None,
+                  over: dict | None = None) -> str | None:
+    """Причина отказа по правилам HOTBOT или None (прошёл). d — DexScreener, snap — entry_snapshot потока.
+    over — поправки порогов для отдельного рынка (Breakout), общий HOT не меняют."""
+    h, f = (dict(HOT, **over) if over else HOT), fund or {}
     def num(v):
         try:
             return None if v is None else float(v)
@@ -2658,8 +2669,12 @@ def _hotbot_rules(d: dict, snap: dict, fund: dict | None = None, uniq_h1: int | 
     b, sl = d.get("buys_h1"), d.get("sells_h1")
     if b is not None and sl and b / sl < h["buy_sell_min"]:
         return f"buy/sell {b / sl:.2f}"
+    lx = h["launch_x10s_max"]                           # скачок на запуске: у «старых» токенов — мягкий порог
+    age_l = num(snap.get("age_s"))
+    if h.get("launch_young_s") and age_l is not None and age_l >= h["launch_young_s"]:
+        lx = h.get("launch_x10s_old_max") or float("inf")
     checks = (("dd_from_high_pct", ">=", h["dd_max"]), ("crash_1m_max_pct", ">=", h["crash_1m_max"]),
-              ("launch_x10s", ">=", h["launch_x10s_max"]), ("dev_supply_pct", ">=", h["dev_max"]),
+              ("launch_x10s", ">=", lx), ("dev_supply_pct", ">=", h["dev_max"]),
               ("launch_bundle_pct", ">=", h["insiders_max"]), ("sniper_supply_pct", ">=", h["snipers_max"]),
               ("holders_obs", "<", h["holders_min"]), ("dev_prev_rugs", ">", h["dev_rugs_max"]))
     for k, op, lim in checks:
@@ -2782,7 +2797,7 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
         rug = rugmodel.score(dexd or d, snap)          # модель обучена на полях DexScreener — им и кормим
         thr = rugmodel.threshold()
         if thr is not None:
-            thr += RUG_THR_ADD                        # ослабить/ужесточить модель рагов на входе (env)
+            thr += RUG_THR_ADD + float(MK.get("rug_thr_add") or 0)   # ослабить/ужесточить модель рагов (env, рынок)
         if rug is not None and thr is not None and rug >= thr:
             rug_cut += 1
             continue
@@ -2805,7 +2820,7 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
         h1 = pumpflow.FLOW.metrics(m, 3600) or {}
         climb = pumpflow.FLOW.climb(m) if hasattr(pumpflow.FLOW, "climb") else None
         why = _hotbot_rules(d, dict(snap, climb=climb), fund,
-                            h1.get("unique_buyers") if h1.get("full") else None)
+                            h1.get("unique_buyers") if h1.get("full") else None, over=MK.get("hot"))
         if why:
             k = why.split()[0]
             hot_cut[k] = hot_cut.get(k, 0) + 1
