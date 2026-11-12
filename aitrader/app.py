@@ -2538,7 +2538,13 @@ BRK_ACTIVE_BUYERS = int(os.getenv("ABC_BRK_ACTIVE_BUYERS", "3") or 0)
 # 12.11 вечер: за сутки 0 сделок (до проверки пробоя дошло 13 раз из 1987 проходов) → порог модели рагов
 # у Breakout ≈0.25 и скачок на запуске только экстремальный (20×) при любом возрасте. Бумага, ради статистики.
 BRK_RUG_THR_ADD = float(os.getenv("ABC_BRK_RUG_THR_ADD", "0.18") or 0)
-BRK_HOT = dict(launch_x10s_max=float(os.getenv("ABC_BRK_LAUNCH_X10S_MAX", "20") or 0),
+# 13.11: и после этого 0 сделок за 7 ч — молодые (<12 ч) в этой капе почти все режутся (раг-модель, рост за
+# час >3000%, обвал за минуту). Рынок HOTBOT по умолчанию — токены СТАРШЕ суток: открываем Breakout возраст
+# до 30 дней и капу до $5M (молодые остаются под теми же фильтрами; возраст пишется в сделку — сравним).
+BRK_MAX_AGE_H = float(os.getenv("ABC_BRK_MAX_AGE_H", "720") or 720)
+BRK_MAX_MCAP = float(os.getenv("ABC_BRK_MAX_MCAP", "5000000") or 5000000)
+BRK_HOT = dict(flow_age_max_s=float(os.getenv("ABC_BRK_AGE_MAX_S", "0") or 0),
+               launch_x10s_max=float(os.getenv("ABC_BRK_LAUNCH_X10S_MAX", "20") or 0),
                chg_h1_max=float(os.getenv("ABC_BRK_CHG_H1_MAX", "3000") or 3000),
                launch_young_s=float(os.getenv("ABC_BRK_LAUNCH_YOUNG_S", "14400") or 0),
                launch_x10s_old_max=float(os.getenv("ABC_BRK_LAUNCH_X10S_OLD_MAX", "20") or 0))
@@ -2557,7 +2563,8 @@ def _markets() -> dict:
                        curve_min_sol=MIG_MIN_CURVE_SOL, curve_max_sol=MIG_MAX_CURVE_SOL),
         # Breakout (11.11, вход SniperBot у HOTBOT): тот же рынок и фильтры, что mid, но покупка только на
         # пробое тихого диапазона при живой торговле; без задержки входа.
-        breakout=dict(min_mcap=MID_MIN_MCAP, max_mcap=MID_MAX_MCAP, min_liq=MID_MIN_LIQ, max_age_h=MID_MAX_AGE_H,
+        breakout=dict(min_mcap=MID_MIN_MCAP, max_mcap=max(MID_MAX_MCAP, BRK_MAX_MCAP), min_liq=MID_MIN_LIQ,
+                      max_age_h=max(MID_MAX_AGE_H, BRK_MAX_AGE_H),
                       delay_s=0.0, size=MID_SIZE_SOL, label="breakout", strat="Breakout", tag="BRK",
                       rug_thr_add=BRK_RUG_THR_ADD, hot=BRK_HOT,
                       breakout=dict(minutes=BRK_MINUTES, range_pct=BRK_RANGE_PCT, buyers=BRK_BUYERS, max_up=BRK_MAX_UP_PCT),

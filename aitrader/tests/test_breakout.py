@@ -293,3 +293,14 @@ def test_breakout_filter_overrides_leave_mid_untouched(monkeypatch):
     assert appmod._hotbot_rules({}, young, over=over) is None                 # 12.11: у Breakout только экстремальный 20×
     assert appmod._hotbot_rules({}, dict(launch_x10s=25, age_s=3600), over=over).startswith("launch_x10s")
     assert appmod._hotbot_rules({}, dict(launch_x10s=25, age_s=5 * 3600), over=over).startswith("launch_x10s")
+
+
+def test_breakout_takes_old_tokens():
+    """13.11: Breakout смотрит и токены старше суток (рынок HOTBOT); основной бот — прежний возраст."""
+    import app as appmod
+    mk = appmod._markets()
+    assert mk["breakout"]["max_age_h"] >= 720 and mk["breakout"]["max_mcap"] >= 5_000_000
+    assert mk["mid"]["max_age_h"] == appmod.MID_MAX_AGE_H
+    old = {"age_s": 3 * 86400, "5m": dict(uniq=30, br=0.8, net=5.0, b=20)}
+    assert (appmod._hotbot_rules({}, old) or "").startswith("age")
+    assert appmod._hotbot_rules({}, old, over=mk["breakout"]["hot"]) is None
