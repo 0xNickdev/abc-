@@ -2766,6 +2766,8 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
     info = _mid_dex(cands)
     rows = []
     rug_cut = 0
+    rug_ps: list[float] = []                           # оценки отсечённых моделью — в журнал (насколько далеко от порога)
+    rug_thr = None
     hot_cut: dict[str, int] = {}
     now = time.time()
     if len(_MID_FIRST) > 20000:
@@ -2798,8 +2800,10 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
         thr = rugmodel.threshold()
         if thr is not None:
             thr += RUG_THR_ADD + float(MK.get("rug_thr_add") or 0)   # ослабить/ужесточить модель рагов (env, рынок)
+        rug_thr = thr
         if rug is not None and thr is not None and rug >= thr:
             rug_cut += 1
+            rug_ps.append(float(rug))
             continue
         fm = dict(fm, rug_p=rug)
         if _rugged_symbol(d.get("sym") or fm.get("symbol")):
@@ -2919,7 +2923,8 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
                                             abc=dict(triggered=True, score=float(vol), strategy=MK["strat"])),
                               exec=None))
     hot = ", ".join(f"{k} {v}" for k, v in sorted(hot_cut.items(), key=lambda kv: -kv[1])) or "0"
-    log("SCREEN", MK["tag"], f"{MK['label']} market: {len(cands)} in flow → {len(rows)} pass (rug model cut {rug_cut}; HOTBOT cut {hot}) → {len(decisions)} candidates",
+    rugs = (f" p {min(rug_ps):.2f}–{max(rug_ps):.2f} thr {rug_thr:.2f}" if rug_ps and rug_thr is not None else "")
+    log("SCREEN", MK["tag"], f"{MK['label']} market: {len(cands)} in flow → {len(rows)} pass (rug model cut {rug_cut}{rugs}; HOTBOT cut {hot}) → {len(decisions)} candidates",
         mode=s.mode, pubkey=s.pubkey)
     positions = [dict(address=p["address"], severity=0) for p in s.positions]
     return dict(decisions=decisions, portfolio=_portfolio(s), positions=positions, mode=s.mode)
