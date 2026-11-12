@@ -2744,6 +2744,11 @@ def _fit_score(snap: dict) -> float | None:
         got.append(max(0.0, min(1.0, (v - zero) / (full - zero))))
     return round(100 * sum(got) / len(got), 1) if len(got) >= 4 else None
 
+# 13.11: FANDEMON куплен на первом проходе после рестарта (ровно через 600 с) и слит за минуту на −57% —
+# обвал за минуту/просадка/оборот за час считаются по свечам потока и за 10 мин не успевают накопиться.
+# Ждём полчаса живых данных после рестарта (env ABC_FLOW_WARM_S).
+FLOW_WARM_S = float(os.getenv("ABC_FLOW_WARM_S", "1800") or 0)
+
 def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") -> dict:
     """Общий сканер своего потока для рынков mid и snipe (профиль из _markets): кандидаты из
     потока (PumpSwap + venues), сверка DexScreener, фильтр спроса 5м + rug-щит, цена потока ≈ Dex.
@@ -2803,7 +2808,7 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
         # 23.10: сразу после рестарта поток пуст → признаки модели пустые → раги проходили (KFC −99%,
         # SHAVCOIN −56% в первую минуту). Без живых данных потока по токену — не входим.
         snap = pumpflow.FLOW.entry_snapshot(m) or {}
-        if flow_warm < 600 or not ((snap.get("5m") or {}).get("b")):
+        if flow_warm < FLOW_WARM_S or not ((snap.get("5m") or {}).get("b")):
             continue
         # модель рагов (17.10): отсекаем 30% самых рискованных — раги у молодых 4.6% → 0.2%
         rug = rugmodel.score(dexd or d, snap)          # модель обучена на полях DexScreener — им и кормим
