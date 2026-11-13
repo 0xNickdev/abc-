@@ -3538,6 +3538,9 @@ def _buy_commit(s: UserSession, chain: str, address: str, size_sol: float, symbo
 # LOSS_REENTRY_HOURS (дамп/раг не «откупают» на автопилоте). Человек руками — как хочет.
 REENTRY_COOLDOWN_MIN = float(os.getenv("ABC_REENTRY_COOLDOWN_MIN", "30") or 30)
 LOSS_REENTRY_HOURS = float(os.getenv("ABC_LOSS_REENTRY_HOURS", "24") or 24)
+# 13.11 (юзер): DOGGLE — 4 входа подряд, 4 выхода в минус без роста. После ЛЮБОГО убыточного выхода
+# в этот токен не возвращаемся N часов (0 = выкл; раньше запрет был только после стопа ≤ −20%).
+MINUS_REENTRY_HOURS = float(os.getenv("ABC_MINUS_REENTRY_HOURS", "12") or 0)
 _RECENT_EXITS: dict[tuple[str, str], tuple[float, float]] = {}   # (pubkey, addr) -> (wall ts, pnl)
 RISK_STATE_PATH = OUT_DIR / "risk_state.json"
 
@@ -3622,6 +3625,8 @@ def _reentry_block(pubkey: str, address: str) -> str | None:
     ago_min = (time.time() - ex[0]) / 60.0
     if ex[1] <= -0.20 and ago_min < LOSS_REENTRY_HOURS * 60:
         return f"re-entry blocked {LOSS_REENTRY_HOURS:.0f}h after {ex[1]:+.0%} stop"
+    if ex[1] < 0 and ago_min < MINUS_REENTRY_HOURS * 60:
+        return f"re-entry blocked {MINUS_REENTRY_HOURS:.0f}h after losing exit {ex[1]:+.0%}"
     if ago_min < REENTRY_COOLDOWN_MIN:
         return f"re-entry cooldown {ago_min:.0f}m < {REENTRY_COOLDOWN_MIN:.0f}m after exit"
     return None

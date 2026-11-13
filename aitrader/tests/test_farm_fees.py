@@ -90,6 +90,10 @@ class TestReentryCooldown:
         assert "cooldown" in appmod._reentry_block("PK", "CA2")     # свежий выход: 30 мин
         assert appmod._reentry_block("PK", "CA3") is None           # кулдаун истёк
         assert appmod._reentry_block("OTHER", "CA1") is None        # чужая сессия не блокируется
+        appmod._RECENT_EXITS[("PK", "CA4")] = (appmod.time.time() - 3600, -0.06)  # час назад, выход в минус без роста
+        appmod._RECENT_EXITS[("PK", "CA5")] = (appmod.time.time() - 13 * 3600, -0.06)
+        assert "losing exit" in appmod._reentry_block("PK", "CA4")  # 13.11: после любого минуса — 12 ч
+        assert appmod._reentry_block("PK", "CA5") is None
 
     def test_full_close_records_exit(self, monkeypatch, tmp_path):
         monkeypatch.setattr(appmod, "LOG_PATH", tmp_path / "j.jsonl")
