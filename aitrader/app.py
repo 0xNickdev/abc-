@@ -2528,8 +2528,8 @@ BRK_MINUTES = int(os.getenv("ABC_BRK_MINUTES", "10") or 10)
 BRK_RANGE_PCT = float(os.getenv("ABC_BRK_RANGE_PCT", "10") or 10)
 BRK_BUYERS = int(os.getenv("ABC_BRK_BUYERS", "3") or 0)
 BRK_MAX_UP_PCT = float(os.getenv("ABC_BRK_MAX_UP_PCT", "8") or 0)
-BRK_LAST_SWAP_S = float(os.getenv("ABC_BRK_LAST_SWAP_S", "15") or 15)
-BRK_BUCKETS = int(os.getenv("ABC_BRK_BUCKETS", "9") or 0)
+BRK_LAST_SWAP_S = float(os.getenv("ABC_BRK_LAST_SWAP_S", "30") or 30)
+BRK_BUCKETS = int(os.getenv("ABC_BRK_BUCKETS", "6") or 0)
 BRK_ACTIVE_BUYERS = int(os.getenv("ABC_BRK_ACTIVE_BUYERS", "3") or 0)
 # 12.11: за 12 ч после ужесточения фильтров Breakout не сделал ни одной сделки — до условия пробоя токены
 # не доходили (модель рагов ~80%, скачок на запуске, рост за час). Бот бумажный и нужен для статистики,

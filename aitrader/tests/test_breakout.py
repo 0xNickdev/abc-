@@ -110,7 +110,7 @@ class TestPlans:
 
 def test_breakout_profile_and_strategy(tmp_path, monkeypatch):
     mk = appmod._markets()["breakout"]
-    assert mk["breakout"]["minutes"] == 10 and mk["active"]["buckets"] == 9 and mk["delay_s"] == 0.0
+    assert mk["breakout"]["minutes"] == 10 and mk["active"]["buckets"] == 6 and mk["delay_s"] == 0.0
     assert mk["min_mcap"] == appmod._markets()["mid"]["min_mcap"]
     assert strategy.get("breakout_v1")["market"] == "breakout" and "breakout" in bot.PAPER_ONLY_MARKETS
     from fastapi import HTTPException
