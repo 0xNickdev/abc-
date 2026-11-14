@@ -3713,7 +3713,9 @@ def do_sell(address: str, fraction: float = 1.0, reason: str | None = None,
                  strategy=p.get("strategy"), risk_preset=p.get("risk_preset"), by=p.get("by")),
             mode=s.mode, pubkey=s.pubkey)
     s.save_positions()
-    if s.pubkey == DEFAULT_PUBKEY or p.get("live") or s.mode == "LIVE":
+    # 14.11: full — и у бумажных кошельковых сессий: иначе их запрет перезахода терялся при рестарте
+    # (NIO перекуплен через 11 ч после минуса при запрете 12 ч).
+    if s.pubkey == DEFAULT_PUBKEY or p.get("live") or s.mode == "LIVE" or full:
         save_risk_state()
     return dict(ok=True, symbol=p["symbol"], fraction=frac, closed=full)
 
