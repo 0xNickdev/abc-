@@ -2547,7 +2547,10 @@ BRK_HOT = dict(flow_age_max_s=float(os.getenv("ABC_BRK_AGE_MAX_S", "0") or 0),
                launch_x10s_max=float(os.getenv("ABC_BRK_LAUNCH_X10S_MAX", "20") or 0),
                chg_h1_max=float(os.getenv("ABC_BRK_CHG_H1_MAX", "3000") or 3000),
                launch_young_s=float(os.getenv("ABC_BRK_LAUNCH_YOUNG_S", "14400") or 0),
-               launch_x10s_old_max=float(os.getenv("ABC_BRK_LAUNCH_X10S_OLD_MAX", "20") or 0))
+               launch_x10s_old_max=float(os.getenv("ABC_BRK_LAUNCH_X10S_OLD_MAX", "20") or 0),
+               # 18.11: за 13–18.11 всего 8 сделок, с 16.11 ни одной — «12 покупателей за 5 мин» режет ~20 из ~30
+               # оставшихся токенов на каждом скане и спорит с «тихим диапазоном». Пробой сам требует 3 за минуту.
+               flow_uniq5m_min=float(os.getenv("ABC_BRK_UNIQ5M_MIN", "5") or 0))
 
 def _markets() -> dict:
     """Профили рынков для общего сканера. Читаются на каждом тике (переключение на лету)."""

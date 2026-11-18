@@ -304,3 +304,15 @@ def test_breakout_takes_old_tokens():
     old = {"age_s": 3 * 86400, "5m": dict(uniq=30, br=0.8, net=5.0, b=20)}
     assert (appmod._hotbot_rules({}, old) or "").startswith("age")
     assert appmod._hotbot_rules({}, old, over=mk["breakout"]["hot"]) is None
+
+
+def test_breakout_uniq5m_softer_than_mid(monkeypatch):
+    """18.11: «12 покупателей за 5 мин» только у основного бота; у Breakout порог 5."""
+    import app as appmod
+    monkeypatch.setitem(appmod.HOT, "flow_uniq5m_min", 12.0)
+    over = appmod._markets()["breakout"]["hot"]
+    assert over["flow_uniq5m_min"] == 5
+    quiet = {"5m": dict(uniq=7, br=0.9, net=5.0)}
+    assert appmod._hotbot_rules({}, quiet).startswith("uniq5m")
+    assert not (appmod._hotbot_rules({}, quiet, over=over) or "").startswith("uniq5m")
+    assert appmod._hotbot_rules({}, {"5m": dict(uniq=4, br=0.9, net=5.0)}, over=over).startswith("uniq5m")
