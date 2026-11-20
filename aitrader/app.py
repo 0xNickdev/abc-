@@ -2550,7 +2550,11 @@ BRK_HOT = dict(flow_age_max_s=float(os.getenv("ABC_BRK_AGE_MAX_S", "0") or 0),
                launch_x10s_old_max=float(os.getenv("ABC_BRK_LAUNCH_X10S_OLD_MAX", "20") or 0),
                # 18.11: за 13–18.11 всего 8 сделок, с 16.11 ни одной — «12 покупателей за 5 мин» режет ~20 из ~30
                # оставшихся токенов на каждом скане и спорит с «тихим диапазоном». Пробой сам требует 3 за минуту.
-               flow_uniq5m_min=float(os.getenv("ABC_BRK_UNIQ5M_MIN", "5") or 0))
+               flow_uniq5m_min=float(os.getenv("ABC_BRK_UNIQ5M_MIN", "5") or 0),
+               # 20.11: за 40 ч после этого 1 сделка — освободившиеся токены режут доля покупок и приток за
+               # 5 мин (весь фильтр спроса ждёт оживления ДО пробоя). У Breakout они выключены (0), env вернёт.
+               flow_br5m_min=float(os.getenv("ABC_BRK_BR5M_MIN", "0") or 0),
+               flow_net5m_min=float(os.getenv("ABC_BRK_NET5M_MIN", "0") or 0))
 
 def _markets() -> dict:
     """Профили рынков для общего сканера. Читаются на каждом тике (переключение на лету)."""

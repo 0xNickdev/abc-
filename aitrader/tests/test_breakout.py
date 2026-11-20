@@ -316,3 +316,17 @@ def test_breakout_uniq5m_softer_than_mid(monkeypatch):
     assert appmod._hotbot_rules({}, quiet).startswith("uniq5m")
     assert not (appmod._hotbot_rules({}, quiet, over=over) or "").startswith("uniq5m")
     assert appmod._hotbot_rules({}, {"5m": dict(uniq=4, br=0.9, net=5.0)}, over=over).startswith("uniq5m")
+
+
+def test_breakout_drops_buy_ratio_and_net_inflow(monkeypatch):
+    """20.11: доля покупок и приток за 5 мин режут только основной бот; у Breakout выключены."""
+    import app as appmod
+    monkeypatch.setitem(appmod.HOT, "flow_uniq5m_min", 12.0)
+    monkeypatch.setitem(appmod.HOT, "flow_br5m_min", 0.68)
+    monkeypatch.setitem(appmod.HOT, "flow_net5m_min", 1.5)
+    over = appmod._markets()["breakout"]["hot"]
+    weak = {"5m": dict(uniq=20, br=0.4, net=-2.0)}
+    assert appmod._hotbot_rules({}, weak).startswith("br5m")
+    assert appmod._hotbot_rules({}, {"5m": dict(uniq=20, br=0.9, net=-2.0)}).startswith("net5m")
+    got = appmod._hotbot_rules({}, weak, over=over) or ""
+    assert not got.startswith(("br5m", "net5m", "uniq5m"))
