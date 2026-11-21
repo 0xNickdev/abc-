@@ -2940,8 +2940,12 @@ def screen_market(chain: str, s: UserSession | None = None, mkt: str = "mid") ->
             feats.update(agent_decision=av["decision"], agent_pwin=av.get("p_win"), agent_conf=av["confidence"], agent_risk=av["risk"],
                          agent_bull=av["bull"]["score"], agent_bear=av["bear"]["score"])
         sym = sanitize(fm.get("symbol") or m[:6])
+        # 21.11: у бота есть свой тихий порог доли покупок (0.65) при выборе входа — после отключения br5m
+        # у Breakout он молча съел 13 из 15 проходов. Рынок со своим порогом br5m передаёт его и туда.
+        own_br = ({"min_buy_ratio": MK["hot"]["flow_br5m_min"]}
+                  if "flow_br5m_min" in (MK.get("hot") or {}) else {})
         decisions.append(dict(decision=dict(symbol=sym, address=m, action="ACTION", reason=f"{MK['label']} market: HOTBOT rules",
-                                            size_sol=size, priority=100, features=feats,
+                                            size_sol=size, priority=100, features=feats, **own_br,
                                             abc=dict(triggered=True, score=float(vol), strategy=MK["strat"])),
                               exec=None))
     hot = ", ".join(f"{k} {v}" for k, v in sorted(hot_cut.items(), key=lambda kv: -kv[1])) or "0"

@@ -228,7 +228,8 @@ def select_entries(decisions, held_addrs, n_open, max_concurrent, max_new,
         if min_priority and float(dec.get("priority", 0)) < min_priority:
             continue                                  # качество: пропускаем слабые сетапы
         feats = dec.get("features") or {}
-        if min_buy_ratio and float(feats.get("buy_ratio", 0) or 0) < min_buy_ratio:
+        mbr = dec.get("min_buy_ratio", min_buy_ratio)   # рынок может задать свой порог (Breakout: 0 = выкл)
+        if mbr and float(feats.get("buy_ratio", 0) or 0) < mbr:
             continue                                  # перевес только при доминировании покупок
         if max_sm_confluence and int(feats.get("sm_confluence", 0) or 0) > max_sm_confluence:
             continue                                  # «все умники уже внутри» — поздний вход

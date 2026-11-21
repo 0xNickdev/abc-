@@ -330,3 +330,14 @@ def test_breakout_drops_buy_ratio_and_net_inflow(monkeypatch):
     assert appmod._hotbot_rules({}, {"5m": dict(uniq=20, br=0.9, net=-2.0)}).startswith("net5m")
     got = appmod._hotbot_rules({}, weak, over=over) or ""
     assert not got.startswith(("br5m", "net5m", "uniq5m"))
+
+
+def test_market_own_buy_ratio_overrides_bot_gate():
+    """21.11: тихий порог бота по доле покупок не режет рынок, который задал свой (Breakout: 0)."""
+    import bot
+    def dec(**kw):
+        return dict(decision=dict(address="aa", action="ACTION", size_sol=0.3, symbol="A",
+                                  features=dict(buy_ratio=0.4), abc=dict(triggered=True, score=1.0), **kw))
+    kw = dict(held_addrs=set(), n_open=0, max_concurrent=3, max_new=2, min_buy_ratio=0.65)
+    assert bot.select_entries([dec()], **kw) == []
+    assert bot.select_entries([dec(min_buy_ratio=0.0)], **kw) == [("aa", 0.3, "A")]
